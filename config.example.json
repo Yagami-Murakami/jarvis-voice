@@ -1,0 +1,40 @@
+{
+  "model_path": "/opt/jarvis-voice/vosk-model-small-pt-0.3",
+  "audio_device": "plughw:CARD=ME6S,DEV=0",
+  "computers": [
+    {
+      "id": "fusion",
+      "name": "Fusion (Windows)",
+      "aliases": [
+        "fusion",
+        "o fusion"
+      ],
+      "ip": "192.0.2.10",
+      "mac": "02:00:00:00:00:10",
+      "broadcast": "255.255.255.255",
+      "probe_ports": [
+        22,
+        3389
+      ],
+      "ssh_target": "usuario@192.0.2.10",
+      "shutdown_command": "shutdown /s /t 0"
+    },
+    {
+      "id": "ananuke",
+      "name": "Ananuke (Debian)",
+      "aliases": [
+        "ana no que",
+        "computador dois",
+        "o computador dois"
+      ],
+      "ip": "192.0.2.11",
+      "mac": "02:00:00:00:00:11",
+      "broadcast": "255.255.255.255",
+      "probe_ports": [
+        22
+      ],
+      "ssh_target": "usuario@192.0.2.11",
+      "shutdown_command": "sudo -n /usr/sbin/poweroff"
+    }
+  ]
+}
