@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="620" viewBox="0 0 1440 620" role="img" aria-label="Arquitetura Jarvis Voice: Microfone USB, ALSA, Vosk, Jarvis, Wake-on-LAN e SSH">
+<defs>
+  <linearGradient id="paper" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#f8fbff"/><stop offset="1" stop-color="#eaf5ff"/></linearGradient>
+  <linearGradient id="brain" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#11365e"/><stop offset="1" stop-color="#116aa1"/></linearGradient>
+  <filter id="shadow" x="-20%" y="-20%" width="150%" height="150%"><feDropShadow dx="0" dy="7" stdDeviation="9" flood-color="#083a70" flood-opacity=".13"/></filter>
+  <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#245783"/></marker>
+</defs>
+<rect width="1440" height="620" rx="24" fill="url(#paper)"/>
+<path d="M0 75C120 15 205 80 296 0H0Z" fill="#dcecff"/><path d="M1440 543c-120 0-190 70-280 77h280z" fill="#cfe8ff"/>
+<g font-family="DejaVu Sans, Arial, sans-serif">
+ <text x="720" y="67" text-anchor="middle" font-size="45" font-weight="800" fill="#102c4c">Como funciona o <tspan fill="#117de0">Jarvis Voice</tspan></text>
+ <text x="720" y="107" text-anchor="middle" font-size="22" fill="#566d83">Comandos de voz processados localmente • Liga por WoL • Desliga com confirmação por SSH</text>
+</g>
+<g filter="url(#shadow)">
+ <rect x="32" y="183" width="192" height="248" rx="23" fill="#fff" stroke="#c9daed" stroke-width="2"/>
+ <rect x="251" y="183" width="192" height="248" rx="23" fill="#fff" stroke="#c9daed" stroke-width="2"/>
+ <rect x="470" y="183" width="192" height="248" rx="23" fill="#fff" stroke="#c9daed" stroke-width="2"/>
+ <rect x="688" y="183" width="201" height="248" rx="23" fill="url(#brain)" stroke="#42c5ff" stroke-width="4"/>
+ <rect x="1010" y="153" width="176" height="112" rx="20" fill="#e0f1ff" stroke="#b6dbf6" stroke-width="2"/>
+ <rect x="1010" y="332" width="176" height="112" rx="20" fill="#efe7ff" stroke="#d2c0f1" stroke-width="2"/>
+ <rect x="1210" y="153" width="196" height="112" rx="20" fill="#daf8e8" stroke="#99e4bc" stroke-width="2"/>
+ <rect x="1210" y="332" width="196" height="112" rx="20" fill="#ffe4e8" stroke="#f2b1bd" stroke-width="2"/>
+</g>
+<g stroke="#245783" stroke-width="5" fill="none" marker-end="url(#arrow)">
+ <path d="M224 307h22"/><path d="M443 307h22"/><path d="M662 307h21"/>
+ <path d="M890 305h51v-95h65"/><path d="M941 305v82h65"/>
+ <path d="M1186 210h20"/><path d="M1186 388h20"/>
+</g>
+<!-- mic -->
+<g transform="translate(128 264)" fill="none" stroke="#1b5d8c" stroke-width="8" stroke-linecap="round">
+ <rect x="-22" y="-49" width="44" height="84" rx="22" fill="#d6eeff"/><path d="M-44 0v18c0 31 18 49 44 49s44-18 44-49V0M0 68v18M-30 86h60"/>
+</g>
+<!-- terminal capture -->
+<g transform="translate(347 257)" stroke="#cfeefb" stroke-width="5" fill="none" stroke-linecap="round">
+ <rect x="-57" y="-38" width="114" height="83" rx="12" fill="#173e62" stroke="none"/>
+ <path d="M-35 -3l17 13-17 13M-6 23h17" />
+ <path d="M-32 35v-17M-18 35v-28M-3 35v-13M12 35v-36M27 35v-17M42 35v-27" stroke="#2aebdb" stroke-width="4"/>
+</g>
+<!-- speech -->
+<g transform="translate(566 268)">
+ <path d="M-60 -39a20 20 0 0 1 20-20h80a20 20 0 0 1 20 20v47a20 20 0 0 1-20 20h-42l-30 25v-25h-8a20 20 0 0 1-20-20Z" fill="#1482e9"/>
+ <path d="M-31 -3v-14M-16 0v-27M0 5v-41M16 0v-27M31 -3v-14" stroke="#fff" stroke-width="6" stroke-linecap="round"/>
+</g>
+<!-- jarvis -->
+<g transform="translate(787 264)">
+ <circle r="60" fill="#0c4b7a" stroke="#51d9f9" stroke-width="4"/>
+ <path d="M-19 -37c-31 6-31 55-1 66 2 20 29 24 38 4 30-1 34-46 11-61-9-23-41-24-48-9Z" fill="none" stroke="#85ebff" stroke-width="5"/>
+ <g stroke="#b7f3ff" stroke-width="4" fill="none"><path d="M-12 -25v19l-18 17M9 -30v22l22 19M-2 15v24"/></g>
+ <g fill="#41e0ef"><circle cx="-30" cy="11" r="6"/><circle cx="31" cy="11" r="6"/><circle cx="-2" cy="39" r="6"/></g>
+</g>
+<g font-family="DejaVu Sans, Arial, sans-serif" text-anchor="middle">
+ <text x="128" y="366" font-size="22" font-weight="700" fill="#153855">Microfone USB</text>
+ <text x="347" y="366" font-size="22" font-weight="700" fill="#153855">ALSA / arecord</text>
+ <text x="566" y="366" font-size="23" font-weight="700" fill="#153855">Vosk</text>
+ <text x="566" y="395" font-size="15" fill="#647a8b">Fala para texto</text>
+ <text x="787" y="366" font-size="24" font-weight="800" fill="#fff">Jarvis Voice</text>
+ <text x="1098" y="202" font-size="21" font-weight="800" fill="#184b7c">Wake-on-LAN</text>
+ <text x="1098" y="231" font-size="16" fill="#476f8e">Pacote mágico</text>
+ <text x="1098" y="379" font-size="24" font-weight="800" fill="#433a7b">SSH</text>
+ <text x="1098" y="408" font-size="16" fill="#68608d">Comando remoto</text>
+ <text x="1308" y="203" font-size="27" font-weight="800" fill="#147b4a">Ligar PCs</text>
+ <text x="1308" y="231" font-size="17" fill="#428b62">⚡ Energia</text>
+ <text x="1308" y="381" font-size="25" font-weight="800" fill="#b43f51">Desligar PCs</text>
+ <text x="1308" y="411" font-size="16" fill="#995668">Após confirmação</text>
+</g>
+<rect x="222" y="487" width="996" height="78" rx="30" fill="#10375e"/>
+<g font-family="DejaVu Sans, Arial, sans-serif" text-anchor="middle"><text x="720" y="519" font-size="21" font-weight="700" fill="#e5f9ff">🎙️ Palavra de ativação: "Assistente"</text><text x="720" y="548" font-size="19" fill="#9fe4fc">Desligamento exige confirmação explícita e pode ser simulado</text></g>
+</svg>
