@@ -29,7 +29,7 @@ Assistente de voz local em português brasileiro para ligar computadores por **W
 
 ## 🧠 Arquitetura
 
-![Diagrama de arquitetura do Jarvis Voice: microfone, ALSA, Vosk, comandos Wake-on-LAN e SSH](assets/arquitetura.svg)
+![Diagrama de arquitetura do Jarvis Voice: microfone, ALSA, Vosk, comandos Wake-on-LAN e SSH](assets/arquitetura.webp)
 
 <details>
 <summary>📐 Ver arquitetura simplificada em texto</summary>
