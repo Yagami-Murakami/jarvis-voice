@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="450" viewBox="0 0 1500 450" role="img" aria-label="Jarvis Voice - assistente de voz offline para Wake-on-LAN e SSH">
+<defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#07152c"/><stop offset=".56" stop-color="#0a2442"/><stop offset="1" stop-color="#071429"/></linearGradient>
+  <linearGradient id="cyan" x1="0" x2="1" y1="0" y2="0"><stop stop-color="#23cbff"/><stop offset="1" stop-color="#43f3ea"/></linearGradient>
+  <filter id="glow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="9" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  <pattern id="grid" width="54" height="54" patternUnits="userSpaceOnUse"><path d="M54 0H0V54" fill="none" stroke="#23678f" stroke-width="1" opacity=".14"/></pattern>
+</defs>
+<rect width="1500" height="450" rx="24" fill="url(#bg)"/>
+<rect width="1500" height="450" rx="24" fill="url(#grid)"/>
+<g fill="none" stroke="#0da4da" stroke-width="3" opacity=".45"><path d="M0 75h76l38-40h120"/><circle cx="234" cy="35" r="6" fill="#24dcfa"/><path d="M1500 68h-80l-47 47h-94"/><circle cx="1279" cy="115" r="6" fill="#24dcfa"/><path d="M0 374h135l40-35h90"/><path d="M1500 359h-130l-55 42h-80"/></g>
+<g transform="translate(192 215)">
+  <circle r="120" fill="#0a294c" stroke="#0f92d8" stroke-width="7" opacity=".7"/>
+  <circle r="99" fill="none" stroke="url(#cyan)" stroke-width="8" filter="url(#glow)"/>
+  <rect x="-24" y="-63" width="48" height="94" rx="24" fill="none" stroke="#e0faff" stroke-width="11"/>
+  <path d="M-53 -8v18c0 45 25 66 53 66S53 55 53 10V-8M0 77v34M-35 111h70" fill="none" stroke="#b3f5ff" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="0" cy="-13" r="18" fill="#09c3f1" opacity=".38"/>
+</g>
+<g font-family="DejaVu Sans, Arial, sans-serif">
+  <text x="358" y="155" font-size="81" font-weight="800" fill="#f6fbff">Jarvis <tspan fill="#40e9f4">Voice</tspan></text>
+  <rect x="361" y="176" width="675" height="4" rx="2" fill="url(#cyan)" opacity=".72"/>
+  <text x="361" y="229" font-size="28" fill="#dbeefa">Assistente de voz offline para</text>
+  <text x="361" y="270" font-size="31" font-weight="700" fill="#f2fbff">Wake-on-LAN <tspan fill="#50e7f5">+ </tspan>SSH</text>
+  <text x="362" y="320" font-size="21" fill="#98d0e9">Reconhecimento local em português • Controle de PCs na rede</text>
+  <rect x="361" y="353" width="620" height="49" rx="24" fill="#0d3455" stroke="#19bce8" stroke-width="2"/>
+  <text x="403" y="385" font-size="22" fill="#e2faff" font-weight="600">Vosk  <tspan fill="#35e7ef">•</tspan>  ALSA  <tspan fill="#35e7ef">•</tspan>  Python  <tspan fill="#35e7ef">•</tspan>  systemd</text>
+</g>
+<g transform="translate(1157 182)" fill="none" stroke="#5aebff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="-40" y="-43" width="80" height="68" rx="9" stroke="#caeffc" stroke-width="6"/>
+  <path d="M0 -28v38M-20 -8a27 27 0 1 0 40 0" filter="url(#glow)"/>
+  <path d="M-15 38v22m-26 0h82" stroke-width="5"/>
+</g>
+<path d="M1220 173h70" stroke="#39d8f4" stroke-width="5" stroke-linecap="round"/>
+<g transform="translate(1330 182)" fill="none" stroke="#6bedff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="-41" y="-43" width="92" height="76" rx="12"/>
+  <path d="M-39 -19h88M-17 -2l16 12-16 12M8 22h21" stroke-width="5"/>
+  <circle cx="-25" cy="-30" r="3" fill="#6bedff" stroke="none"/><circle cx="-14" cy="-30" r="3" fill="#6bedff" stroke="none"/>
+</g>
+</svg>
