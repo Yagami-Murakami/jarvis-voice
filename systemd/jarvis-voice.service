@@ -1,0 +1,26 @@
+[Unit]
+Description=Jarvis Voice - controle por voz (exemplo)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tuninho
+Group=tuninho
+SupplementaryGroups=audio
+WorkingDirectory=/opt/jarvis-voice
+
+Environment=PYTHONUNBUFFERED=1
+Environment=JARVIS_CONFIG=/opt/jarvis-voice/config.json
+Environment=JARVIS_WOL_REAL=0
+Environment=JARVIS_SSH_REAL=0
+
+ExecStart=/opt/jarvis-voice/venv/bin/python -u /opt/jarvis-voice/jarvis_voice.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
