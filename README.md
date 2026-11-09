@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/jarvis-voice-banner.svg" alt="Jarvis Voice — Assistente de voz offline para Wake-on-LAN e SSH" width="100%" />
+  <img src="assets/banner-jarvis-voice.webp" alt="Jarvis Voice — Assistente de voz offline para Wake-on-LAN e SSH" width="100%" />
 </p>
 
 # 🎙️ Jarvis Voice
