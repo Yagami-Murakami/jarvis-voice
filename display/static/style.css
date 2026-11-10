@@ -184,7 +184,7 @@ html, body {
    ========================================================================== */
 .clock-card {
   text-align: center;
-  padding-top: 10px;
+  padding-top: 14px;
 }
 
 .time-wrapper {
@@ -195,26 +195,27 @@ html, body {
 }
 
 .time-unit {
-  font-size: 3.8rem;
+  font-size: 5.5rem;
   font-weight: 300;
   color: #ffffff;
-  letter-spacing: 2px;
+  line-height: 1.08;
+  letter-spacing: 1px;
   text-shadow: 0 0 15px rgba(0, 229, 255, 0.4);
 }
 
 .time-colon {
-  font-size: 3.2rem;
+  font-size: 4.4rem;
   font-weight: 300;
   color: var(--cyan-primary);
-  margin: 0 2px;
+  margin: 0 3px;
   animation: blink 2s infinite;
 }
 
 .time-seconds {
-  font-size: 1.6rem;
-  font-weight: 400;
+  font-size: 1.9rem;
+  font-weight: 500;
   color: var(--cyan-primary);
-  margin-left: 6px;
+  margin-left: 7px;
 }
 
 @keyframes blink {
@@ -223,17 +224,18 @@ html, body {
 }
 
 .date-display {
-  font-size: 0.95rem;
+  font-size: 1.1rem;
   font-weight: 500;
+  line-height: 1.35;
   color: var(--text-muted);
-  margin-top: 4px;
+  margin-top: 8px;
   text-transform: capitalize;
 }
 
 /* Reator arc suave de fundo */
 .ambient-reactor {
-  width: 130px;
-  height: 130px;
+  width: 160px;
+  height: 160px;
   margin: 0 auto;
   position: relative;
   display: flex;
@@ -261,8 +263,8 @@ html, body {
 }
 
 .reactor-core {
-  width: 50px;
-  height: 50px;
+  width: 96px;
+  height: 96px;
   border-radius: 50%;
   background: radial-gradient(circle, rgba(0, 229, 255, 0.25) 0%, rgba(0, 119, 255, 0.05) 70%, transparent 100%);
   display: flex;
@@ -272,10 +274,19 @@ html, body {
 }
 
 .ambient-label {
-  font-size: 0.55rem;
-  letter-spacing: 1px;
-  color: rgba(0, 229, 255, 0.7);
+  display: block;
+  width: 100%;
+  text-align: center;
+  font-size: 0.82rem;
+  line-height: 1.35;
+  letter-spacing: 0.9px;
+  color: rgba(0, 229, 255, 0.85);
   font-weight: 700;
+  white-space: nowrap;
+}
+.ambient-label-line {
+  display: block;
+  margin-top: 3px;
 }
 
 @keyframes rotateClockwise {
@@ -298,7 +309,8 @@ html, body {
   background: var(--bg-card);
   border: 1px solid var(--border-glow);
   border-radius: 14px;
-  padding: 12px 14px;
+  min-height: 96px;
+  padding: 16px 16px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -309,12 +321,13 @@ html, body {
 .weather-main {
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex-shrink: 0;
+  gap: 10px;
 }
 
 .weather-icon {
-  width: 44px;
-  height: 44px;
+  width: 58px;
+  height: 58px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -326,24 +339,26 @@ html, body {
 }
 
 .weather-temp {
-  font-size: 2.2rem;
+  font-size: 3.2rem;
   font-weight: 600;
   color: var(--text-main);
   line-height: 1;
 }
 
 .weather-unit {
-  font-size: 1.1rem;
+  font-size: 1.4rem;
   color: var(--cyan-primary);
   margin-left: 2px;
 }
 
 .weather-info {
   text-align: right;
+  min-width: 0;
+  padding-left: 7px;
 }
 
 .weather-desc {
-  font-size: 0.88rem;
+  font-size: 1.05rem;
   font-weight: 500;
   color: var(--text-main);
 }
@@ -352,8 +367,8 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 3px;
-  font-size: 0.72rem;
+  gap: 4px;
+  font-size: 0.84rem;
   color: var(--text-muted);
   margin-top: 3px;
 }
@@ -651,6 +666,21 @@ html, body {
   text-align: center;
 }
 
+/* Ajustes para telas estreitas sem sobrepor relógio, clima ou texto. */
+@media (max-width: 390px) {
+  .time-unit { font-size: 4.7rem; }
+  .time-colon { font-size: 3.9rem; }
+  .time-seconds { font-size: 1.55rem; }
+  .date-display { font-size: 0.96rem; }
+  .weather-card { min-height: 86px; padding: 12px; }
+  .weather-main { gap: 5px; }
+  .weather-icon { width: 48px; height: 48px; }
+  .weather-temp { font-size: 2.6rem; }
+  .weather-unit { font-size: 1.1rem; }
+  .weather-desc { font-size: 0.9rem; }
+  .weather-location { font-size: 0.7rem; }
+}
+
 /* ==========================================================================
    ADAPTAÇÃO HORIZONTAL / LANDSCAPE
    ========================================================================== */
@@ -662,8 +692,20 @@ html, body {
   }
   .weather-card {
     margin-bottom: 0;
-    max-width: 240px;
+    max-width: 270px;
+    min-height: 82px;
+    padding: 10px;
   }
+  .time-unit { font-size: 3.8rem; }
+  .time-colon { font-size: 3.2rem; }
+  .time-seconds { font-size: 1.3rem; }
+  .date-display { font-size: 0.85rem; }
+  .ambient-reactor { width: 118px; height: 118px; }
+  .reactor-core { width: 80px; height: 80px; }
+  .ambient-label { font-size: 0.72rem; }
+  .weather-icon { width: 44px; height: 44px; }
+  .weather-temp { font-size: 2.4rem; }
+  .weather-unit { font-size: 1rem; }
   .view-active {
     flex-direction: row;
     gap: 32px;
