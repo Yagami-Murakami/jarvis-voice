@@ -717,3 +717,131 @@ html, body {
     gap: 32px;
   }
 }
+
+
+/* ===== REVISÃO VISUAL V3 — TELA DE REPOUSO EM RETRATO ===== */
+/* Escala baseada na largura útil: legível tanto no LG-X230DSV (480×854)
+   quanto em capturas verticais ampliadas. Sem clamp() para Android 6. */
+@media (orientation: portrait) {
+  .view-idle {
+    justify-content: space-around;
+    align-items: stretch;
+    padding: 3vh 3vw 2.5vh;
+  }
+
+  .clock-card {
+    width: 100%;
+    padding-top: 0;
+    flex-shrink: 0;
+  }
+  .time-wrapper {
+    white-space: nowrap;
+    align-items: baseline;
+    line-height: 1;
+  }
+  .time-unit {
+    font-size: 17.5vw;
+    line-height: 1.05;
+    font-weight: 300;
+    letter-spacing: 0;
+  }
+  .time-colon {
+    font-size: 14vw;
+    margin: 0 0.3vw;
+  }
+  .time-seconds {
+    font-size: 5.2vw;
+    font-weight: 600;
+    margin-left: 1vw;
+  }
+  .date-display {
+    font-size: 3.1vw;
+    line-height: 1.3;
+    margin-top: 1vh;
+  }
+
+  .ambient-reactor {
+    width: 35vw;
+    height: 35vw;
+    max-width: 380px;
+    max-height: 380px;
+    flex: 0 0 auto;
+  }
+  .reactor-core {
+    width: 23vw;
+    height: 23vw;
+    max-width: 245px;
+    max-height: 245px;
+  }
+  .ambient-label {
+    display: block;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    text-align: center;
+    font-size: 2.8vw;
+    letter-spacing: 0.09vw;
+    line-height: 1.3;
+    font-weight: 700;
+    white-space: nowrap;
+    transform: none;
+  }
+  .ambient-label-line {
+    display: block;
+    margin-top: 0.2vw;
+    text-align: center;
+  }
+
+  .weather-card {
+    width: 100%;
+    min-height: 19vw;
+    margin-bottom: 0;
+    padding: 2.6vw 2.8vw;
+    border-radius: 2.4vw;
+    flex-shrink: 0;
+  }
+  .weather-main {
+    gap: 1.5vw;
+  }
+  .weather-icon {
+    width: 9vw;
+    height: 9vw;
+    flex-shrink: 0;
+  }
+  .weather-temp {
+    font-size: 10vw;
+    line-height: 1;
+    font-weight: 650;
+  }
+  .weather-unit {
+    font-size: 3.6vw;
+    margin-left: 0.3vw;
+  }
+  .weather-info {
+    max-width: 48%;
+    padding-left: 1vw;
+    text-align: right;
+  }
+  .weather-desc {
+    font-size: 3vw;
+    line-height: 1.2;
+    font-weight: 600;
+  }
+  .weather-location {
+    font-size: 2.15vw;
+    line-height: 1.25;
+    margin-top: 0.5vw;
+  }
+  .weather-location svg {
+    width: 2.6vw;
+    height: 2.6vw;
+    flex-shrink: 0;
+  }
+}
+
+/* Evita estouro em telas muito baixas quando estiverem em retrato. */
+@media (orientation: portrait) and (max-height: 620px) {
+  .view-idle { justify-content: space-between; padding-top: 1vh; }
+  .ambient-reactor { width: 27vw; height: 27vw; }
+  .reactor-core { width: 19vw; height: 19vw; }
+}
