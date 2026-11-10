@@ -333,6 +333,12 @@ html, body {
   justify-content: center;
 }
 
+.weather-icon svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
 .weather-temp-wrap {
   display: flex;
   align-items: baseline;
