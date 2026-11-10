@@ -2,12 +2,17 @@ package com.jarvis.display;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.DialogInterface;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.util.Log;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
@@ -23,15 +28,19 @@ public class MainActivity extends Activity implements
         View.OnSystemUiVisibilityChangeListener,
         DialogInterface.OnClickListener {
 
+    private static final String TAG = "JarvisMainActivity";
     private static final String PREFS_NAME = "JarvisDisplayPrefs";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String DEFAULT_SERVER_URL = "http://192.168.0.131:8080";
+    public static final String ACTION_PLAY_SOUND = "com.jarvis.display.ACTION_PLAY_SOUND";
 
     private WebView webView;
     private SharedPreferences prefs;
+    private SoundManager soundManager;
     private final Handler handler = new Handler();
     private boolean isErrorState = false;
     private EditText configInput;
+    private SoundReceiver soundReceiver;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -41,6 +50,7 @@ public class MainActivity extends Activity implements
         requestWindowFeature(Window.FEATURE_NO_TITLE);
 
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        soundManager = new SoundManager(this);
 
         FrameLayout layout = new FrameLayout(this);
         layout.setBackgroundColor(Color.parseColor("#050b14"));
@@ -52,8 +62,27 @@ public class MainActivity extends Activity implements
 
         configurarImersao();
         configurarWebView();
+        registrarReceiver();
 
         carregarPagina();
+    }
+
+    private void registrarReceiver() {
+        soundReceiver = new SoundReceiver(soundManager);
+        IntentFilter filter = new IntentFilter(ACTION_PLAY_SOUND);
+        registerReceiver(soundReceiver, filter);
+        Log.i(TAG, "SoundReceiver registrado para action: " + ACTION_PLAY_SOUND);
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (soundReceiver != null) {
+            try {
+                unregisterReceiver(soundReceiver);
+            } catch (Exception ignored) {
+            }
+        }
     }
 
     public void configurarImersao() {
@@ -89,7 +118,7 @@ public class MainActivity extends Activity implements
 
         webView.setWebChromeClient(new WebChromeClient());
         webView.setWebViewClient(new CustomWebViewClient(this));
-        webView.addJavascriptInterface(new WebAppInterface(this), "AndroidHost");
+        webView.addJavascriptInterface(new WebAppInterface(this, soundManager), "AndroidHost");
         webView.setOnLongClickListener(this);
     }
 
@@ -165,7 +194,7 @@ public class MainActivity extends Activity implements
                 }
             }
         } else if (which == DialogInterface.BUTTON_NEUTRAL) {
-            new WebAppInterface(this).openAndroidSettings();
+            new WebAppInterface(this, soundManager).openAndroidSettings();
         }
     }
 
@@ -221,6 +250,47 @@ public class MainActivity extends Activity implements
         @Override
         public void run() {
             activity.checkAndRetry();
+        }
+    }
+
+    private static class SoundReceiver extends BroadcastReceiver {
+        private final SoundManager soundManager;
+
+        SoundReceiver(SoundManager soundManager) {
+            this.soundManager = soundManager;
+        }
+
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (intent == null || !ACTION_PLAY_SOUND.equals(intent.getAction())) {
+                return;
+            }
+
+            if (intent.hasExtra("volume")) {
+                float vol = intent.getFloatExtra("volume", 0.85f);
+                soundManager.setVolume(vol);
+            }
+
+            if (intent.hasExtra("mute")) {
+                boolean mute = intent.getBooleanExtra("mute", false);
+                soundManager.setMuted(mute);
+            }
+
+            String type = intent.getStringExtra("type");
+            if (type == null) {
+                type = "wake";
+            }
+
+            Log.i(TAG, "Broadcast recebido para reproduzir som: " + type);
+            if ("wake".equalsIgnoreCase(type)) {
+                soundManager.playWakeSound();
+            } else if ("success".equalsIgnoreCase(type)) {
+                soundManager.playSuccessSound();
+            } else if ("confirm".equalsIgnoreCase(type)) {
+                soundManager.playConfirmSound();
+            } else if ("cancel".equalsIgnoreCase(type) || "timeout".equalsIgnoreCase(type)) {
+                soundManager.playCancelSound();
+            }
         }
     }
 }

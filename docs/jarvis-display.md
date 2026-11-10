@@ -83,10 +83,24 @@ O sistema opera de forma desacoplada do motor de reconhecimento de voz e do pain
 - **Proteção de Painel (Burn-in Prevention):** translação cíclica em coordenadas submilimétricas (`translate3d`) a cada 60 segundos para evitar retenção de imagem em painéis LCD/OLED.
 
 ### 3.3 Aplicativo Kiosk Android (`display/android/`)
-- **Pacote:** `com.jarvis.display` (apenas 21 KB).
+- **Pacote:** `com.jarvis.display` (apenas 29 KB).
 - **Home Launcher:** configurado como aplicativo padrão de tela inicial do Android.
 - **Imersão Sticky:** esconde as barras de navegação e de status do Android; restaura automaticamente se o usuário tocar nas bordas.
+- **Reprodução Sonora Nativa (SoundManager):** síntese de áudio PCM direta em memória via `AudioTrack` (16-bit Mono @ 44.1 kHz). Contorna 100% as restrições de autoplay e suspensão de áudio do Android WebView, permitindo reprodução instantânea pelo alto-falante físico do aparelho mesmo logo após a inicialização, sem requerer toque na tela.
+- **Proteção Anti-Repetição (Debounce):** trava de 1,5s para evitar que múltiplos reconhecimentos concorrentes disparem o som repetidamente.
+- **Comandos de Teste via ADB:**
+  ```bash
+  # Tocar som de ativação diretamente
+  adb shell am broadcast -a com.jarvis.display.ACTION_PLAY_SOUND --es type wake
+
+  # Testar ajuste de volume (0.0 a 1.0)
+  adb shell am broadcast -a com.jarvis.display.ACTION_PLAY_SOUND --ef volume 0.85
+
+  # Silenciar ou reativar áudio
+  adb shell am broadcast -a com.jarvis.display.ACTION_PLAY_SOUND --ez mute true
+  ```
 - **Configuração Fácil:** um toque longo de 2 segundos na tela abre o diálogo para alterar a URL do servidor sem precisar conectar o celular ao computador.
+
 
 ---
 

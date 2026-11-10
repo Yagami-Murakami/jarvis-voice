@@ -114,22 +114,42 @@
 
   var sons = {
     wake: function () {
+      if (window.AndroidHost && window.AndroidHost.playWakeSound) {
+        window.AndroidHost.playWakeSound();
+        return;
+      }
       emitirTom(523.25, "sine", 0.12, 0, 0.2); // C5
       emitirTom(783.99, "sine", 0.25, 0.1, 0.2); // G5
     },
     success: function () {
+      if (window.AndroidHost && window.AndroidHost.playSuccessSound) {
+        window.AndroidHost.playSuccessSound();
+        return;
+      }
       emitirTom(659.25, "sine", 0.1, 0, 0.18); // E5
       emitirTom(880.00, "sine", 0.25, 0.09, 0.18); // A5
     },
     confirm: function () {
+      if (window.AndroidHost && window.AndroidHost.playConfirmSound) {
+        window.AndroidHost.playConfirmSound();
+        return;
+      }
       emitirTom(392.00, "sine", 0.15, 0, 0.2); // G4
       emitirTom(523.25, "triangle", 0.3, 0.15, 0.2); // C5
     },
     cancel: function () {
+      if (window.AndroidHost && window.AndroidHost.playCancelSound) {
+        window.AndroidHost.playCancelSound();
+        return;
+      }
       emitirTom(440.00, "sine", 0.12, 0, 0.15); // A4
       emitirTom(329.63, "sine", 0.2, 0.1, 0.15); // E4
     },
     error: function () {
+      if (window.AndroidHost && window.AndroidHost.playCancelSound) {
+        window.AndroidHost.playCancelSound();
+        return;
+      }
       emitirTom(220.00, "square", 0.15, 0, 0.12);
       emitirTom(196.00, "square", 0.2, 0.12, 0.12);
     },
@@ -387,6 +407,9 @@
     state.soundEnabled = !state.soundEnabled;
     dom.iconSoundOn.classList.toggle("hidden", !state.soundEnabled);
     dom.iconSoundOff.classList.toggle("hidden", state.soundEnabled);
+    if (window.AndroidHost && window.AndroidHost.setSoundMuted) {
+      window.AndroidHost.setSoundMuted(!state.soundEnabled);
+    }
     if (state.soundEnabled) {
       sons.wake();
     }

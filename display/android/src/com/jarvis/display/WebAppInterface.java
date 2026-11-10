@@ -11,11 +11,65 @@ import android.widget.Toast;
 
 public class WebAppInterface {
     private final MainActivity activity;
+    private final SoundManager soundManager;
     private final Handler mainHandler;
 
-    public WebAppInterface(MainActivity activity) {
+    public WebAppInterface(MainActivity activity, SoundManager soundManager) {
         this.activity = activity;
+        this.soundManager = soundManager;
         this.mainHandler = new Handler(Looper.getMainLooper());
+    }
+
+    @JavascriptInterface
+    public void playWakeSound() {
+        if (soundManager != null) {
+            soundManager.playWakeSound();
+        }
+    }
+
+    @JavascriptInterface
+    public void playSuccessSound() {
+        if (soundManager != null) {
+            soundManager.playSuccessSound();
+        }
+    }
+
+    @JavascriptInterface
+    public void playConfirmSound() {
+        if (soundManager != null) {
+            soundManager.playConfirmSound();
+        }
+    }
+
+    @JavascriptInterface
+    public void playCancelSound() {
+        if (soundManager != null) {
+            soundManager.playCancelSound();
+        }
+    }
+
+    @JavascriptInterface
+    public void setSoundMuted(boolean muted) {
+        if (soundManager != null) {
+            soundManager.setMuted(muted);
+        }
+    }
+
+    @JavascriptInterface
+    public boolean isSoundMuted() {
+        return soundManager != null && soundManager.isMuted();
+    }
+
+    @JavascriptInterface
+    public void setVolume(float volume) {
+        if (soundManager != null) {
+            soundManager.setVolume(volume);
+        }
+    }
+
+    @JavascriptInterface
+    public float getVolume() {
+        return soundManager != null ? soundManager.getVolume() : 0.85f;
     }
 
     @JavascriptInterface
