@@ -27,6 +27,8 @@ git diff --cached --quiet -- "$CSS" "$HTML" || fail "Alterações staged nos arq
 grep -q 'font-size: 5.5rem' "$CSS" || fail "CSS sem relógio ampliado; atualize a branch"
 grep -q 'font-size: 3.2rem' "$CSS" || fail "CSS sem temperatura ampliada; atualize a branch"
 grep -q 'SISTEMA<span class="ambient-label-line">ATIVO</span>' "$HTML" || fail "HTML sem texto central corrigido"
+grep -q 'REVISÃO VISUAL V3' "$CSS" || fail "CSS não é a revisão de escala V3; atualize a branch"
+grep -q 'style.css?v=20261110-visual3' "$HTML" || fail "HTML não aponta para a revisão V3"
 
 CSS_SHA="$(sha256sum "$CSS" | cut -d ' ' -f 1)"
 HTML_SHA="$(sha256sum "$HTML" | cut -d ' ' -f 1)"
