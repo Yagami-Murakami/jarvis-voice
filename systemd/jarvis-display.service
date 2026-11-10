@@ -1,7 +1,6 @@
 [Unit]
 Description=Jarvis Voice Display Server (Interface Visual Inteligente)
-After=network.target jarvis-voice.service
-Wants=jarvis-voice.service
+After=network.target
 
 [Service]
 Type=simple
