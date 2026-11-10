@@ -455,7 +455,7 @@ class JarvisDisplayHandler(BaseHTTPRequestHandler):
         url_parsed = urllib.parse.urlparse(self.path)
         caminho = url_parsed.path
 
-        if caminho == "/api/demo/trigger":
+        if caminho == "/api/demo/trigger" and getattr(self.server, "demo_mode", False):
             comprimento = int(self.headers.get("Content-Length", 0))
             corpo = self.rfile.read(comprimento).decode("utf-8") if comprimento > 0 else "{}"
             try:
@@ -574,7 +574,6 @@ class JarvisDisplayHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache, no-transform")
         self.send_header("Connection", "keep-alive")
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
 
         fila = self.server.display_state.registrar_ouvinte()
@@ -601,7 +600,6 @@ class JarvisDisplayHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(conteudo)))
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(conteudo)
@@ -668,6 +666,7 @@ def rodar_servidor():
     lon = cfg.get("weather_longitude", -43.2753)
 
     server = ThreadingHTTPServer((host, porta), JarvisDisplayHandler)
+    server.demo_mode = bool(modo_demo)
     server.display_state = JarvisDisplayState()
     server.weather_service = WeatherService(latitude=lat, longitude=lon)
 
