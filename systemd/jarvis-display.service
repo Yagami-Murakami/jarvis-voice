@@ -1,0 +1,17 @@
+[Unit]
+Description=Jarvis Voice Display Server (Interface Visual Inteligente)
+After=network.target jarvis-voice.service
+Wants=jarvis-voice.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/jarvis-voice/display
+ExecStart=/usr/bin/python3 /opt/jarvis-voice/display/server.py --port 8080 --host 0.0.0.0
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

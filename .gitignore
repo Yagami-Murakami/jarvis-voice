@@ -1,4 +1,7 @@
-# Configuração privada e ambiente
+# Android build artifacts
+display/android/build/
+display/android/bin/
+
 config.json
 .env
 .env.*

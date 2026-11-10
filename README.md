@@ -107,6 +107,19 @@ sudo journalctl -u jarvis-voice.service -f
 
 No ambiente original, o Fusion (Windows) e o Ananuke (Debian) foram ligados via WoL e desligados via SSH. O controle por voz foi validado com o microfone USB e iniciado como `jarvis-voice.service` no LXC 110.
 
+## 📱 Jarvis Voice Display (Central Visual Dedicada)
+
+Interface visual inteligente em tempo real desenvolvida para dispositivos móveis legados (como o smartphone Android **LG-X230DSV**).
+
+- 🕒 Relógio digital de alta precisão com data por extenso em português.
+- ⛅ Clima em tempo real com ícones dinâmicos e cache local inteligente (Open-Meteo).
+- 🎙️ Reação visual imediata à palavra de ativação *"Assistente"* com anéis pulsantes inspirados em assistentes modernos.
+- ⚡ Feedback instantâneo do envio de Wake-on-LAN e confirmações seguras de desligamento SSH.
+- 🛡️ Modo quiosque dedicado em tela cheia, tela sempre ativa e proteção contra *burn-in* por translação cíclica de pixels (*pixel-shifting*).
+- 🔊 Efeitos sonoros polifônicos leves via Web Audio API sintetizada.
+- 📖 Detalhes completos de compilação, APK Kiosk e integração em [docs/jarvis-display.md](docs/jarvis-display.md).
+
 ## 👨‍💻 Autor
+
 
 [**Yagami-Murakami**](https://github.com/Yagami-Murakami)

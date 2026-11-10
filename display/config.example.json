@@ -1,0 +1,11 @@
+{
+  "host": "0.0.0.0",
+  "port": 8080,
+  "systemd_unit": "jarvis-voice.service",
+  "demo_mode": false,
+  "weather_latitude": -22.6953,
+  "weather_longitude": -43.2753,
+  "weather_cache_ttl_seconds": 1200,
+  "location_name": "Santa Cruz da Serra, Duque de Caxias, RJ",
+  "timezone": "America/Sao_Paulo"
+}
