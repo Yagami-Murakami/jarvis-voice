@@ -342,9 +342,8 @@ class LgMicServer(threading.Thread):
                 logger.warning("Handshake rejeitado: comprimento de token inválido para %s", ip)
                 return
             token_bytes = self._ler_exato(sock, token_len)
-            token_str = token_bytes.decode("utf-8", errors="replace")
-
-            if not hmac.compare_digest(token_str, self.auth_token):
+            # Comparação de bytes em tempo constante; rejeita tokens inválidos.
+            if not hmac.compare_digest(token_bytes, self.auth_token.encode("utf-8")):
                 logger.warning("Autenticação rejeitada para cliente %s: token incorreto", ip)
                 sock.close()
                 return
