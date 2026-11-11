@@ -32,7 +32,7 @@ cat << 'DROPIN' > "$DEFINITIVO_CONF"
 Environment=PYTHONUNBUFFERED=1
 Environment=JARVIS_WOL_REAL=1
 Environment=JARVIS_SSH_REAL=1
-Environment=JARVIS_ALLOWED_REAL_TARGETS=fusion
+Environment=JARVIS_ALLOWED_REAL_TARGETS=fusion,ananuke
 Environment=JARVIS_REQUIRE_PERSISTENCE=1
 Environment=JARVIS_REQUIRE_ONE_SHOT_TOKEN=0
 RuntimeDirectory=jarvis
