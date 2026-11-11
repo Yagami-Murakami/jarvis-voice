@@ -46,6 +46,8 @@ cat << 'DROPIN' > /etc/systemd/system/jarvis-voice.service.d/zz-simulacao-etapa1
 Environment=JARVIS_WOL_REAL=0
 Environment=JARVIS_SSH_REAL=0
 Environment=JARVIS_REQUIRE_PERSISTENCE=1
+RuntimeDirectory=jarvis
+RuntimeDirectoryMode=0750
 DROPIN
 systemctl daemon-reload
 echo "OK (WoL=0, SSH=0, REQUIRE_PERSISTENCE=1)"
