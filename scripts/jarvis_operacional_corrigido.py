@@ -1519,11 +1519,14 @@ def iniciar_servicos(max_iteracoes=None):
         alvos_permitidos = [a.strip().lower() for a in os.getenv("JARVIS_ALLOWED_REAL_TARGETS", "").split(",") if a.strip()]
         print(f"ALVOS REAIS AUTORIZADOS: {','.join(alvos_permitidos) if alvos_permitidos else 'NENHUM (fail-closed)'}", flush=True)
     if ssh_real:
-        tok_ok, tok_info = verificar_token_one_shot("fusion", "desligar")
-        if tok_ok:
-            print(f"TOKEN ONE-SHOT SSH: ATIVO (id={tok_info.get('token_id')}, expira em {int(tok_info.get('expires_at', 0) - time.time())}s)", flush=True)
+        if token_one_shot_requerido():
+            tok_ok, tok_info = verificar_token_one_shot("fusion", "desligar")
+            if tok_ok:
+                print(f"TOKEN ONE-SHOT SSH: ATIVO (id={tok_info.get('token_id')}, expira em {int(tok_info.get('expires_at', 0) - time.time())}s)", flush=True)
+            else:
+                print(f"TOKEN ONE-SHOT SSH: INATIVO/AUSENTE ({tok_info}) - SSH REAL BLOQUEADO", flush=True)
         else:
-            print(f"TOKEN ONE-SHOT SSH: INATIVO/AUSENTE ({tok_info}) - SSH REAL BLOQUEADO", flush=True)
+            print("SSH REAL DEFINITIVO (Token One-Shot desativado via JARVIS_REQUIRE_ONE_SHOT_TOKEN=0)", flush=True)
     print("Fale 'assistente', pause, depois o comando.", flush=True)
 
     loop_principal_ativo.set()
