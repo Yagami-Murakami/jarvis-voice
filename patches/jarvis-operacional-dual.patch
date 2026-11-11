@@ -1,0 +1,247 @@
+--- jarvis-voice/scripts/jarvis_operacional_original.py	2026-11-10 22:53:39.181809835 -0300
++++ jarvis-voice/scripts/jarvis_operacional_proposta.py	2026-11-10 22:53:32.857751065 -0300
+@@ -10,8 +10,11 @@
+ 
+ # Carregar funcoes do painel existente
+ sys.path.insert(0, "/home/tuninho/homelab-panel")
++sys.path.insert(0, "/opt/jarvis-voice")
+ import app as painel
+ 
++from gateway.ipc_bus import DEFAULT_IPC_SOCKET, IpcEventListener
++
+ SetLogLevel(-1)
+ 
+ MODELO = "/opt/jarvis-voice/vosk-model-small-pt-0.3"
+@@ -46,12 +49,31 @@
+ )
+ 
+ estado = "espera"
+-limite = 0
++limite = 0.0
+ pendente = None
++ultima_ativacao = 0.0
++fonte_ativa = None
++
++# Fila unificada de intenções para ambos os microfones (ME6S + LG)
++fila_intencoes = queue.Queue(maxsize=32)
++
++# Cache de idempotência / deduplicação de ações
++acoes_recentes = {}
++lock_acoes = threading.Lock()
++
+ 
++def registrar_acao(acao, alvo):
++    with lock_acoes:
++        acoes_recentes[(acao, alvo)] = time.monotonic()
+ 
+-def processar(texto):
+-    global estado, limite, pendente
++
++def ja_executado_recentemente(acao, alvo, janela=3.5):
++    with lock_acoes:
++        return (time.monotonic() - acoes_recentes.get((acao, alvo), 0.0)) <= janela
++
++
++def processar(texto, fonte="me6s"):
++    global estado, limite, pendente, ultima_ativacao, fonte_ativa
+ 
+     agora = time.monotonic()
+ 
+@@ -59,25 +81,35 @@
+         print("Tempo esgotado.", flush=True)
+         estado = "espera"
+         pendente = None
++        fonte_ativa = None
+ 
+-    print("Ouvi:", texto, flush=True)
++    print(f"Ouvi [{fonte}]:", texto, flush=True)
+ 
+     if texto == "cancelar":
+         estado = "espera"
+         pendente = None
++        fonte_ativa = None
++        ultima_ativacao = 0.0
+         print("Cancelado.", flush=True)
+         return
+ 
+     if estado == "espera":
+         if texto == "assistente":
++            # Deduplicação de ativação simultânea entre os dois microfones
++            if (agora - ultima_ativacao) <= 2.0:
++                print(f"Ativacao deduplicada via {fonte} (ja ativo ha {agora - ultima_ativacao:.2f}s).", flush=True)
++                return
++
+             estado = "comando"
+             limite = agora + 12
+-            print("ATIVADO! Aguardando comando.", flush=True)
++            ultima_ativacao = agora
++            fonte_ativa = fonte
++            print(f"ATIVADO via {fonte}! Aguardando comando.", flush=True)
+         return
+ 
+     if estado == "comando":
+         if texto == "assistente":
+-            print("Ja ativado. Aguardando comando.", flush=True)
++            print(f"Ja ativado via {fonte_ativa}. Aguardando comando.", flush=True)
+             return
+ 
+         # Correcao restrita ao teste de reconhecimento
+@@ -99,6 +131,14 @@
+             if acessivel:
+                 print("Computador ja esta acessivel.", flush=True)
+             else:
++                # Deduplicação na camada de ação (idempotência do WoL)
++                if ja_executado_recentemente("ligar", alvo):
++                    print(f"WoL para {alvo} descartado por idempotencia.", flush=True)
++                    estado = "espera"
++                    fonte_ativa = None
++                    return
++
++                registrar_acao("ligar", alvo)
+                 if os.getenv("JARVIS_WOL_REAL") == "1":
+                     try:
+                         if not srv.get("mac"):
+@@ -123,8 +163,9 @@
+                     except Exception as erro:
+                         print("Falha no Wake-on-LAN:", erro, flush=True)
+                 else:
+-                    print("SIMULACAO: Wake-on-LAN.", flush=True)
++                    print(f"SIMULACAO: Wake-on-LAN para {alvo} via {fonte}.", flush=True)
+             estado = "espera"
++            fonte_ativa = None
+             return
+ 
+         if not acessivel:
+@@ -134,6 +175,7 @@
+                 flush=True
+             )
+             estado = "espera"
++            fonte_ativa = None
+             return
+ 
+         estado = "confirmacao"
+@@ -151,6 +193,15 @@
+         if texto in ("confirmar", "confirmar desligar", "confirmar desligamento"):
+             srv = painel.SERVIDORES[pendente]
+             if painel.host_ligado(srv):
++                # Deduplicação de ação (idempotência de desligamento)
++                if ja_executado_recentemente("desligar", pendente):
++                    print(f"Desligamento de {pendente} descartado por idempotencia.", flush=True)
++                    estado = "espera"
++                    pendente = None
++                    fonte_ativa = None
++                    return
++
++                registrar_acao("desligar", pendente)
+                 if os.getenv("JARVIS_SSH_REAL") == "1":
+                     if texto != "confirmar desligamento":
+                         print(
+@@ -159,6 +210,7 @@
+                         )
+                         estado = "espera"
+                         pendente = None
++                        fonte_ativa = None
+                         return
+ 
+                     configuracao = dict(srv)
+@@ -193,8 +245,7 @@
+                         print("Erro no SSH:", erro, flush=True)
+                 else:
+                     print(
+-                        "SIMULACAO SSH para",
+-                        srv["nome"],
++                        f"SIMULACAO SSH para {srv['nome']} via {fonte}.",
+                         flush=True
+                     )
+             else:
+@@ -202,8 +253,30 @@
+ 
+             estado = "espera"
+             pendente = None
++            fonte_ativa = None
++
++
++# --- Barramento IPC Local por UNIX Domain Socket ---
++def on_ipc_event(evento):
++    fonte = evento.get("fonte", "lg_mic")
++    texto = evento.get("texto", "").strip()
++    if texto:
++        try:
++            fila_intencoes.put_nowait((fonte, texto))
++        except queue.Full:
++            print("Fila de intencoes cheia. Descartando.", flush=True)
++
++
++ipc_listener = IpcEventListener(
++    socket_path=os.getenv("JARVIS_IPC_SOCKET", DEFAULT_IPC_SOCKET),
++    on_event=on_ipc_event,
++    allowed_uid=0,
++    verify_peer_cred=True,
++)
++ipc_listener.start()
+ 
+ 
++# --- Captura de Áudio ALSA (ME6S USB) ---
+ microfone = subprocess.Popen([
+     "arecord", "-q",
+     "-D", "plughw:CARD=ME6S,DEV=0",
+@@ -226,7 +299,6 @@
+         try:
+             fila_audio.put_nowait((time.monotonic(), dados))
+         except queue.Full:
+-            # Descarta audio antigo para evitar atraso.
+             try:
+                 fila_audio.get_nowait()
+             except queue.Empty:
+@@ -240,11 +312,8 @@
+     daemon=True
+ ).start()
+ 
+-print("=== JARVIS + LIGAR.CASA ===", flush=True)
+-print("MODO SIMULACAO - SEM ACOES REAIS", flush=True)
+-print("Fale 'assistente', pause, depois o comando.", flush=True)
+ 
+-try:
++def reconhecedor_me6s():
+     while True:
+         item = fila_audio.get()
+         if item is None:
+@@ -260,11 +329,37 @@
+         if rec.AcceptWaveform(audio):
+             texto = json.loads(rec.Result()).get("text", "").strip()
+             if texto and texto != "[unk]":
+-                processar(texto)
++                fila_intencoes.put(("me6s", texto))
++
++threading.Thread(
++    target=reconhecedor_me6s,
++    daemon=True
++).start()
++
++
++print("=== JARVIS + LIGAR.CASA (DUAL-MIC) ===", flush=True)
++if os.getenv("JARVIS_WOL_REAL") != "1" or os.getenv("JARVIS_SSH_REAL") != "1":
++    print("MODO SIMULACAO - SEM ACOES REAIS", flush=True)
++print("Fontes ativas: ME6S (USB) + LG-X230 (IPC)", flush=True)
++print("Fale 'assistente', pause, depois o comando.", flush=True)
++
++try:
++    while True:
++        try:
++            fonte, texto = fila_intencoes.get(timeout=0.2)
++            processar(texto, fonte=fonte)
++        except queue.Empty:
++            agora = time.monotonic()
++            if estado != "espera" and agora > limite:
++                print("Tempo esgotado.", flush=True)
++                estado = "espera"
++                pendente = None
++                fonte_ativa = None
+ 
+ except KeyboardInterrupt:
+     print("\nTeste encerrado.")
+ 
+ finally:
++    ipc_listener.stop()
+     microfone.terminate()
+     microfone.wait()

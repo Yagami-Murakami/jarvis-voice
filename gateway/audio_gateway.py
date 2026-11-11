@@ -28,6 +28,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    from gateway.ipc_bus import DEFAULT_IPC_SOCKET, IpcEventBroadcaster
+except ImportError:
+    from ipc_bus import DEFAULT_IPC_SOCKET, IpcEventBroadcaster
+
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] [%(levelname)s] [JarvisGateway] %(message)s",
@@ -311,6 +316,7 @@ class LgMicServer(threading.Thread):
         model_path: Optional[str] = None,
         tls_cert: Optional[str] = None,
         tls_key: Optional[str] = None,
+        ipc_broadcaster: Optional[IpcEventBroadcaster] = None,
     ):
         super().__init__(name="LgMicServer", daemon=True)
         self.host = host
@@ -320,6 +326,7 @@ class LgMicServer(threading.Thread):
         self.model_path = model_path
         self.tls_cert = tls_cert
         self.tls_key = tls_key
+        self.ipc_broadcaster = ipc_broadcaster
 
         self._running = True
         self.server_socket: Optional[socket.socket] = None
@@ -495,15 +502,55 @@ class LgMicServer(threading.Thread):
             is_new, sid = self.arbitrator.report_wake("lg_mic")
             if not is_new:
                 logger.info("[Vosk-LG] Palavra 'assistente' deduplicada na sessão %s", sid)
+            else:
+                if self.ipc_broadcaster:
+                    self.ipc_broadcaster.emit_event(
+                        source="lg_mic",
+                        event_type="wake",
+                        text="assistente",
+                        session_id=sid,
+                    )
+            return
+
+        if texto == "cancelar":
+            if self.arbitrator.state != "espera":
+                sid = self.arbitrator.session_id
+                self.arbitrator.state = "espera"
+                self.arbitrator.session_id = None
+                self.arbitrator.target_computer = None
+                logger.info("Operação cancelada pelo usuário via lg_mic")
+                if self.ipc_broadcaster:
+                    self.ipc_broadcaster.emit_event(
+                        source="lg_mic",
+                        event_type="cancelar",
+                        text="cancelar",
+                        session_id=sid,
+                    )
             return
 
         if self.arbitrator.state == "comando":
             res = self.arbitrator.report_command("lg_mic", texto)
             logger.info("[Vosk-LG] Resultado do comando: %s", res)
+            if res.get("valido") and self.ipc_broadcaster:
+                self.ipc_broadcaster.emit_event(
+                    source="lg_mic",
+                    event_type="comando",
+                    text=texto,
+                    session_id=res.get("session_id"),
+                    extra=res,
+                )
         elif self.arbitrator.state == "confirmacao":
             if "confirmar" in texto:
                 res = self.arbitrator.report_confirmation("lg_mic")
                 logger.info("[Vosk-LG] Resultado da confirmação: %s", res)
+                if res.get("valido") and self.ipc_broadcaster:
+                    self.ipc_broadcaster.emit_event(
+                        source="lg_mic",
+                        event_type="confirmar",
+                        text=texto,
+                        session_id=res.get("session_id"),
+                        extra=res,
+                    )
 
     def _calcular_rms(self, pcm_bytes: bytes) -> float:
         if len(pcm_bytes) < 2:
@@ -679,12 +726,18 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
             if evento == "wake":
                 is_new, sid = self.server.arbitrator.report_wake(fonte)
                 resultado = {"sucesso": True, "is_new_session": is_new, "session_id": sid}
+                if is_new and getattr(self.server, "ipc_broadcaster", None):
+                    self.server.ipc_broadcaster.emit_event(fonte, "wake", "assistente", session_id=sid)
             elif evento == "command":
                 res = self.server.arbitrator.report_command(fonte, texto)
                 resultado = {"sucesso": True, "resultado": res}
+                if res.get("valido") and getattr(self.server, "ipc_broadcaster", None):
+                    self.server.ipc_broadcaster.emit_event(fonte, "comando", texto, session_id=res.get("session_id"), extra=res)
             elif evento == "confirm":
                 res = self.server.arbitrator.report_confirmation(fonte)
                 resultado = {"sucesso": True, "resultado": res}
+                if res.get("valido") and getattr(self.server, "ipc_broadcaster", None):
+                    self.server.ipc_broadcaster.emit_event(fonte, "confirmar", "confirmar desligamento", session_id=res.get("session_id"), extra=res)
 
             self._responder_json(resultado)
         else:
@@ -715,6 +768,7 @@ class AudioGatewayApp:
         model_path: Optional[str] = DEFAULT_MODEL,
         tls_cert: Optional[str] = None,
         tls_key: Optional[str] = None,
+        ipc_socket: str = DEFAULT_IPC_SOCKET,
     ):
         self.tcp_port = tcp_port
         self.http_port = http_port
@@ -723,7 +777,9 @@ class AudioGatewayApp:
         self.model_path = model_path
         self.tls_cert = tls_cert
         self.tls_key = tls_key
+        self.ipc_socket = ipc_socket
 
+        self.ipc_broadcaster = IpcEventBroadcaster(socket_path=ipc_socket) if ipc_socket else None
         self.arbitrator = SessionArbitrator(dedup_window_s=2.0)
         self.lg_mic_server = LgMicServer(
             host=bind_host,
@@ -733,6 +789,7 @@ class AudioGatewayApp:
             model_path=model_path,
             tls_cert=tls_cert,
             tls_key=tls_key,
+            ipc_broadcaster=self.ipc_broadcaster,
         )
         self.me6s_monitor = Me6sJournalMonitor(arbitrator=self.arbitrator)
 
@@ -740,11 +797,13 @@ class AudioGatewayApp:
         self.http_server.arbitrator = self.arbitrator
         self.http_server.lg_mic_server = self.lg_mic_server
         self.http_server.me6s_monitor = self.me6s_monitor
+        self.http_server.ipc_broadcaster = self.ipc_broadcaster
 
     def start(self) -> None:
         logger.info("=== INICIANDO JARVIS DUAL-MIC AUDIO GATEWAY ===")
         logger.info("Porta TCP de streaming LG: %d (TLS=%s)", self.tcp_port, bool(self.lg_mic_server.ssl_context))
         logger.info("Porta HTTP de diagnóstico: %d", self.http_port)
+        logger.info("Barramento IPC configurado em: %s", self.ipc_socket)
         logger.info("Modo operacional: SIMULAÇÃO SEGURA (WoL e SSH desativados)")
 
         self.lg_mic_server.start()
@@ -770,6 +829,7 @@ def main() -> None:
     parser.add_argument("--tls-cert", default=os.environ.get("JARVIS_TLS_CERT", ""), help="Caminho do certificado TLS")
     parser.add_argument("--tls-key", default=os.environ.get("JARVIS_TLS_KEY", ""), help="Caminho da chave privada TLS")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Caminho do modelo Vosk")
+    parser.add_argument("--ipc-socket", default=os.environ.get("JARVIS_IPC_SOCKET", DEFAULT_IPC_SOCKET), help="Caminho do socket UNIX IPC")
 
     args = parser.parse_args()
     token = os.environ.get("JARVIS_AUDIO_TOKEN", "")
@@ -783,6 +843,7 @@ def main() -> None:
         model_path=args.model,
         tls_cert=args.tls_cert if args.tls_cert else None,
         tls_key=args.tls_key if args.tls_key else None,
+        ipc_socket=args.ipc_socket,
     )
     app.start()
 

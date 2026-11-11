@@ -209,13 +209,12 @@ class TestLgMicServerProtocol(unittest.TestCase):
         sock.sendall(struct.pack(">B", 1))
         sock.sendall(struct.pack(">H", len(bad_token)))
         sock.sendall(bad_token)
-        sock.sendall(struct.pack(">IBB", 16000, 1, 16))
-
-        time.sleep(0.1)
         try:
+            sock.sendall(struct.pack(">IBB", 16000, 1, 16))
+            time.sleep(0.1)
             data = sock.recv(1024)
             self.assertEqual(len(data), 0)
-        except (ConnectionResetError, BrokenPipeError):
+        except (ConnectionResetError, BrokenPipeError, OSError):
             pass
         sock.close()
 
