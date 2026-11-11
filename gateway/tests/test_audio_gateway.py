@@ -50,6 +50,35 @@ class TestSessionArbitrator(unittest.TestCase):
         self.assertEqual(self.arbitrator.deduplicated_count, 1)
         self.assertEqual(self.arbitrator.total_activations, 1)
 
+    def test_second_wake_during_active_session_preserves_session_id(self):
+        """Cenário 2: Uma segunda ativação pelo LG durante sessão já aberta NUNCA substitui o ID."""
+        # 1. Sessão inicial aberta pelo LG
+        is_new1, sid1 = self.arbitrator.report_wake("lg_mic")
+        self.assertTrue(is_new1)
+        self.assertEqual(self.arbitrator.state, "comando")
+
+        # 2. Usuário repete 'assistente' pelo mesmo microfone LG dentro da sessão ativa
+        time.sleep(0.05)
+        is_new2, sid2 = self.arbitrator.report_wake("lg_mic")
+        self.assertFalse(is_new2)
+        self.assertEqual(sid2, sid1)
+        self.assertEqual(self.arbitrator.session_id, sid1)
+
+        # 3. Microfone ME6S também repete 'assistente'
+        is_new3, sid3 = self.arbitrator.report_wake("me6s")
+        self.assertFalse(is_new3)
+        self.assertEqual(sid3, sid1)
+        self.assertEqual(self.arbitrator.session_id, sid1)
+
+    def test_sync_session_id_with_controller(self):
+        """Valida que o Gateway adota a autoridade única do controlador em caso de divergência."""
+        is_new, sid1 = self.arbitrator.report_wake("lg_mic")
+        self.assertTrue(is_new)
+
+        controller_authoritative_id = "sess-controller-official-999"
+        self.arbitrator.sync_session_id(controller_authoritative_id)
+        self.assertEqual(self.arbitrator.session_id, controller_authoritative_id)
+
     def test_command_wol_simulation(self):
         self.arbitrator.report_wake("me6s")
         res = self.arbitrator.report_command("lg_mic", "ligar fusion")
@@ -85,6 +114,39 @@ class TestSessionArbitrator(unittest.TestCase):
         self.assertEqual(res["acao"], "cancelar")
         self.assertEqual(self.arbitrator.state, "espera")
 
+    def test_action_deduplication_wol(self):
+        # 1. Primeira ativação e comando WoL
+        is_new, sid1 = self.arbitrator.report_wake("me6s")
+        self.assertTrue(is_new)
+        res1 = self.arbitrator.report_command("me6s", "ligar fusion")
+        self.assertTrue(res1["valido"])
+        self.assertEqual(res1["acao"], "ligar")
+
+        # 2. Segunda ativação imediata (mesmo comando WoL para mesmo alvo)
+        time.sleep(0.1)
+        is_new, sid2 = self.arbitrator.report_wake("lg_mic")
+        self.assertTrue(is_new)
+        res2 = self.arbitrator.report_command("lg_mic", "ligar fusion")
+        # Deve ser bloqueado pela deduplicação de ação (idempotência)
+        self.assertFalse(res2["valido"])
+        self.assertTrue(res2.get("deduplicado", False))
+
+    def test_action_deduplication_shutdown(self):
+        # 1. Primeira confirmação de desligamento
+        self.arbitrator.report_wake("me6s")
+        self.arbitrator.report_command("me6s", "desligar fusion")
+        res1 = self.arbitrator.report_confirmation("me6s")
+        self.assertTrue(res1["valido"])
+
+        # 2. Segunda confirmação imediata para mesmo alvo
+        time.sleep(0.1)
+        self.arbitrator.report_wake("lg_mic")
+        self.arbitrator.report_command("lg_mic", "desligar fusion")
+        res2 = self.arbitrator.report_confirmation("lg_mic")
+        # Deve ser bloqueado pela deduplicação de ação
+        self.assertFalse(res2["valido"])
+        self.assertTrue(res2.get("deduplicado", False))
+
 
 class TestLgMicServerProtocol(unittest.TestCase):
     """Valida o protocolo de rede TCP, autenticação e decodificação de frames PCM."""
@@ -92,7 +154,7 @@ class TestLgMicServerProtocol(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.port = 18088
-        cls.token = "token-teste-unitario-123"
+        cls.token = "token-teste-unitario-32-chars-long-ok!"
         cls.arbitrator = SessionArbitrator()
         cls.server = LgMicServer(
             host="127.0.0.1",
@@ -112,12 +174,15 @@ class TestLgMicServerProtocol(unittest.TestCase):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect(("127.0.0.1", self.port))
 
-        bad_token = b"token-errado"
-        sock.sendall(MAGIC_HANDSHAKE)
-        sock.sendall(struct.pack(">B", 1))
-        sock.sendall(struct.pack(">H", len(bad_token)))
-        sock.sendall(bad_token)
-        sock.sendall(struct.pack(">IBB", 16000, 1, 16))
+        bad_token = b"token-incorreto-32-caracteres-ok!"
+        try:
+            sock.sendall(MAGIC_HANDSHAKE)
+            sock.sendall(struct.pack(">B", 1))
+            sock.sendall(struct.pack(">H", len(bad_token)))
+            sock.sendall(bad_token)
+            sock.sendall(struct.pack(">IBB", 16000, 1, 16))
+        except (ConnectionResetError, BrokenPipeError):
+            pass
 
         # O servidor deve fechar a conexão (EOF ou ConnectionResetError)
         time.sleep(0.1)
@@ -161,6 +226,125 @@ class TestLgMicServerProtocol(unittest.TestCase):
         self.assertTrue(status["connected"])
         self.assertGreater(status["packets_received"], 0)
         self.assertGreater(status["current_rms"], 0.2)  # Seno com amplitude 0.5 gera RMS ~0.35
+
+        sock.close()
+
+    def test_rejected_with_deprecated_token(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect(("127.0.0.1", self.port))
+
+        bad_token = b"jarvis-dual-mic-2026"  # Token público antigo revogado
+        sock.sendall(MAGIC_HANDSHAKE)
+        sock.sendall(struct.pack(">B", 1))
+        sock.sendall(struct.pack(">H", len(bad_token)))
+        sock.sendall(bad_token)
+        try:
+            sock.sendall(struct.pack(">IBB", 16000, 1, 16))
+            time.sleep(0.1)
+            data = sock.recv(1024)
+            self.assertEqual(len(data), 0)
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            pass
+        sock.close()
+
+    def test_rejected_with_malformed_payload_length(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect(("127.0.0.1", self.port))
+
+        token_bytes = self.token.encode("utf-8")
+        sock.sendall(MAGIC_HANDSHAKE)
+        sock.sendall(struct.pack(">B", 1))
+        sock.sendall(struct.pack(">H", len(token_bytes)))
+        sock.sendall(token_bytes)
+        sock.sendall(struct.pack(">IBB", 16000, 1, 16))
+
+        # Envia header com payload_len = 500 (deveria ser 1280)
+        malformed_len = 500
+        header = MAGIC_DATA + struct.pack(">IQBH", 0, int(time.time() * 1000), 0, malformed_len)
+        sock.sendall(header + b"\x00" * malformed_len)
+
+        time.sleep(0.1)
+        try:
+            data = sock.recv(1024)
+            self.assertEqual(len(data), 0)
+        except (ConnectionResetError, BrokenPipeError):
+            pass
+        sock.close()
+
+
+class TestTlsLgMicServerProtocol(unittest.TestCase):
+    """Valida o transporte criptografado TLS 1.2+ no gateway de áudio."""
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        import subprocess
+        import ssl
+
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.cert_path = Path(cls.temp_dir.name) / "test_gateway.crt"
+        cls.key_path = Path(cls.temp_dir.name) / "test_gateway.key"
+
+        # Gera certificado auto-assinado temporário para teste unitário
+        cmd = [
+            "openssl", "req", "-x509", "-newkey", "rsa:2048",
+            "-keyout", str(cls.key_path),
+            "-out", str(cls.cert_path),
+            "-days", "1", "-nodes",
+            "-subj", "/CN=127.0.0.1",
+        ]
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        cls.port = 18089
+        cls.token = "token-teste-tls-32-chars-long-ok!"
+        cls.arbitrator = SessionArbitrator()
+        cls.server = LgMicServer(
+            host="127.0.0.1",
+            port=cls.port,
+            auth_token=cls.token,
+            arbitrator=cls.arbitrator,
+            model_path=None,
+            tls_cert=str(cls.cert_path),
+            tls_key=str(cls.key_path),
+        )
+        cls.server.start()
+        time.sleep(0.3)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+        cls.temp_dir.cleanup()
+
+    def test_tls_stream_and_authentication(self):
+        import ssl
+
+        raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        raw_sock.connect(("127.0.0.1", self.port))
+
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE  # Certificado auto-assinado de teste
+
+        sock = ssl_ctx.wrap_socket(raw_sock, server_hostname="127.0.0.1")
+
+        # Handshake no túnel TLS
+        token_bytes = self.token.encode("utf-8")
+        sock.sendall(MAGIC_HANDSHAKE)
+        sock.sendall(struct.pack(">B", 1))
+        sock.sendall(struct.pack(">H", len(token_bytes)))
+        sock.sendall(token_bytes)
+        sock.sendall(struct.pack(">IBB", 16000, 1, 16))
+
+        # Envia 1 quadro de áudio silencioso (1280 bytes)
+        payload = b"\x00" * 1280
+        header = MAGIC_DATA + struct.pack(">IQBH", 0, int(time.time() * 1000), 0, len(payload))
+        sock.sendall(header + payload)
+
+        time.sleep(0.1)
+        status = self.server.obter_status()
+        self.assertTrue(status["connected"])
+        self.assertTrue(status["tls_active"])
+        self.assertGreater(status["packets_received"], 0)
 
         sock.close()
 

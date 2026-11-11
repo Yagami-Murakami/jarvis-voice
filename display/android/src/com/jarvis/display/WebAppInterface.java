@@ -133,10 +133,42 @@ public class WebAppInterface {
     }
 
     @JavascriptInterface
+    public boolean setPairingConfig(String token, String host, int port, boolean useTls, String fingerprint) {
+        if (activity == null || micCapture == null) return false;
+        try {
+            activity.getSharedPreferences("JarvisDisplayPrefs", android.content.Context.MODE_PRIVATE)
+                    .edit()
+                    .putString("lg_mic_host", host)
+                    .putInt("lg_mic_port", port > 0 ? port : LgMicCapture.DEFAULT_GATEWAY_PORT)
+                    .putString("lg_mic_token", token)
+                    .putBoolean("lg_mic_tls", useTls)
+                    .putString("lg_mic_fingerprint", fingerprint != null ? fingerprint : "")
+                    .apply();
+            micCapture.setGatewayConfig(host, port > 0 ? port : LgMicCapture.DEFAULT_GATEWAY_PORT, token, useTls, fingerprint);
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    @JavascriptInterface
+    public boolean isTlsActive() {
+        return micCapture != null && micCapture.isTlsActive();
+    }
+
+    @JavascriptInterface
+    public boolean hasPairingToken() {
+        return micCapture != null && micCapture.hasValidToken();
+    }
+
+    @JavascriptInterface
     public String getMicDiagnostics() {
         boolean enabled = micCapture != null && micCapture.isMicEnabled();
         boolean connected = micCapture != null && micCapture.isConnected();
         boolean permission = activity.hasMicPermission();
+        boolean tlsActive = micCapture != null && micCapture.isTlsActive();
+        boolean hasToken = micCapture != null && micCapture.hasValidToken();
         float rms = micCapture != null ? micCapture.getCurrentRms() : 0.0f;
         long sent = micCapture != null ? micCapture.getTotalPacketsSent() : 0;
         long dropped = micCapture != null ? micCapture.getTotalPacketsDropped() : 0;
@@ -144,6 +176,8 @@ public class WebAppInterface {
         return "{\"enabled\":" + enabled +
                 ",\"connected\":" + connected +
                 ",\"permission\":" + permission +
+                ",\"tls_active\":" + tlsActive +
+                ",\"has_token\":" + hasToken +
                 ",\"rms\":" + String.format(java.util.Locale.US, "%.3f", rms) +
                 ",\"sent\":" + sent +
                 ",\"dropped\":" + dropped + "}";

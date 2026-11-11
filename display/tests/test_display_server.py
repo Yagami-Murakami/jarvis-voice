@@ -113,6 +113,29 @@ class TestLogMonitor(unittest.TestCase):
         monitor.processar_linha("Captura de áudio encerrada.")
         self.assertEqual(state.obter_estado()["status"], "offline")
 
+    def test_log_line_parsing_variants(self):
+        state = JarvisDisplayState()
+        monitor = JarvisLogMonitor(state)
+
+        # WoL enviado variantes
+        monitor.processar_linha("Wake-on-LAN enviado.")
+        self.assertEqual(state.obter_estado()["status"], "success")
+
+        # Computador já acessível sem acentos
+        monitor.processar_linha("Computador ja esta acessivel.")
+        self.assertEqual(state.obter_estado()["status"], "success")
+
+        # SSH enviado com sucesso
+        monitor.processar_linha("SSH enviado com sucesso. Codigo: 0")
+        self.assertEqual(state.obter_estado()["status"], "success")
+
+        # Desligamento bloqueado variantes
+        monitor.processar_linha("DESLIGAMENTO BLOQUEADO: computador nao acessivel.")
+        self.assertEqual(state.obter_estado()["status"], "error")
+
+        monitor.processar_linha("Cancelado: computador inacessivel.")
+        self.assertEqual(state.obter_estado()["status"], "error")
+
 
 class TestHTTPServerIntegration(unittest.TestCase):
     @classmethod
@@ -120,6 +143,7 @@ class TestHTTPServerIntegration(unittest.TestCase):
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), JarvisDisplayHandler)
         cls.server.display_state = JarvisDisplayState()
         cls.server.weather_service = WeatherService()
+        cls.server.demo_mode = True
         cls.port = cls.server.server_address[1]
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
