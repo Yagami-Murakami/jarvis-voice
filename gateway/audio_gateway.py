@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import hmac
 import logging
 import math
 import os
@@ -36,7 +37,7 @@ logger = logging.getLogger("JarvisGateway")
 
 MAGIC_HANDSHAKE = b"JMIC"
 MAGIC_DATA = b"DATA"
-DEFAULT_TOKEN = "jarvis-dual-mic-2026"
+DEFAULT_TOKEN = ""  # Sem segredo embutido; configure JARVIS_AUDIO_TOKEN localmente
 DEFAULT_MODEL = "/opt/jarvis-voice/vosk-model-small-pt-0.3"
 
 COMANDOS = {
@@ -337,10 +338,13 @@ class LgMicServer(threading.Thread):
 
             versao = struct.unpack(">B", self._ler_exato(sock, 1))[0]
             token_len = struct.unpack(">H", self._ler_exato(sock, 2))[0]
+            if token_len < 32 or token_len > 256:
+                logger.warning("Handshake rejeitado: comprimento de token inválido para %s", ip)
+                return
             token_bytes = self._ler_exato(sock, token_len)
             token_str = token_bytes.decode("utf-8", errors="replace")
 
-            if token_str != self.auth_token:
+            if not hmac.compare_digest(token_str, self.auth_token):
                 logger.warning("Autenticação rejeitada para cliente %s: token incorreto", ip)
                 sock.close()
                 return
@@ -348,6 +352,10 @@ class LgMicServer(threading.Thread):
             sample_rate = struct.unpack(">I", self._ler_exato(sock, 4))[0]
             channels = struct.unpack(">B", self._ler_exato(sock, 1))[0]
             bit_depth = struct.unpack(">B", self._ler_exato(sock, 1))[0]
+
+            if versao != 1 or sample_rate != 16000 or channels != 1 or bit_depth != 16:
+                logger.warning("Formato de áudio não suportado pelo cliente %s", ip)
+                return
 
             logger.info(
                 "Handshake autenticado de %s: v%d, %d Hz, %d ch, %d bits",
@@ -372,6 +380,9 @@ class LgMicServer(threading.Thread):
                 timestamp_ms = struct.unpack(">Q", self._ler_exato(sock, 8))[0]
                 flags = struct.unpack(">B", self._ler_exato(sock, 1))[0]
                 payload_len = struct.unpack(">H", self._ler_exato(sock, 2))[0]
+                if payload_len != 1280:
+                    logger.warning("Frame com tamanho inesperado recebido de %s", ip)
+                    break
 
                 payload = self._ler_exato(sock, payload_len)
                 if len(payload) < payload_len:
@@ -568,7 +579,9 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND, "Recurso não encontrado")
 
     def do_POST(self) -> None:
-        if self.path == "/api/test/inject":
+        if (self.path == "/api/test/inject"
+                and os.environ.get("JARVIS_GATEWAY_TEST_MODE") == "1"
+                and self.client_address[0] in ("127.0.0.1", "::1")):
             # Endpoint seguro para testes automatizados em simulação
             content_len = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len).decode("utf-8") if content_len > 0 else "{}"
@@ -601,7 +614,6 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(corpo)))
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(corpo)
 
@@ -668,15 +680,19 @@ def main() -> None:
     parser.add_argument("--tcp-port", type=int, default=8088, help="Porta TCP do áudio LG (padrão: 8088)")
     parser.add_argument("--http-port", type=int, default=8089, help="Porta HTTP da API de diagnóstico (padrão: 8089)")
     parser.add_argument("--host", default="0.0.0.0", help="Endereço de bind (padrão: 0.0.0.0)")
-    parser.add_argument("--token", default=DEFAULT_TOKEN, help="Token de autenticação do streaming")
+    # Credenciais nunca devem constar na linha de comando (visível via ps).
+    # Transporte TLS e provisionamento Android serão implementados na etapa seguinte.
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Caminho do modelo Vosk")
 
     args = parser.parse_args()
+    token = os.environ.get("JARVIS_AUDIO_TOKEN", "")
+    if len(token) < 32 or len(token) > 256 or token == "jarvis-dual-mic-2026":
+        parser.error("Configure JARVIS_AUDIO_TOKEN (32 a 256 caracteres aleatórios) em arquivo privado.")
     app = AudioGatewayApp(
         tcp_port=args.tcp_port,
         http_port=args.http_port,
         bind_host=args.host,
-        auth_token=args.token,
+        auth_token=token,
         model_path=args.model,
     )
     app.start()
