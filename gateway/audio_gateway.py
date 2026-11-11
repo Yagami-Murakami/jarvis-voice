@@ -73,7 +73,7 @@ class SessionArbitrator:
     """Controla sessões unificadas entre os dois microfones com deduplicação rigorosa."""
 
     def __init__(self, dedup_window_s: float = 2.0, action_dedup_window_s: float = 3.5):
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.dedup_window_s = dedup_window_s
         self.action_dedup_window_s = action_dedup_window_s
 
@@ -162,6 +162,28 @@ class SessionArbitrator:
         with self._lock:
             texto = raw_text.strip().lower()
             if self.state != "comando":
+                if self.state == "confirmacao":
+                    if texto == "cancelar":
+                        return self.report_cancellation(source)
+                    if texto in COMANDOS:
+                        acao_cand, alvo_cand = COMANDOS[texto]
+                        if acao_cand == "desligar" and (alvo_cand == self.target_computer or not self.target_computer):
+                            self.deduplicated_count += 1
+                            logger.info(
+                                "Deduplicação de comando: '%s %s' via %s descartado (confirmação já pendente)",
+                                acao_cand,
+                                alvo_cand,
+                                source,
+                            )
+                            return {
+                                "valido": False,
+                                "acao": acao_cand,
+                                "alvo": alvo_cand,
+                                "deduplicado": True,
+                                "status": "confirmacao_pendente",
+                                "session_id": self.session_id,
+                                "motivo": f"Confirmação de desligamento para '{alvo_cand}' já pendente",
+                            }
                 # Se não estiver no modo comando, verifica se é comando duplicado do outro microfone
                 if texto in COMANDOS:
                     acao, alvo = COMANDOS[texto]
@@ -191,12 +213,7 @@ class SessionArbitrator:
                 return {"valido": False, "motivo": "Sessão expirada por inatividade"}
 
             if texto == "cancelar":
-                self.state = "espera"
-                old_id = self.session_id
-                self.session_id = None
-                self._registrar_evento("command_cancelled", source, session_id=old_id)
-                logger.info("Sessão %s cancelada pelo usuário via %s", old_id, source)
-                return {"valido": True, "acao": "cancelar", "session_id": old_id}
+                return self.report_cancellation(source)
 
             if texto not in COMANDOS:
                 return {"valido": False, "motivo": f"Comando não reconhecido na gramática: '{texto}'"}
@@ -263,10 +280,33 @@ class SessionArbitrator:
                     "acao": "desligar",
                     "alvo": alvo,
                     "confirmacao_necessaria": True,
+                    "status": "confirmacao_pendente",
                     "session_id": sid,
                 }
 
             return {"valido": False, "motivo": "Ação desconhecida"}
+
+    def report_cancellation(self, source: str) -> Dict[str, Any]:
+        """Processa cancelamento explícito de comando ou confirmação pendente."""
+        now = time.monotonic()
+        with self._lock:
+            old_sid = self.session_id
+            old_alvo = self.target_computer
+            old_state = self.state
+            self.state = "espera"
+            self.session_id = None
+            self.target_computer = None
+            self.target_action = None
+            self.expires_at = 0.0
+            self._registrar_evento("command_cancelled", source, session_id=old_sid, estado_anterior=old_state)
+            logger.info("Operação cancelada pelo usuário via %s (sessão %s, estado anterior %s)", source, old_sid, old_state)
+            return {
+                "valido": True,
+                "acao": "cancelar",
+                "alvo": old_alvo,
+                "status": "cancelado",
+                "session_id": old_sid,
+            }
 
     def report_confirmation(self, source: str) -> Dict[str, Any]:
         """Processa confirmação de desligamento seguro."""
@@ -337,6 +377,7 @@ class SessionArbitrator:
                 "acao": "desligar_confirmado",
                 "alvo": alvo,
                 "session_id": sid,
+                "status": "concluido",
                 "simulacao": True,
             }
 
@@ -380,8 +421,10 @@ def _registrar_log_ack_gateway(
 ) -> None:
     """Registra log auditável do Gateway diferenciando com precisão:
     - [COMANDO ACEITO]
+    - [AGUARDANDO CONFIRMAÇÃO]
     - [EM PROCESSAMENTO]
     - [CONCLUÍDO]
+    - [CANCELADO]
     - [FALHA]
     """
     nome_acao = "WoL" if tipo_acao == "ligar" else ("Desligamento SSH" if tipo_acao in ("desligar", "confirmar") else tipo_acao)
@@ -404,8 +447,28 @@ def _registrar_log_ack_gateway(
             )
             return
 
-        st = ack.get("status", "concluido")
-        if st == "aceito":
+        st = ack.get("status")
+        if not st:
+            if ack.get("estado") == "confirmacao" or tipo_acao == "desligar" or ack.get("acao") == "desligar_pendente":
+                st = "confirmacao_pendente"
+            elif ack.get("acao") == "cancelar" or tipo_acao == "cancelar":
+                st = "cancelado"
+            elif ack.get("sucesso") and tipo_acao in ("confirmar", "ligar"):
+                st = "concluido"
+            else:
+                st = "aceito"
+
+        if st == "confirmacao_pendente" or (st != "concluido" and ack.get("estado") == "confirmacao" and tipo_acao == "desligar"):
+            logger.info(
+                "[AGUARDANDO CONFIRMAÇÃO] [SIMULAÇÃO] Desligamento SSH para '%s' via %s aguardando confirmação do operador (sessão %s, status=confirmacao_pendente)",
+                alvo_str, fonte, sid_str
+            )
+        elif st == "cancelado" or tipo_acao == "cancelar":
+            logger.info(
+                "[CANCELADO] [SIMULAÇÃO] Operação '%s' cancelada pelo usuário via %s (sessão %s, status=cancelado)",
+                alvo_str, fonte, sid_str
+            )
+        elif st == "aceito":
             logger.info(
                 "[COMANDO ACEITO] [SIMULAÇÃO] %s para '%s' via %s aceito pelo controlador (sessão %s, status=aceito)",
                 nome_acao, alvo_str, fonte, sid_str
@@ -416,10 +479,16 @@ def _registrar_log_ack_gateway(
                 nome_acao, alvo_str, fonte, sid_str
             )
         elif st == "concluido":
-            logger.info(
-                "[CONCLUÍDO] [SIMULAÇÃO] %s confirmado pelo controlador para '%s' via %s (sessão %s, status=concluido)",
-                nome_acao, alvo_str, fonte, sid_str
-            )
+            if tipo_acao == "desligar" and ack.get("acao") == "desligar_pendente":
+                logger.info(
+                    "[AGUARDANDO CONFIRMAÇÃO] [SIMULAÇÃO] Desligamento SSH para '%s' via %s aguardando confirmação do operador (sessão %s, status=confirmacao_pendente)",
+                    alvo_str, fonte, sid_str
+                )
+            else:
+                logger.info(
+                    "[CONCLUÍDO] [SIMULAÇÃO] %s confirmado pelo controlador para '%s' via %s (sessão %s, status=concluido)",
+                    nome_acao, alvo_str, fonte, sid_str
+                )
         elif st == "falha":
             logger.error(
                 "[FALHA] %s para '%s' via %s falhou durante execução: %s (sessão %s, status=falha)",
@@ -663,19 +732,21 @@ class LgMicServer(threading.Thread):
             return
 
         if texto == "cancelar":
-            if self.arbitrator.state != "espera":
-                sid = self.arbitrator.session_id
-                self.arbitrator.state = "espera"
-                self.arbitrator.session_id = None
-                self.arbitrator.target_computer = None
-                logger.info("Operação cancelada pelo usuário via lg_mic")
-                if self.ipc_broadcaster:
-                    self.ipc_broadcaster.emit_event(
-                        source="lg_mic",
-                        event_type="cancelar",
-                        text="cancelar",
-                        session_id=sid,
-                    )
+            res = self.arbitrator.report_cancellation("lg_mic")
+            if self.ipc_broadcaster:
+                ack = self.ipc_broadcaster.emit_event(
+                    source="lg_mic",
+                    event_type="cancelar",
+                    text="cancelar",
+                    session_id=res.get("session_id"),
+                )
+                _registrar_log_ack_gateway(
+                    tipo_acao="cancelar",
+                    alvo=res.get("alvo"),
+                    fonte="lg_mic",
+                    session_id=res.get("session_id"),
+                    ack=ack,
+                )
             return
 
         if self.arbitrator.state == "comando":
@@ -702,7 +773,25 @@ class LgMicServer(threading.Thread):
                     ack=ack,
                 )
         elif self.arbitrator.state == "confirmacao":
-            if "confirmar" in texto:
+            if "cancelar" in texto:
+                res = self.arbitrator.report_cancellation("lg_mic")
+                logger.info("[Vosk-LG] Cancelamento solicitado: %s", res)
+                if self.ipc_broadcaster:
+                    ack = self.ipc_broadcaster.emit_event(
+                        source="lg_mic",
+                        event_type="cancelar",
+                        text="cancelar",
+                        session_id=res.get("session_id"),
+                    )
+                    _registrar_log_ack_gateway(
+                        tipo_acao="cancelar",
+                        alvo=res.get("alvo"),
+                        fonte="lg_mic",
+                        session_id=res.get("session_id"),
+                        ack=ack,
+                    )
+                return
+            elif "confirmar" in texto:
                 res = self.arbitrator.report_confirmation("lg_mic")
                 logger.info("[Vosk-LG] Resultado da confirmação: %s", res)
                 if res.get("valido") and self.ipc_broadcaster:
@@ -955,9 +1044,11 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
                         if ack is None:
                             resultado["sucesso"] = False
                             resultado["erro"] = getattr(self.server.ipc_broadcaster, "last_error", "falha_controlador")
-                        elif isinstance(ack, dict) and not ack.get("sucesso"):
-                            resultado["sucesso"] = False
-                            resultado["erro"] = ack.get("erro", "falha_controlador")
+                        elif isinstance(ack, dict):
+                            resultado["status"] = ack.get("status")
+                            if not ack.get("sucesso"):
+                                resultado["sucesso"] = False
+                                resultado["erro"] = ack.get("erro", "falha_controlador")
                         _registrar_log_ack_gateway(
                             tipo_acao=res.get("acao", "comando"),
                             alvo=res.get("alvo"),
@@ -966,6 +1057,8 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
                             ack=ack,
                             erro_fallback=resultado.get("erro", "falha_controlador"),
                         )
+                    else:
+                        resultado["status"] = res.get("status", "deduplicado")
             elif evento == "confirm":
                 res = self.server.arbitrator.report_confirmation(fonte)
                 resultado = {"sucesso": True, "resultado": res}
@@ -978,9 +1071,11 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
                         if ack is None:
                             resultado["sucesso"] = False
                             resultado["erro"] = getattr(self.server.ipc_broadcaster, "last_error", "falha_controlador")
-                        elif isinstance(ack, dict) and not ack.get("sucesso"):
-                            resultado["sucesso"] = False
-                            resultado["erro"] = ack.get("erro", "falha_controlador")
+                        elif isinstance(ack, dict):
+                            resultado["status"] = ack.get("status")
+                            if not ack.get("sucesso"):
+                                resultado["sucesso"] = False
+                                resultado["erro"] = ack.get("erro", "falha_controlador")
                         _registrar_log_ack_gateway(
                             tipo_acao="confirmar",
                             alvo=res.get("alvo"),
@@ -989,6 +1084,34 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
                             ack=ack,
                             erro_fallback=resultado.get("erro", "falha_controlador"),
                         )
+                    else:
+                        resultado["status"] = res.get("status", "deduplicado")
+            elif evento in ("cancel", "cancelar"):
+                res = self.server.arbitrator.report_cancellation(fonte)
+                resultado = {"sucesso": True, "resultado": res}
+                if res.get("valido") and getattr(self.server, "ipc_broadcaster", None):
+                    ack = self.server.ipc_broadcaster.emit_event(
+                        fonte, "cancelar", "cancelar", session_id=res.get("session_id"), extra=res
+                    )
+                    resultado["ack"] = ack
+                    if ack is None:
+                        resultado["sucesso"] = False
+                        resultado["erro"] = getattr(self.server.ipc_broadcaster, "last_error", "falha_controlador")
+                    elif isinstance(ack, dict):
+                        resultado["status"] = ack.get("status", "cancelado")
+                        if not ack.get("sucesso"):
+                            resultado["sucesso"] = False
+                            resultado["erro"] = ack.get("erro", "falha_controlador")
+                    else:
+                        resultado["status"] = "cancelado"
+                    _registrar_log_ack_gateway(
+                        tipo_acao="cancelar",
+                        alvo=res.get("alvo"),
+                        fonte=fonte,
+                        session_id=res.get("session_id"),
+                        ack=ack,
+                        erro_fallback=resultado.get("erro", "falha_controlador"),
+                    )
 
             self._responder_json(resultado)
         else:

@@ -12,6 +12,7 @@ Valida:
 import importlib.util
 import io
 import json
+import logging
 import os
 import queue
 import shutil
@@ -1337,6 +1338,406 @@ print('LG_CMD:' + json.dumps(cmd_res), flush=True)
             self.assertTrue(cmd2.get("deduplicado"))
             self.assertEqual(cmd2.get("acao"), "ligar")
             self.assertEqual(cmd2.get("alvo"), "fusion")
+
+        finally:
+            worker_running.clear()
+            self.mod.loop_principal_ativo.clear()
+            worker_th.join(timeout=1.0)
+            listener.stop()
+
+    def test_20_shutdown_enters_confirmacao_pendente_and_logs_aguardando(self):
+        """20. Pedido de desligamento retorna status 'confirmacao_pendente' (NÃO 'concluido') e Gateway registra [AGUARDANDO CONFIRMAÇÃO]."""
+        listener = IpcEventListener(
+            socket_path=self.sock_path,
+            allowed_uid=os.getuid(),
+            on_event=self.mod.on_ipc_event,
+        )
+        listener.start()
+        time.sleep(0.05)
+
+        self.mod.loop_principal_ativo.set()
+        worker_running = threading.Event()
+        worker_running.set()
+
+        def worker_loop():
+            while worker_running.is_set():
+                try:
+                    item = self.mod.fila_intencoes.get(timeout=0.05)
+                    fonte, texto, sid = item[0], item[1], item[2]
+                    ev_id = item[3] if len(item) > 3 else None
+                    comp_q = item[4] if len(item) > 4 else None
+                    res = self.mod.processar(texto, fonte=fonte, session_id=sid, event_id=ev_id)
+                    if comp_q is not None:
+                        comp_q.put(res)
+                except queue.Empty:
+                    pass
+
+        worker_th = threading.Thread(target=worker_loop, daemon=True)
+        worker_th.start()
+
+        try:
+            broadcaster = IpcEventBroadcaster(socket_path=self.sock_path, timeout=2.0)
+
+            # 1. Ativação
+            wake_ack = broadcaster.emit_event(
+                source="me6s",
+                event_type="wake",
+                text="assistente",
+                session_id="sess-shut-pend-1",
+            )
+            self.assertTrue(wake_ack.get("sucesso"))
+
+            # 2. Comando desligar fusion
+            cmd_ack = broadcaster.emit_event(
+                source="me6s",
+                event_type="comando",
+                text="desligar fusion",
+                session_id="sess-shut-pend-1",
+                event_id="ev-shut-pend-1",
+            )
+            self.assertIsNotNone(cmd_ack)
+            self.assertTrue(cmd_ack.get("sucesso"))
+            # Validação rigorosa dos Requisitos 1 e 2:
+            self.assertEqual(cmd_ack.get("status"), "confirmacao_pendente")
+            self.assertNotEqual(cmd_ack.get("status"), "concluido")
+            self.assertEqual(cmd_ack.get("acao"), "desligar_pendente")
+            self.assertEqual(cmd_ack.get("alvo"), "fusion")
+            self.assertEqual(cmd_ack.get("estado"), "confirmacao")
+
+            # 3. Validação do log do Gateway via _registrar_log_ack_gateway (Requisito 3)
+            from gateway.audio_gateway import _registrar_log_ack_gateway, logger as gw_logger
+            captured_logs = []
+            handler = logging.Handler()
+            handler.emit = lambda record: captured_logs.append(record.getMessage())
+            gw_logger.addHandler(handler)
+            try:
+                _registrar_log_ack_gateway(
+                    tipo_acao="desligar",
+                    alvo="fusion",
+                    fonte="me6s",
+                    session_id="sess-shut-pend-1",
+                    ack=cmd_ack,
+                )
+                self.assertTrue(len(captured_logs) > 0)
+                self.assertIn("[AGUARDANDO CONFIRMAÇÃO]", captured_logs[-1])
+                self.assertNotIn("[CONCLUÍDO]", captured_logs[-1])
+            finally:
+                gw_logger.removeHandler(handler)
+
+        finally:
+            worker_running.clear()
+            self.mod.loop_principal_ativo.clear()
+            worker_th.join(timeout=1.0)
+            listener.stop()
+
+    def test_21_valid_confirmation_transitions_to_concluido_and_executes_ssh(self):
+        """21. Somente a confirmação válida transiciona para 'concluido' com correspondência de sessão."""
+        listener = IpcEventListener(
+            socket_path=self.sock_path,
+            allowed_uid=os.getuid(),
+            on_event=self.mod.on_ipc_event,
+        )
+        listener.start()
+        time.sleep(0.05)
+
+        self.mod.loop_principal_ativo.set()
+        worker_running = threading.Event()
+        worker_running.set()
+
+        def worker_loop():
+            while worker_running.is_set():
+                try:
+                    item = self.mod.fila_intencoes.get(timeout=0.05)
+                    fonte, texto, sid = item[0], item[1], item[2]
+                    ev_id = item[3] if len(item) > 3 else None
+                    comp_q = item[4] if len(item) > 4 else None
+                    res = self.mod.processar(texto, fonte=fonte, session_id=sid, event_id=ev_id)
+                    if comp_q is not None:
+                        comp_q.put(res)
+                except queue.Empty:
+                    pass
+
+        worker_th = threading.Thread(target=worker_loop, daemon=True)
+        worker_th.start()
+
+        try:
+            broadcaster = IpcEventBroadcaster(socket_path=self.sock_path, timeout=2.0)
+
+            # 1. Ativação e pedido de desligamento
+            broadcaster.emit_event(source="lg_mic", event_type="wake", text="assistente", session_id="sess-conf-valid-1")
+            cmd_ack = broadcaster.emit_event(
+                source="lg_mic", event_type="comando", text="desligar fusion", session_id="sess-conf-valid-1", event_id="ev-cmd-conf-1"
+            )
+            self.assertEqual(cmd_ack.get("status"), "confirmacao_pendente")
+
+            # 2. Confirmação válida (correspondência estrita de session_id)
+            conf_ack = broadcaster.emit_event(
+                source="lg_mic",
+                event_type="confirmar",
+                text="confirmar desligamento",
+                session_id="sess-conf-valid-1",
+                event_id="ev-conf-valid-1",
+            )
+            self.assertIsNotNone(conf_ack)
+            self.assertTrue(conf_ack.get("sucesso"))
+            self.assertEqual(conf_ack.get("status"), "concluido")
+            self.assertEqual(conf_ack.get("alvo"), "fusion")
+            self.assertEqual(conf_ack.get("estado"), "espera")
+
+            # 3. Log do Gateway após confirmação deve ser [CONCLUÍDO]
+            from gateway.audio_gateway import _registrar_log_ack_gateway, logger as gw_logger
+            captured_logs = []
+            handler = logging.Handler()
+            handler.emit = lambda record: captured_logs.append(record.getMessage())
+            gw_logger.addHandler(handler)
+            try:
+                _registrar_log_ack_gateway(
+                    tipo_acao="confirmar",
+                    alvo="fusion",
+                    fonte="lg_mic",
+                    session_id="sess-conf-valid-1",
+                    ack=conf_ack,
+                )
+                self.assertTrue(len(captured_logs) > 0)
+                self.assertIn("[CONCLUÍDO]", captured_logs[-1])
+            finally:
+                gw_logger.removeHandler(handler)
+
+        finally:
+            worker_running.clear()
+            self.mod.loop_principal_ativo.clear()
+            worker_th.join(timeout=1.0)
+            listener.stop()
+
+    def test_22_delayed_confirmation_and_session_mismatch_rejected(self):
+        """22. Confirmação atrasada após timeout ou com session_id divergente é rejeitada sem ação."""
+        listener = IpcEventListener(
+            socket_path=self.sock_path,
+            allowed_uid=os.getuid(),
+            on_event=self.mod.on_ipc_event,
+        )
+        listener.start()
+        time.sleep(0.05)
+
+        self.mod.loop_principal_ativo.set()
+        worker_running = threading.Event()
+        worker_running.set()
+
+        def worker_loop():
+            while worker_running.is_set():
+                try:
+                    item = self.mod.fila_intencoes.get(timeout=0.05)
+                    fonte, texto, sid = item[0], item[1], item[2]
+                    ev_id = item[3] if len(item) > 3 else None
+                    comp_q = item[4] if len(item) > 4 else None
+                    res = self.mod.processar(texto, fonte=fonte, session_id=sid, event_id=ev_id)
+                    if comp_q is not None:
+                        comp_q.put(res)
+                except queue.Empty:
+                    pass
+
+        worker_th = threading.Thread(target=worker_loop, daemon=True)
+        worker_th.start()
+
+        try:
+            broadcaster = IpcEventBroadcaster(socket_path=self.sock_path, timeout=2.0)
+
+            # 1. Ativação e desligar fusion na sessao-A
+            broadcaster.emit_event(source="me6s", event_type="wake", text="assistente", session_id="sess-A")
+            cmd_ack = broadcaster.emit_event(source="me6s", event_type="comando", text="desligar fusion", session_id="sess-A")
+            self.assertEqual(cmd_ack.get("status"), "confirmacao_pendente")
+
+            # 2. Confirmação recebida com sessao divergente (sess-B) -> Rejeitada imediatamente
+            conf_div = broadcaster.emit_event(
+                source="me6s",
+                event_type="confirmar",
+                text="confirmar desligamento",
+                session_id="sess-B-divergente",
+            )
+            # Rejeitado no nível IPC / controller
+            self.assertIsNone(conf_div)  # Listener rejeitou evento com erro 'session_id_divergente'
+            self.assertIn("session_id_divergente", broadcaster.last_error)
+
+            # 3. Força expiração do tempo de confirmação
+            self.mod.limite = time.monotonic() - 1.0
+
+            # 4. Confirmação atrasada -> Rejeitada
+            conf_atrasada = broadcaster.emit_event(
+                source="me6s",
+                event_type="confirmar",
+                text="confirmar desligamento",
+                session_id="sess-A",
+            )
+            self.assertIsNone(conf_atrasada)
+            self.assertTrue(
+                any(err in broadcaster.last_error for err in ("estado_invalido", "aguardando_wake", "rejeitado")),
+                f"Erro inesperado: {broadcaster.last_error}"
+            )
+
+        finally:
+            worker_running.clear()
+            self.mod.loop_principal_ativo.clear()
+            worker_th.join(timeout=1.0)
+            listener.stop()
+
+    def test_23_explicit_cancellation_resets_state_and_logs_cancelado(self):
+        """23. Cancelamento explícito transiciona para 'cancelado', reseta estado para espera e registra [CANCELADO]."""
+        listener = IpcEventListener(
+            socket_path=self.sock_path,
+            allowed_uid=os.getuid(),
+            on_event=self.mod.on_ipc_event,
+        )
+        listener.start()
+        time.sleep(0.05)
+
+        self.mod.loop_principal_ativo.set()
+        worker_running = threading.Event()
+        worker_running.set()
+
+        def worker_loop():
+            while worker_running.is_set():
+                try:
+                    item = self.mod.fila_intencoes.get(timeout=0.05)
+                    fonte, texto, sid = item[0], item[1], item[2]
+                    ev_id = item[3] if len(item) > 3 else None
+                    comp_q = item[4] if len(item) > 4 else None
+                    res = self.mod.processar(texto, fonte=fonte, session_id=sid, event_id=ev_id)
+                    if comp_q is not None:
+                        comp_q.put(res)
+                except queue.Empty:
+                    pass
+
+        worker_th = threading.Thread(target=worker_loop, daemon=True)
+        worker_th.start()
+
+        try:
+            broadcaster = IpcEventBroadcaster(socket_path=self.sock_path, timeout=2.0)
+
+            # 1. Ativação e pedido de desligamento
+            broadcaster.emit_event(source="me6s", event_type="wake", text="assistente", session_id="sess-cancel-1")
+            cmd_ack = broadcaster.emit_event(source="me6s", event_type="comando", text="desligar fusion", session_id="sess-cancel-1")
+            self.assertEqual(cmd_ack.get("status"), "confirmacao_pendente")
+            self.assertEqual(self.mod.estado, "confirmacao")
+
+            # 2. Usuário diz 'cancelar'
+            cancel_ack = broadcaster.emit_event(
+                source="me6s",
+                event_type="cancelar",
+                text="cancelar",
+                session_id="sess-cancel-1",
+            )
+            self.assertIsNotNone(cancel_ack)
+            self.assertTrue(cancel_ack.get("sucesso"))
+            self.assertEqual(cancel_ack.get("status"), "cancelado")
+            self.assertEqual(cancel_ack.get("estado"), "espera")
+            self.assertIsNone(self.mod.pendente)
+            self.assertEqual(self.mod.estado, "espera")
+
+            # 3. Log do Gateway deve ser [CANCELADO]
+            from gateway.audio_gateway import _registrar_log_ack_gateway, logger as gw_logger
+            captured_logs = []
+            handler = logging.Handler()
+            handler.emit = lambda record: captured_logs.append(record.getMessage())
+            gw_logger.addHandler(handler)
+            try:
+                _registrar_log_ack_gateway(
+                    tipo_acao="cancelar",
+                    alvo="fusion",
+                    fonte="me6s",
+                    session_id="sess-cancel-1",
+                    ack=cancel_ack,
+                )
+                self.assertTrue(len(captured_logs) > 0)
+                self.assertIn("[CANCELADO]", captured_logs[-1])
+            finally:
+                gw_logger.removeHandler(handler)
+
+        finally:
+            worker_running.clear()
+            self.mod.loop_principal_ativo.clear()
+            worker_th.join(timeout=1.0)
+            listener.stop()
+
+    def test_24_duplicate_command_and_replay_during_confirmation(self):
+        """24. Duplicidade de comando durante confirmação pendente permanece deduplicado e segundo confirmar é idempotente."""
+        listener = IpcEventListener(
+            socket_path=self.sock_path,
+            allowed_uid=os.getuid(),
+            on_event=self.mod.on_ipc_event,
+        )
+        listener.start()
+        time.sleep(0.05)
+
+        self.mod.loop_principal_ativo.set()
+        worker_running = threading.Event()
+        worker_running.set()
+
+        def worker_loop():
+            while worker_running.is_set():
+                try:
+                    item = self.mod.fila_intencoes.get(timeout=0.05)
+                    fonte, texto, sid = item[0], item[1], item[2]
+                    ev_id = item[3] if len(item) > 3 else None
+                    comp_q = item[4] if len(item) > 4 else None
+                    res = self.mod.processar(texto, fonte=fonte, session_id=sid, event_id=ev_id)
+                    if comp_q is not None:
+                        comp_q.put(res)
+                except queue.Empty:
+                    pass
+
+        worker_th = threading.Thread(target=worker_loop, daemon=True)
+        worker_th.start()
+
+        try:
+            broadcaster = IpcEventBroadcaster(socket_path=self.sock_path, timeout=2.0)
+
+            # 1. Ativação e pedido desligar fusion
+            broadcaster.emit_event(source="me6s", event_type="wake", text="assistente", session_id="sess-dup-test-1")
+            cmd1 = broadcaster.emit_event(
+                source="me6s",
+                event_type="comando",
+                text="desligar fusion",
+                session_id="sess-dup-test-1",
+                event_id="ev-dup-cmd-1",
+            )
+            self.assertEqual(cmd1.get("status"), "confirmacao_pendente")
+
+            # 2. Segundo microfone (LG) ouve 'desligar fusion' antes do usuário confirmar -> Deduplicado como pendente
+            cmd2 = broadcaster.emit_event(
+                source="lg_mic",
+                event_type="comando",
+                text="desligar fusion",
+                session_id="sess-dup-test-1",
+                event_id="ev-dup-cmd-2",
+            )
+            self.assertIsNotNone(cmd2)
+            self.assertTrue(cmd2.get("sucesso"))
+            self.assertTrue(cmd2.get("deduplicado"))
+            self.assertEqual(cmd2.get("status"), "confirmacao_pendente")
+            self.assertEqual(cmd2.get("estado"), "confirmacao")
+
+            # 3. Confirmação legítima
+            conf1 = broadcaster.emit_event(
+                source="me6s",
+                event_type="confirmar",
+                text="confirmar desligamento",
+                session_id="sess-dup-test-1",
+                event_id="ev-dup-conf-1",
+            )
+            self.assertEqual(conf1.get("status"), "concluido")
+
+            # 4. Confirmação duplicada / replay (segundo microfone também ouviu ou rede retransmitiu)
+            conf2 = broadcaster.emit_event(
+                source="lg_mic",
+                event_type="confirmar",
+                text="confirmar desligamento",
+                session_id="sess-dup-test-1",
+                event_id="ev-dup-conf-2",
+            )
+            self.assertIsNotNone(conf2)
+            self.assertTrue(conf2.get("sucesso"))
+            self.assertTrue(conf2.get("deduplicado"))
+            self.assertEqual(conf2.get("status"), "concluido")
 
         finally:
             worker_running.clear()

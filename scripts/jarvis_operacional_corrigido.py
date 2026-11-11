@@ -198,8 +198,9 @@ def registrar_inicio_acao(event_id, acao, alvo, status="aceito"):
             "resultado": None,
             "erro": None,
         }
-        chave = f"{acao}:{alvo}"
-        acoes_recentes[chave] = time.time()
+        if status in ("concluido", "em_processamento"):
+            chave = f"{acao}:{alvo}"
+            acoes_recentes[chave] = time.time()
         ok, erro = _salvar_estado_acoes()
         return ok, erro
 
@@ -233,7 +234,7 @@ def atualizar_status_acao(event_id, status, acao=None, alvo=None, resultado=None
                 reg["erro"] = erro
             if status in ("concluido", "falha", "indeterminado"):
                 reg["timestamp_conclusao"] = time.time()
-        if acao and alvo:
+        if acao and alvo and status in ("concluido", "em_processamento"):
             acoes_recentes[f"{acao}:{alvo}"] = time.time()
         ok, erro = _salvar_estado_acoes()
         return ok, erro
@@ -323,6 +324,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
 
     if estado != "espera" and agora > limite:
         print("Tempo esgotado.", flush=True)
+        print("Tempo esgotado; pedido cancelado.", flush=True)
         estado = "espera"
         pendente = None
         fonte_ativa = None
@@ -346,6 +348,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
             "active_session_id": None,
             "estado": "espera",
             "acao": "cancelar",
+            "status": "cancelado",
             "processado": True,
         }
 
@@ -522,6 +525,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                         print("Wake-on-LAN enviado.", flush=True)
                         atualizar_status_acao(ev_id, "concluido", acao="ligar", alvo=alvo_nome, resultado={"wol": True})
                     else:
+                        print("SIMULAÇÃO: enviaria Wake-on-LAN.", flush=True)
                         print("SIMULACAO: Wake-on-LAN.", flush=True)
                         atualizar_status_acao(ev_id, "concluido", acao="ligar", alvo=alvo_nome, resultado={"simulacao": True})
                 except Exception as erro:
@@ -547,6 +551,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
             else:
                 # Simulação pura imediata sem I/O de rede desnecessário
                 print("LATENCIA: sondagem_wol=0.0000s (simulacao=True)", flush=True)
+                print("SIMULAÇÃO: enviaria Wake-on-LAN.", flush=True)
                 print("SIMULACAO: Wake-on-LAN.", flush=True)
                 atualizar_status_acao(ev_wol, "concluido", acao="ligar", alvo=alvo, resultado={"simulacao": True})
                 return {
@@ -593,13 +598,20 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
         pendente = alvo
         limite = time.monotonic() + 20
         print(
-            "CONFIRMAR desligamento de",
-            srv["nome"],
-            "? Diga confirmar ou cancelar.",
+            f'Confirme desligamento de {srv["nome"]}: diga "confirmar desligamento" ou "cancelar".',
             flush=True
         )
+        if event_id:
+            atualizar_status_acao(
+                event_id,
+                "confirmacao_pendente",
+                acao="desligar",
+                alvo=alvo,
+                resultado={"estado": "confirmacao"}
+            )
         return {
             "sucesso": True,
+            "status": "confirmacao_pendente",
             "event_id": event_id,
             "acao": "desligar_pendente",
             "alvo": alvo,
@@ -617,6 +629,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                 "active_session_id": sessao_ativa_id,
                 "estado": "confirmacao",
                 "deduplicado": True,
+                "status": "confirmacao_pendente",
                 "processado": True,
             }
 
@@ -629,6 +642,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                 "event_id": event_id,
                 "active_session_id": sessao_ativa_id,
                 "estado": estado,
+                "status": "falha",
                 "processado": False,
             }
 
@@ -752,6 +766,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                             if isinstance(atraso, (int, float)) and atraso > 0:
                                 time.sleep(atraso)
                             if codigo_simulado == 0:
+                                print("SIMULAÇÃO: enviaria desligamento SSH.", flush=True)
                                 print("SIMULACAO SSH para", srv_info["nome"], flush=True)
                                 atualizar_status_acao(
                                     ev_id,
@@ -951,6 +966,19 @@ def on_ipc_event(evento):
             # Deduplicação de comando reconhecido simultaneamente por ambos os microfones
             if texto in COMANDOS:
                 acao_cand, alvo_cand = COMANDOS[texto]
+                if estado == "confirmacao" and acao_cand == "desligar" and alvo_cand == pendente:
+                    print(f"IPC: Comando '{texto}' deduplicado (confirmacao ja pendente para '{pendente}').", flush=True)
+                    return {
+                        "sucesso": True,
+                        "event_id": event_id,
+                        "acao": "desligar_pendente",
+                        "alvo": pendente,
+                        "deduplicado": True,
+                        "active_session_id": sessao_ativa_id,
+                        "estado": "confirmacao",
+                        "status": "confirmacao_pendente",
+                        "processado": True,
+                    }
                 if ja_executado_recentemente(acao_cand, alvo_cand):
                     print(f"IPC: Comando '{texto}' deduplicado (acao '{acao_cand} {alvo_cand}' ja executada recentemente).", flush=True)
                     return {
@@ -1070,7 +1098,14 @@ def on_ipc_event(evento):
                 if "estado" not in resultado:
                     resultado["estado"] = estado
                 if "status" not in resultado:
-                    resultado["status"] = "concluido" if resultado.get("sucesso") else "falha"
+                    if resultado.get("estado") == "confirmacao" and resultado.get("acao") == "desligar_pendente":
+                        resultado["status"] = "confirmacao_pendente"
+                    elif resultado.get("acao") == "cancelar":
+                        resultado["status"] = "cancelado"
+                    elif resultado.get("sucesso"):
+                        resultado["status"] = "concluido"
+                    else:
+                        resultado["status"] = "falha"
             return resultado
         except queue.Empty:
             print("Timeout aguardando processamento do evento IPC pelo controlador.", flush=True)
@@ -1099,12 +1134,17 @@ def on_ipc_event(evento):
                 "status": "falha",
                 "processado": False,
             }
+        st_fallback = "aceito"
+        if tipo == "comando" and "desligar" in texto:
+            st_fallback = "confirmacao_pendente"
+        elif tipo == "cancelar":
+            st_fallback = "cancelado"
         return {
             "sucesso": True,
             "event_id": event_id,
             "active_session_id": sid if tipo == "wake" else sessao_ativa_id,
             "estado": estado,
-            "status": "aceito",
+            "status": st_fallback,
             "processado": False,
         }
 

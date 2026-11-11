@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # SCRIPT DE ROLLBACK ESPECÍFICO — JARVIS VOICE DUAL-MIC (ETAPA 1: SIMULAÇÃO)
-# Permite reverter para a versão anterior em simulação (v1: f6c72731...)
+# Permite reverter para a versão anterior em simulação (v2: 810aca6e..., v1: f6c72731...)
 # ou para o backup original de fábrica (original: c51d58e6...).
 # NUNCA REATIVA WAKE-ON-LAN OU SSH REAIS.
 # Preserva estritamente JARVIS_WOL_REAL=0, JARVIS_SSH_REAL=0 e JARVIS_REQUIRE_PERSISTENCE=1.
@@ -9,16 +9,19 @@
 # ==============================================================================
 set -euo pipefail
 
-TARGET_VERSION="${1:-v1}"
+TARGET_VERSION="${1:-v2}"
 
 EXPECTED_ORIGINAL_SHA="c51d58e6d3a19003eac55a827212e5e084d583fea43389ec0ea5466080ee2d54"
 EXPECTED_V1_SHA="f6c7273116aea4c4b34c0c6007d335b7925356ecb174e7066781716f2f604ed8"
+EXPECTED_V2_SHA="810aca6e25897f6b95aaf297ca8fdff7d9659270bf079a8c398c4ee21df93b42"
 
 TARGET_FILE="${JARVIS_TARGET_FILE:-/opt/jarvis-voice/jarvis-operacional.py}"
 BACKUP_ORIGINAL="${JARVIS_BACKUP_ORIGINAL:-/opt/jarvis-voice/jarvis-operacional.py.backup_original}"
 BACKUP_ORIGINAL_EXT="${JARVIS_BACKUP_EXTERNAL:-/var/backups/jarvis/jarvis-operacional.py.backup_original}"
 BACKUP_V1="${JARVIS_BACKUP_V1:-/opt/jarvis-voice/jarvis-operacional.py.backup_simulacao_v1}"
 BACKUP_V1_EXT="${JARVIS_BACKUP_V1_EXTERNAL:-/var/backups/jarvis/jarvis-operacional.py.backup_simulacao_v1}"
+BACKUP_V2="${JARVIS_BACKUP_V2:-/opt/jarvis-voice/jarvis-operacional.py.backup_simulacao_v2}"
+BACKUP_V2_EXT="${JARVIS_BACKUP_V2_EXTERNAL:-/var/backups/jarvis/jarvis-operacional.py.backup_simulacao_v2}"
 DROPIN_DIR="${JARVIS_DROPIN_DIR:-/etc/systemd/system/jarvis-voice.service.d}"
 
 echo "=== INICIANDO PROCEDIMENTO DE ROLLBACK SEGURO (ALVO: $TARGET_VERSION) ==="
@@ -26,7 +29,19 @@ echo "=== INICIANDO PROCEDIMENTO DE ROLLBACK SEGURO (ALVO: $TARGET_VERSION) ==="
 SOURCE_BACKUP=""
 EXPECTED_RESTORE_SHA=""
 
-if [ "$TARGET_VERSION" = "v1" ]; then
+if [ "$TARGET_VERSION" = "v2" ]; then
+    echo "[INFO] Revertendo para a versão de simulação v2 (810aca6e...)..."
+    if [ -f "$BACKUP_V2" ]; then
+        SOURCE_BACKUP="$BACKUP_V2"
+    elif [ -f "$BACKUP_V2_EXT" ]; then
+        SOURCE_BACKUP="$BACKUP_V2_EXT"
+    else
+        echo "FALHA!"
+        echo "ERRO CRÍTICO: Backup da versão v2 inexistente em $BACKUP_V2 e $BACKUP_V2_EXT!"
+        exit 1
+    fi
+    EXPECTED_RESTORE_SHA="$EXPECTED_V2_SHA"
+elif [ "$TARGET_VERSION" = "v1" ]; then
     echo "[INFO] Revertendo para a versão anterior de simulação (v1, pre-latência)..."
     if [ -f "$BACKUP_V1" ]; then
         SOURCE_BACKUP="$BACKUP_V1"
@@ -52,7 +67,7 @@ elif [ "$TARGET_VERSION" = "original" ]; then
     EXPECTED_RESTORE_SHA="$EXPECTED_ORIGINAL_SHA"
 else
     echo "FALHA!"
-    echo "ERRO: Versão de rollback desconhecida: $TARGET_VERSION. Use 'v1' ou 'original'."
+    echo "ERRO: Versão de rollback desconhecida: $TARGET_VERSION. Use 'v2', 'v1' ou 'original'."
     exit 1
 fi
 
@@ -173,7 +188,7 @@ if ! systemctl restart jarvis-voice.service; then
     echo "ERRO CRÍTICO: jarvis-voice.service não pôde ser reiniciado após restauração!"
     exit 1
 fi
-if [ "$TARGET_VERSION" = "v1" ]; then
+if [ "$TARGET_VERSION" = "v1" ] || [ "$TARGET_VERSION" = "v2" ]; then
     if ! systemctl restart jarvis-audio-gateway.service; then
         echo "FALHA!"
         echo "ERRO CRÍTICO: jarvis-audio-gateway.service não pôde ser reiniciado após rollback!"
@@ -187,7 +202,7 @@ if ! systemctl is-active --quiet jarvis-voice.service; then
     echo "ERRO CRÍTICO: jarvis-voice.service inativo mesmo após tentativa de restart!"
     exit 1
 fi
-if [ "$TARGET_VERSION" = "v1" ] && ! systemctl is-active --quiet jarvis-audio-gateway.service; then
+if { [ "$TARGET_VERSION" = "v1" ] || [ "$TARGET_VERSION" = "v2" ]; } && ! systemctl is-active --quiet jarvis-audio-gateway.service; then
     echo "FALHA!"
     echo "ERRO CRÍTICO: jarvis-audio-gateway.service inativo após rollback!"
     exit 1

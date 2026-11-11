@@ -241,7 +241,8 @@ class IsolatedTestRunner:
                         "event_id": ev_id,
                         "estado": "confirmacao",
                         "processado": True,
-                        "status": "aceito",
+                        "status": "confirmacao_pendente",
+                        "acao": "desligar_pendente",
                         "active_session_id": sid,
                         "alvo": alvo,
                     }
@@ -622,6 +623,10 @@ class IsolatedTestRunner:
         with urllib.request.urlopen(req_cmd, timeout=2) as resp:
             res_cmd = json.loads(resp.read().decode("utf-8"))
             assert res_cmd.get("sucesso") is True, "Falha no comando de desligar"
+            assert res_cmd.get("status") == "confirmacao_pendente", f"Status esperado 'confirmacao_pendente', obtido {res_cmd.get('status')}"
+            assert res_cmd.get("resultado", {}).get("confirmacao_necessaria") is True, "Confirmação necessária ausente no resultado"
+            assert res_cmd.get("ack", {}).get("status") == "confirmacao_pendente", f"ACK status divergente: {res_cmd.get('ack')}"
+            self.log("  [OK] Status 'confirmacao_pendente' validado no ACK e retorno da API")
 
         time.sleep(0.2)
         assert self.controller_state["estado"] == "confirmacao", "Controlador deveria estar em estado 'confirmacao'"

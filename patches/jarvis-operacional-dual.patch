@@ -17,7 +17,7 @@
  SetLogLevel(-1)
  
  MODELO = "/opt/jarvis-voice/vosk-model-small-pt-0.3"
-@@ -39,46 +42,375 @@
+@@ -39,46 +42,378 @@
      "[unk]"
  ]
  
@@ -183,8 +183,9 @@
 +            "resultado": None,
 +            "erro": None,
 +        }
-+        chave = f"{acao}:{alvo}"
-+        acoes_recentes[chave] = time.time()
++        if status in ("concluido", "em_processamento"):
++            chave = f"{acao}:{alvo}"
++            acoes_recentes[chave] = time.time()
 +        ok, erro = _salvar_estado_acoes()
 +        return ok, erro
 +
@@ -218,7 +219,7 @@
 +                reg["erro"] = erro
 +            if status in ("concluido", "falha", "indeterminado"):
 +                reg["timestamp_conclusao"] = time.time()
-+        if acao and alvo:
++        if acao and alvo and status in ("concluido", "em_processamento"):
 +            acoes_recentes[f"{acao}:{alvo}"] = time.time()
 +        ok, erro = _salvar_estado_acoes()
 +        return ok, erro
@@ -310,6 +311,7 @@
 +
      if estado != "espera" and agora > limite:
          print("Tempo esgotado.", flush=True)
++        print("Tempo esgotado; pedido cancelado.", flush=True)
          estado = "espera"
          pendente = None
 +        fonte_ativa = None
@@ -334,6 +336,7 @@
 +            "active_session_id": None,
 +            "estado": "espera",
 +            "acao": "cancelar",
++            "status": "cancelado",
 +            "processado": True,
 +        }
  
@@ -404,7 +407,7 @@
  
          # Correcao restrita ao teste de reconhecimento
          if texto == "dois ligar fusion":
-@@ -87,45 +419,156 @@
+@@ -87,45 +422,158 @@
  
          if texto not in COMANDOS:
              print("Comando ignorado.", flush=True)
@@ -530,6 +533,7 @@
 -            return
 +                        atualizar_status_acao(ev_id, "concluido", acao="ligar", alvo=alvo_nome, resultado={"wol": True})
 +                    else:
++                        print("SIMULAÇÃO: enviaria Wake-on-LAN.", flush=True)
 +                        print("SIMULACAO: Wake-on-LAN.", flush=True)
 +                        atualizar_status_acao(ev_id, "concluido", acao="ligar", alvo=alvo_nome, resultado={"simulacao": True})
 +                except Exception as erro:
@@ -555,6 +559,7 @@
 +            else:
 +                # Simulação pura imediata sem I/O de rede desnecessário
 +                print("LATENCIA: sondagem_wol=0.0000s (simulacao=True)", flush=True)
++                print("SIMULAÇÃO: enviaria Wake-on-LAN.", flush=True)
 +                print("SIMULACAO: Wake-on-LAN.", flush=True)
 +                atualizar_status_acao(ev_wol, "concluido", acao="ligar", alvo=alvo, resultado={"simulacao": True})
 +                return {
@@ -580,7 +585,7 @@
  
          if not acessivel:
              print(
-@@ -134,7 +577,17 @@
+@@ -134,23 +582,83 @@
                  flush=True
              )
              estado = "espera"
@@ -599,13 +604,26 @@
  
          estado = "confirmacao"
          pendente = alvo
-@@ -145,12 +598,53 @@
-             "? Diga confirmar ou cancelar.",
+         limite = time.monotonic() + 20
+         print(
+-            "CONFIRMAR desligamento de",
+-            srv["nome"],
+-            "? Diga confirmar ou cancelar.",
++            f'Confirme desligamento de {srv["nome"]}: diga "confirmar desligamento" ou "cancelar".',
              flush=True
          )
 -        return
++        if event_id:
++            atualizar_status_acao(
++                event_id,
++                "confirmacao_pendente",
++                acao="desligar",
++                alvo=alvo,
++                resultado={"estado": "confirmacao"}
++            )
 +        return {
 +            "sucesso": True,
++            "status": "confirmacao_pendente",
 +            "event_id": event_id,
 +            "acao": "desligar_pendente",
 +            "alvo": alvo,
@@ -623,6 +641,7 @@
 +                "active_session_id": sessao_ativa_id,
 +                "estado": "confirmacao",
 +                "deduplicado": True,
++                "status": "confirmacao_pendente",
 +                "processado": True,
 +            }
 +
@@ -635,6 +654,7 @@
 +                "event_id": event_id,
 +                "active_session_id": sessao_ativa_id,
 +                "estado": estado,
++                "status": "falha",
 +                "processado": False,
 +            }
 +
@@ -655,7 +675,7 @@
                  if os.getenv("JARVIS_SSH_REAL") == "1":
                      if texto != "confirmar desligamento":
                          print(
-@@ -159,94 +653,529 @@
+@@ -159,94 +667,555 @@
                          )
                          estado = "espera"
                          pendente = None
@@ -784,6 +804,7 @@
 +                            if isinstance(atraso, (int, float)) and atraso > 0:
 +                                time.sleep(atraso)
 +                            if codigo_simulado == 0:
++                                print("SIMULAÇÃO: enviaria desligamento SSH.", flush=True)
 +                                print("SIMULACAO SSH para", srv_info["nome"], flush=True)
 +                                atualizar_status_acao(
 +                                    ev_id,
@@ -989,6 +1010,19 @@
 +            # Deduplicação de comando reconhecido simultaneamente por ambos os microfones
 +            if texto in COMANDOS:
 +                acao_cand, alvo_cand = COMANDOS[texto]
++                if estado == "confirmacao" and acao_cand == "desligar" and alvo_cand == pendente:
++                    print(f"IPC: Comando '{texto}' deduplicado (confirmacao ja pendente para '{pendente}').", flush=True)
++                    return {
++                        "sucesso": True,
++                        "event_id": event_id,
++                        "acao": "desligar_pendente",
++                        "alvo": pendente,
++                        "deduplicado": True,
++                        "active_session_id": sessao_ativa_id,
++                        "estado": "confirmacao",
++                        "status": "confirmacao_pendente",
++                        "processado": True,
++                    }
 +                if ja_executado_recentemente(acao_cand, alvo_cand):
 +                    print(f"IPC: Comando '{texto}' deduplicado (acao '{acao_cand} {alvo_cand}' ja executada recentemente).", flush=True)
 +                    return {
@@ -1117,7 +1151,14 @@
 +                if "estado" not in resultado:
 +                    resultado["estado"] = estado
 +                if "status" not in resultado:
-+                    resultado["status"] = "concluido" if resultado.get("sucesso") else "falha"
++                    if resultado.get("estado") == "confirmacao" and resultado.get("acao") == "desligar_pendente":
++                        resultado["status"] = "confirmacao_pendente"
++                    elif resultado.get("acao") == "cancelar":
++                        resultado["status"] = "cancelado"
++                    elif resultado.get("sucesso"):
++                        resultado["status"] = "concluido"
++                    else:
++                        resultado["status"] = "falha"
 +            return resultado
 +        except queue.Empty:
 +            print("Timeout aguardando processamento do evento IPC pelo controlador.", flush=True)
@@ -1146,12 +1187,17 @@
 +                "status": "falha",
 +                "processado": False,
 +            }
++        st_fallback = "aceito"
++        if tipo == "comando" and "desligar" in texto:
++            st_fallback = "confirmacao_pendente"
++        elif tipo == "cancelar":
++            st_fallback = "cancelado"
 +        return {
 +            "sucesso": True,
 +            "event_id": event_id,
 +            "active_session_id": sid if tipo == "wake" else sessao_ativa_id,
 +            "estado": estado,
-+            "status": "aceito",
++            "status": st_fallback,
 +            "processado": False,
 +        }
  
@@ -1243,7 +1289,7 @@
          if item is None:
              break
  
-@@ -260,11 +1189,76 @@
+@@ -260,11 +1229,76 @@
          if rec.AcceptWaveform(audio):
              texto = json.loads(rec.Result()).get("text", "").strip()
              if texto and texto != "[unk]":

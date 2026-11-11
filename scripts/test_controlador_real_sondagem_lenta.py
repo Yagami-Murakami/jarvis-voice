@@ -310,7 +310,15 @@ def testar_implementacao_real():
             assert "[FALHA]" in harness.captured_logs[-1]
             assert "timeout" in harness.captured_logs[-1]
 
-            print(f"  {GREEN}[OK]{RESET} Todos os 4 estados ([COMANDO ACEITO], [EM PROCESSAMENTO], [CONCLUÍDO], [FALHA]) devidamente diferenciados nos logs.")
+            # 6. AGUARDANDO CONFIRMAÇÃO
+            _registrar_log_ack_gateway("desligar", "fusion", "lg_mic", "sess-log-6", {"sucesso": True, "status": "confirmacao_pendente", "acao": "desligar_pendente"})
+            assert "[AGUARDANDO CONFIRMAÇÃO]" in harness.captured_logs[-1]
+
+            # 7. CANCELADO
+            _registrar_log_ack_gateway("cancelar", "fusion", "lg_mic", "sess-log-7", {"sucesso": True, "status": "cancelado"})
+            assert "[CANCELADO]" in harness.captured_logs[-1]
+
+            print(f"  {GREEN}[OK]{RESET} Todos os estados ([COMANDO ACEITO], [AGUARDANDO CONFIRMAÇÃO], [EM PROCESSAMENTO], [CONCLUÍDO], [CANCELADO], [FALHA]) devidamente diferenciados nos logs.")
 
         finally:
             harness.tear_down()

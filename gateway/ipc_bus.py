@@ -159,10 +159,10 @@ class IpcEventBroadcaster:
                 return None
 
             # 4. Validação obrigatória de confirmação real do processamento
-            # Exige 'processado': True OU status válido ('aceito', 'em_processamento', 'concluido')
+            # Exige 'processado': True OU status válido ('aceito', 'em_processamento', 'concluido', 'confirmacao_pendente', 'cancelado')
             processado = ack.get("processado")
             status_ack = ack.get("status")
-            confirmacao_valida = (processado is True) or (status_ack in ("aceito", "em_processamento", "concluido"))
+            confirmacao_valida = (processado is True) or (status_ack in ("aceito", "em_processamento", "concluido", "confirmacao_pendente", "cancelado"))
             if not confirmacao_valida:
                 logger.warning(
                     "Falha IPC: ACK rejeitado - confirmação real do processamento ausente (processado=%s, status=%s)",
