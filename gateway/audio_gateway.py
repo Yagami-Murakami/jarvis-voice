@@ -232,14 +232,17 @@ class SessionArbitrator:
                         alvo,
                         delta_action,
                     )
+                    sid = self.session_id
                     self.state = "espera"
                     self.session_id = None
                     self._registrar_evento("action_deduplicated", source, acao=acao, alvo=alvo, delta=delta_action)
                     return {
                         "valido": False,
                         "motivo": f"Ação '{acao} {alvo}' recentemente executada (idempotência)",
-                        "session_id": self.session_id,
+                        "session_id": sid,
                         "deduplicado": True,
+                        "acao": acao,
+                        "alvo": alvo,
                     }
                 self._recent_actions[(acao, alvo)] = now
 
@@ -752,26 +755,34 @@ class LgMicServer(threading.Thread):
         if self.arbitrator.state == "comando":
             res = self.arbitrator.report_command("lg_mic", texto)
             logger.info("[Vosk-LG] Resultado do comando: %s", res)
-            if res.get("valido") and self.ipc_broadcaster:
-                if res.get("deduplicado"):
-                    logger.info("[Vosk-LG] Comando deduplicado localmente, nenhum evento IPC emitido.")
-                    return
-                ack = self.ipc_broadcaster.emit_event(
-                    source="lg_mic",
-                    event_type="comando",
-                    text=texto,
-                    session_id=res.get("session_id"),
-                    extra=res,
-                )
-                if isinstance(ack, dict) and ack.get("active_session_id"):
-                    self.arbitrator.sync_session_id(ack["active_session_id"])
-                _registrar_log_ack_gateway(
-                    tipo_acao=res.get("acao", "comando"),
-                    alvo=res.get("alvo"),
-                    fonte="lg_mic",
-                    session_id=res.get("session_id"),
-                    ack=ack,
-                )
+            if self.ipc_broadcaster:
+                if res.get("valido"):
+                    ack = self.ipc_broadcaster.emit_event(
+                        source="lg_mic",
+                        event_type="comando",
+                        text=texto,
+                        session_id=res.get("session_id"),
+                        extra=res,
+                    )
+                    if isinstance(ack, dict) and ack.get("active_session_id"):
+                        self.arbitrator.sync_session_id(ack["active_session_id"])
+                    _registrar_log_ack_gateway(
+                        tipo_acao=res.get("acao", "comando"),
+                        alvo=res.get("alvo"),
+                        fonte="lg_mic",
+                        session_id=res.get("session_id"),
+                        ack=ack,
+                    )
+                elif res.get("deduplicado") and res.get("session_id"):
+                    ack = self.ipc_broadcaster.emit_event(
+                        source="lg_mic",
+                        event_type="comando",
+                        text=texto,
+                        session_id=res.get("session_id"),
+                        extra=res,
+                    )
+                    if isinstance(ack, dict) and ack.get("active_session_id"):
+                        self.arbitrator.sync_session_id(ack["active_session_id"])
         elif self.arbitrator.state == "confirmacao":
             if "cancelar" in texto:
                 res = self.arbitrator.report_cancellation("lg_mic")
@@ -924,6 +935,14 @@ class Me6sJournalMonitor(threading.Thread):
             self.pending_session_id = sid
             return
 
+        # Sincroniza expiração e cancelamento emitidos pelo controlador central
+        if "Tempo esgotado" in linha or "Cancelado." in linha:
+            logger.info("[Me6sJournalMonitor] Resetando árbitro por expiração/cancelamento do controlador")
+            self.arbitrator.report_cancellation("controller")
+            self.current_origin = "me6s"
+            self.pending_session_id = None
+            return
+
         # Reseta origem por expiração se passou da janela temporal
         if self.current_origin != "me6s" and (agora - self.last_origin_time) > 2.0:
             self.current_origin = "me6s"
@@ -1031,12 +1050,22 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
                 is_new, sid = self.server.arbitrator.report_wake(fonte)
                 resultado = {"sucesso": True, "is_new_session": is_new, "session_id": sid}
                 if is_new and getattr(self.server, "ipc_broadcaster", None):
-                    self.server.ipc_broadcaster.emit_event(fonte, "wake", "assistente", session_id=sid)
+                    ack = self.server.ipc_broadcaster.emit_event(fonte, "wake", "assistente", session_id=sid)
+                    resultado["ack"] = ack
+                    if isinstance(ack, dict):
+                        if not ack.get("sucesso"):
+                            resultado["sucesso"] = False
+                            resultado["erro"] = ack.get("erro", "falha_controlador")
+                        elif ack.get("active_session_id"):
+                            official_sid = ack["active_session_id"]
+                            if official_sid != self.server.arbitrator.session_id:
+                                self.server.arbitrator.sync_session_id(official_sid)
+                                resultado["session_id"] = official_sid
             elif evento == "command":
                 res = self.server.arbitrator.report_command(fonte, texto)
                 resultado = {"sucesso": True, "resultado": res}
-                if res.get("valido") and getattr(self.server, "ipc_broadcaster", None):
-                    if not res.get("deduplicado"):
+                if getattr(self.server, "ipc_broadcaster", None):
+                    if res.get("valido"):
                         ack = self.server.ipc_broadcaster.emit_event(
                             fonte, "comando", texto, session_id=res.get("session_id"), extra=res
                         )
@@ -1049,6 +1078,8 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
                             if not ack.get("sucesso"):
                                 resultado["sucesso"] = False
                                 resultado["erro"] = ack.get("erro", "falha_controlador")
+                            elif ack.get("active_session_id"):
+                                self.server.arbitrator.sync_session_id(ack["active_session_id"])
                         _registrar_log_ack_gateway(
                             tipo_acao=res.get("acao", "comando"),
                             alvo=res.get("alvo"),
@@ -1057,6 +1088,14 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
                             ack=ack,
                             erro_fallback=resultado.get("erro", "falha_controlador"),
                         )
+                    elif res.get("deduplicado") and res.get("session_id"):
+                        ack = self.server.ipc_broadcaster.emit_event(
+                            fonte, "comando", texto, session_id=res.get("session_id"), extra=res
+                        )
+                        resultado["ack"] = ack
+                        resultado["status"] = "deduplicado"
+                        if isinstance(ack, dict) and ack.get("active_session_id"):
+                            self.server.arbitrator.sync_session_id(ack["active_session_id"])
                     else:
                         resultado["status"] = res.get("status", "deduplicado")
             elif evento == "confirm":
