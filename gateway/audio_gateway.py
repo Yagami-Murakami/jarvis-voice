@@ -165,6 +165,8 @@ class SessionArbitrator:
                 if self.state == "confirmacao":
                     if texto == "cancelar":
                         return self.report_cancellation(source)
+                    if texto in ("confirmar", "confirmar desligar", "confirmar desligamento") or "confirmar" in texto:
+                        return self.report_confirmation(source)
                     if texto in COMANDOS:
                         acao_cand, alvo_cand = COMANDOS[texto]
                         if acao_cand == "desligar" and (alvo_cand == self.target_computer or not self.target_computer):
@@ -1066,8 +1068,10 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
                 resultado = {"sucesso": True, "resultado": res}
                 if getattr(self.server, "ipc_broadcaster", None):
                     if res.get("valido"):
+                        tipo_ipc = "confirmar" if res.get("acao") == "desligar_confirmado" else "comando"
+                        texto_ipc = texto if texto else ("confirmar desligamento" if tipo_ipc == "confirmar" else "")
                         ack = self.server.ipc_broadcaster.emit_event(
-                            fonte, "comando", texto, session_id=res.get("session_id"), extra=res
+                            fonte, tipo_ipc, texto_ipc, session_id=res.get("session_id"), extra=res
                         )
                         resultado["ack"] = ack
                         if ack is None:
@@ -1081,7 +1085,7 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
                             elif ack.get("active_session_id"):
                                 self.server.arbitrator.sync_session_id(ack["active_session_id"])
                         _registrar_log_ack_gateway(
-                            tipo_acao=res.get("acao", "comando"),
+                            tipo_acao=res.get("acao", tipo_ipc),
                             alvo=res.get("alvo"),
                             fonte=fonte,
                             session_id=res.get("session_id"),
@@ -1089,8 +1093,10 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
                             erro_fallback=resultado.get("erro", "falha_controlador"),
                         )
                     elif res.get("deduplicado") and res.get("session_id"):
+                        tipo_ipc = "confirmar" if res.get("acao") == "desligar_confirmado" else "comando"
+                        texto_ipc = texto if texto else ("confirmar desligamento" if tipo_ipc == "confirmar" else "")
                         ack = self.server.ipc_broadcaster.emit_event(
-                            fonte, "comando", texto, session_id=res.get("session_id"), extra=res
+                            fonte, tipo_ipc, texto_ipc, session_id=res.get("session_id"), extra=res
                         )
                         resultado["ack"] = ack
                         resultado["status"] = "deduplicado"
@@ -1103,8 +1109,9 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
                 resultado = {"sucesso": True, "resultado": res}
                 if res.get("valido") and getattr(self.server, "ipc_broadcaster", None):
                     if not res.get("deduplicado"):
+                        texto_conf = texto if texto else "confirmar desligamento"
                         ack = self.server.ipc_broadcaster.emit_event(
-                            fonte, "confirmar", "confirmar desligamento", session_id=res.get("session_id"), extra=res
+                            fonte, "confirmar", texto_conf, session_id=res.get("session_id"), extra=res
                         )
                         resultado["ack"] = ack
                         if ack is None:

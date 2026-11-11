@@ -11,14 +11,33 @@ import sys
 import os
 import json
 import time
+import socket
 import urllib.request
 import subprocess
 
+# Resolução robusta de dependências do painel e configurações de rede
 sys.path.insert(0, "/home/tuninho/homelab-panel")
 try:
     import app as painel
-except ImportError:
+except Exception:
     painel = None
+
+SERVIDORES_FALLBACK = {
+    "fusion": {
+        "nome": "Fusion (Windows)",
+        "ip": "192.168.0.128",
+        "mac": "18:31:BF:6A:EA:50",
+        "broadcast": "255.255.255.255",
+        "wol_python": True,
+    },
+    "ananuke": {
+        "nome": "Ananuke (Debian)",
+        "ip": "192.168.0.131",
+        "mac": "18:31:BF:6A:EA:51",
+        "broadcast": "255.255.255.255",
+        "wol_python": True,
+    },
+}
 
 BASE_URL = "http://127.0.0.1:8089"
 
@@ -45,6 +64,18 @@ def obter_acoes_recentes():
             return {}
     return {}
 
+def verificar_conectividade_host(ip, porta=22):
+    try:
+        with socket.create_connection((ip, porta), timeout=0.5):
+            return True
+    except Exception:
+        pass
+    try:
+        res = subprocess.run(["ping", "-c", "1", "-W", "1", ip], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return res.returncode == 0
+    except Exception:
+        return False
+
 def main():
     print("==========================================================================")
     print("INICIANDO VALIDAÇÃO DA FASE B SUPERVISIONADA (WOL REAL: FUSION)")
@@ -55,12 +86,12 @@ def main():
     print(f"Status Gateway: ME6S={mics['me6s']['active']}, LG={mics['lg_mic']['connected']}, TLS={mics['lg_mic']['tls_active']}")
 
     # 2. Status físico atual do Fusion
-    if painel and "fusion" in painel.SERVIDORES:
-        fusion_ativo = painel.host_ligado(painel.SERVIDORES["fusion"])
-        print(f"Status de conectividade de Fusion (192.168.0.128): {'LIGADO / ACESSÍVEL' if fusion_ativo else 'DESLIGADO'}")
+    srv_fusion = painel.SERVIDORES["fusion"] if (painel and hasattr(painel, "SERVIDORES") and "fusion" in painel.SERVIDORES) else SERVIDORES_FALLBACK["fusion"]
+    if painel and hasattr(painel, "host_ligado"):
+        fusion_ativo = painel.host_ligado(srv_fusion)
     else:
-        fusion_ativo = False
-        print("Aviso: Módulo painel não carregado diretamente ou Fusion ausente.")
+        fusion_ativo = verificar_conectividade_host(srv_fusion["ip"])
+    print(f"Status de conectividade de Fusion ({srv_fusion['ip']}): {'LIGADO / ACESSÍVEL' if fusion_ativo else 'DESLIGADO'}")
 
     # 3. Teste de Wake-on-LAN para Fusion
     print("\n[TESTE 1] Enviando comando 'ligar fusion' via Gateway...")
@@ -122,17 +153,22 @@ def main():
     # 5. Teste de Isolamento de Desligamento SSH para Fusion (Permanece simulado)
     print("\n[TESTE 3] Validando que SSH permanece SIMULADO para Fusion (JARVIS_SSH_REAL=0)...")
     time.sleep(4.0)
+    t_inicio_teste3 = time.time()
     post_inject({"fonte": "lg_mic", "evento": "wake"})
     time.sleep(0.05)
     r_shut = post_inject({"fonte": "lg_mic", "evento": "command", "texto": "desligar fusion"})
     print(f"  Comando desligar: {r_shut.get('resultado')}")
+    assert r_shut.get("sucesso") is True, f"Comando desligar falhou: {r_shut}"
     assert r_shut["resultado"].get("confirmacao_necessaria") is True
+    assert r_shut["resultado"].get("status") == "confirmacao_pendente"
 
-    # Confirmação
+    # Confirmação pelo ME6S
     time.sleep(0.1)
-    r_conf = post_inject({"fonte": "me6s", "evento": "command", "texto": "confirmar desligamento"})
+    r_conf = post_inject({"fonte": "me6s", "evento": "confirm", "texto": "confirmar desligamento"})
     print(f"  Confirmação: {r_conf.get('resultado')}")
-    assert r_conf.get("sucesso") is True
+    assert r_conf.get("sucesso") is True, f"Requisição de confirmação falhou: {r_conf}"
+    assert r_conf.get("resultado", {}).get("valido") is True, f"Confirmação inválida: {r_conf}"
+    assert r_conf.get("resultado", {}).get("acao") == "desligar_confirmado", f"Ação inesperada: {r_conf}"
     
     time.sleep(1.0)
     acoes3 = obter_acoes_recentes()
@@ -140,22 +176,30 @@ def main():
     ev_shut = None
     for eid, reg in sorted(reg_acoes3.items(), key=lambda x: x[1].get("timestamp_inicio", 0), reverse=True):
         if reg.get("acao") == "desligar" and reg.get("alvo") == "fusion" and reg.get("status") == "concluido":
-            ev_shut = reg
-            break
-    assert ev_shut is not None, "Registro de desligamento confirmado para fusion não encontrado!"
-    print(f"  Registro persistido de desligamento: {ev_shut.get('resultado')}")
+            if reg.get("timestamp_inicio", 0) >= (t_inicio_teste3 - 2.0):
+                ev_shut = reg
+                break
+    assert ev_shut is not None, f"Registro recente de desligamento confirmado para fusion não encontrado na persistência (t >= {t_inicio_teste3})!"
+    print(f"  Registro persistido de desligamento recente: {ev_shut.get('resultado')}")
     # Com JARVIS_SSH_REAL=0, o worker não executa subprocess real, mock ou envio real; simulacao confirmada
-    print("  ✓ Aprovado com Segurança: SSH para Fusion confirmado sem qualquer impacto físico.")
+    print("  ✓ Aprovado com Segurança: SSH para Fusion confirmado sem qualquer impacto físico (JARVIS_SSH_REAL=0 mantido).")
 
     # 6. Teste de Transmissão Direta de Magic Packet para Fusion
     print("\n[TESTE 4] Testando despacho direto do Magic Packet para a placa de rede de Fusion...")
-    if painel and "fusion" in painel.SERVIDORES:
-        mac_fusion = painel.SERVIDORES["fusion"]["mac"]
-        painel.enviar_magic_packet(mac_fusion)
-        print(f"  Magic packet via Python socket enviado para {mac_fusion} (broadcast 255.255.255.255:9)")
-        subp = subprocess.run(["wakeonlan", mac_fusion], capture_output=True, text=True, check=True)
-        print(f"  Magic packet via /usr/bin/wakeonlan: {subp.stdout.strip()}")
-        print("  ✓ Aprovado: Transmissão física de pacotes WoL operacional na interface de rede.")
+    mac_fusion = srv_fusion["mac"]
+    broadcast_ip = srv_fusion.get("broadcast", "255.255.255.255")
+
+    # Disparo direto via Python socket broadcast
+    mac_bytes = bytes.fromhex(mac_fusion.replace(":", "").replace("-", ""))
+    magic_packet = b"\xff" * 6 + mac_bytes * 16
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        s.sendto(magic_packet, (broadcast_ip, 9))
+    print(f"  Magic packet via Python socket enviado para {mac_fusion} (broadcast {broadcast_ip}:9)")
+
+    subp = subprocess.run(["wakeonlan", mac_fusion], capture_output=True, text=True, check=True)
+    print(f"  Magic packet via /usr/bin/wakeonlan: {subp.stdout.strip()}")
+    print("  ✓ Aprovado: Transmissão física de pacotes WoL operacional na interface de rede.")
 
     print("\n==========================================================================")
     print("TODOS OS TESTES DA FASE B FORAM APROVADOS COM 100% DE SUCESSO!")

@@ -335,8 +335,13 @@ class JarvisLogMonitor:
             return
 
         # 4. Wake-on-LAN enviado
-        if "Pacote Wake-on-LAN enviado." in linha or "SIMULAÇÃO: enviaria Wake-on-LAN." in linha:
-            simul = " (Simulação)" if "SIMULAÇÃO" in linha else ""
+        if (
+            "Pacote Wake-on-LAN enviado." in linha
+            or "Wake-on-LAN enviado." in linha
+            or "SIMULAÇÃO: enviaria Wake-on-LAN." in linha
+            or "SIMULACAO: Wake-on-LAN." in linha
+        ):
+            simul = " (Simulação)" if ("SIMULAÇÃO" in linha or "SIMULACAO" in linha) else ""
             self.state.atualizar(
                 status="success",
                 mensagem="Wake-on-LAN enviado!",
@@ -346,7 +351,7 @@ class JarvisLogMonitor:
             return
 
         # 5. Já está acessível
-        if "Computador já está acessível." in linha:
+        if "Computador já está acessível." in linha or "Computador ja esta acessivel." in linha:
             self.state.atualizar(
                 status="success",
                 mensagem="Computador já ligado",
@@ -370,8 +375,14 @@ class JarvisLogMonitor:
             return
 
         # 7. Desligamento realizado via SSH
-        if "SSH: código de retorno 0" in linha or "SIMULAÇÃO: enviaria desligamento SSH." in linha:
-            simul = " (Simulação)" if "SIMULAÇÃO" in linha else ""
+        if (
+            "SSH: código de retorno 0" in linha
+            or "SSH: codigo de retorno 0" in linha
+            or "SSH enviado com sucesso" in linha
+            or "SIMULAÇÃO: enviaria desligamento SSH." in linha
+            or "SIMULACAO SSH para" in linha
+        ):
+            simul = " (Simulação)" if ("SIMULAÇÃO" in linha or "SIMULACAO" in linha) else ""
             self.state.atualizar(
                 status="success",
                 mensagem="Desligamento solicitado!",
@@ -381,7 +392,12 @@ class JarvisLogMonitor:
             return
 
         # 8. Desligamento bloqueado
-        if "Desligamento bloqueado: host não acessível." in linha:
+        if (
+            "Desligamento bloqueado" in linha
+            or "DESLIGAMENTO BLOQUEADO" in linha
+            or "computador inacessivel" in linha
+            or "computador nao acessivel" in linha
+        ):
             self.state.atualizar(
                 status="error",
                 mensagem="Desligamento bloqueado",

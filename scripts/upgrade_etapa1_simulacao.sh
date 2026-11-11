@@ -13,7 +13,8 @@ EXPECTED_ORIGINAL_SHA="c51d58e6d3a19003eac55a827212e5e084d583fea43389ec0ea546608
 EXPECTED_V1_SHA="f6c7273116aea4c4b34c0c6007d335b7925356ecb174e7066781716f2f604ed8"
 EXPECTED_V2_SHA="810aca6e25897f6b95aaf297ca8fdff7d9659270bf079a8c398c4ee21df93b42"
 EXPECTED_V3_SHA="c5ea9b984434e33ff9b194a3c873cfb826178a4e853e42ebac3be55b4060fecf"
-EXPECTED_NEW_SHA="4a52006def0c54ddcb468561e53c09d2066faa231c86d653893998b73700707f"
+EXPECTED_PREV_SHA="4a52006def0c54ddcb468561e53c09d2066faa231c86d653893998b73700707f"
+EXPECTED_NEW_SHA="63ffa8abc36265f65956677084fe574f1a206839d5b2051c066fab0361fc5c41"
 
 TARGET_FILE="${JARVIS_TARGET_FILE:-/opt/jarvis-voice/jarvis-operacional.py}"
 BACKUP_ORIGINAL="${JARVIS_BACKUP_ORIGINAL:-/opt/jarvis-voice/jarvis-operacional.py.backup_original}"
@@ -93,7 +94,7 @@ elif [ "$CURRENT_SHA" = "$EXPECTED_V1_SHA" ]; then
     echo "  Este script é homologado exclusivamente para o upgrade v2 -> v3."
     echo "Procedimento de upgrade abortado imediatamente (fail-closed)."
     exit 1
-elif [ "$CURRENT_SHA" != "$EXPECTED_V2_SHA" ] && [ "$CURRENT_SHA" != "$EXPECTED_V3_SHA" ]; then
+elif [ "$CURRENT_SHA" != "$EXPECTED_V2_SHA" ] && [ "$CURRENT_SHA" != "$EXPECTED_V3_SHA" ] && [ "$CURRENT_SHA" != "$EXPECTED_PREV_SHA" ]; then
     echo "FALHA!"
     echo "ERRO CRÍTICO: SHA-256 do arquivo operacional atual ($CURRENT_SHA) é DESCONHECIDO ou incompatível!"
     echo "  Versão requerida para este upgrade: Simulação v2 ($EXPECTED_V2_SHA) ou v3 ($EXPECTED_V3_SHA)"
@@ -101,7 +102,7 @@ elif [ "$CURRENT_SHA" != "$EXPECTED_V2_SHA" ] && [ "$CURRENT_SHA" != "$EXPECTED_
     exit 1
 fi
 ROLLBACK_TARGET="v2"
-if [ "$CURRENT_SHA" = "$EXPECTED_V3_SHA" ]; then
+if [ "$CURRENT_SHA" = "$EXPECTED_V3_SHA" ] || [ "$CURRENT_SHA" = "$EXPECTED_PREV_SHA" ]; then
     ROLLBACK_TARGET="v3"
 fi
 echo "OK (Versão ativa confirmada: $CURRENT_SHA, rollback alvo: $ROLLBACK_TARGET)"

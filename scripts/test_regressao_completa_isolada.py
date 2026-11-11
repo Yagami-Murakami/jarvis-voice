@@ -796,6 +796,31 @@ class TestPatchedOperationalScript(unittest.TestCase):
                 mock_subproc.assert_not_called()
                 self.assertIn("SIMULAÇÃO: enviaria desligamento SSH.", out_ssh.getvalue())
 
+    def test_22_arbitrator_report_command_delegates_to_confirmation_when_confirming(self):
+        """Valida que report_command delega para confirmação se o estado atual do árbitro for 'confirmacao'."""
+        arbitrator = SessionArbitrator()
+        is_new, sid = arbitrator.report_wake("lg_mic")
+        self.assertTrue(is_new)
+        # Comando para desligar fusion
+        cmd_res = arbitrator.report_command("lg_mic", "desligar fusion")
+        self.assertTrue(cmd_res["valido"])
+        self.assertEqual(arbitrator.state, "confirmacao")
+
+        # Invocação de report_command com 'confirmar desligamento'
+        conf_res = arbitrator.report_command("me6s", "confirmar desligamento")
+        self.assertTrue(conf_res["valido"])
+        self.assertEqual(conf_res["acao"], "desligar_confirmado")
+        self.assertEqual(conf_res["alvo"], "fusion")
+        self.assertEqual(arbitrator.state, "espera")
+
+    def test_23_alvo_real_permitido_handles_quotes_and_spaces(self):
+        """Valida que alvo_real_permitido trata aspas, espaços e maiúsculas/minúsculas."""
+        os.environ["JARVIS_ALLOWED_REAL_TARGETS"] = '"Fusion" , \'Storage\''
+        self.assertTrue(self.mod.alvo_real_permitido("fusion"))
+        self.assertTrue(self.mod.alvo_real_permitido("FUSION"))
+        self.assertTrue(self.mod.alvo_real_permitido("storage"))
+        self.assertFalse(self.mod.alvo_real_permitido("ananuke"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

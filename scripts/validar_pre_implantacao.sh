@@ -9,7 +9,8 @@ EXPECTED_SHA="c51d58e6d3a19003eac55a827212e5e084d583fea43389ec0ea5466080ee2d54"
 EXPECTED_V1_SHA="f6c7273116aea4c4b34c0c6007d335b7925356ecb174e7066781716f2f604ed8"
 EXPECTED_V2_SHA="810aca6e25897f6b95aaf297ca8fdff7d9659270bf079a8c398c4ee21df93b42"
 EXPECTED_V3_SHA="c5ea9b984434e33ff9b194a3c873cfb826178a4e853e42ebac3be55b4060fecf"
-EXPECTED_NEW_SHA="4a52006def0c54ddcb468561e53c09d2066faa231c86d653893998b73700707f"
+EXPECTED_PREV_SHA="4a52006def0c54ddcb468561e53c09d2066faa231c86d653893998b73700707f"
+EXPECTED_NEW_SHA="63ffa8abc36265f65956677084fe574f1a206839d5b2051c066fab0361fc5c41"
 
 TARGET_FILE="${JARVIS_TARGET_FILE:-/opt/jarvis-voice/jarvis-operacional.py}"
 BACKUP_PRIMARY="${JARVIS_BACKUP_ORIGINAL:-/opt/jarvis-voice/jarvis-operacional.py.backup_original}"
@@ -29,7 +30,7 @@ echo "=== INICIANDO VERIFICAÇÃO PRÉ-IMPLANTAÇÃO (PRE-FLIGHT FAIL-CLOSED) ==
 # 1. Verificação antecipada de existência e SHA-256 do arquivo operacional e backups (primário e externo)
 echo -n "[1/8] Verificando SHA-256 do arquivo operacional e backups (primário e externo)... "
 CURRENT_SHA=$(sha256sum "$TARGET_FILE" | awk '{print $1}')
-if [ "$CURRENT_SHA" != "$EXPECTED_SHA" ] && [ "$CURRENT_SHA" != "$EXPECTED_V1_SHA" ] && [ "$CURRENT_SHA" != "$EXPECTED_V2_SHA" ] && [ "$CURRENT_SHA" != "$EXPECTED_V3_SHA" ]; then
+if [ "$CURRENT_SHA" != "$EXPECTED_SHA" ] && [ "$CURRENT_SHA" != "$EXPECTED_V1_SHA" ] && [ "$CURRENT_SHA" != "$EXPECTED_V2_SHA" ] && [ "$CURRENT_SHA" != "$EXPECTED_V3_SHA" ] && [ "$CURRENT_SHA" != "$EXPECTED_PREV_SHA" ] && [ "$CURRENT_SHA" != "$EXPECTED_NEW_SHA" ]; then
     echo "FALHA!"
     echo "ERRO CRÍTICO: SHA-256 de $TARGET_FILE divergente!"
     echo "  Esperado: $EXPECTED_SHA (Original), $EXPECTED_V1_SHA (Simulação v1) ou $EXPECTED_V2_SHA (Simulação v2)"

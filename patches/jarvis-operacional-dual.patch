@@ -289,8 +289,8 @@
 +    raw = os.getenv("JARVIS_ALLOWED_REAL_TARGETS", "")
 +    if not raw or not raw.strip():
 +        return False
-+    permitidos = [a.strip().lower() for a in raw.split(",") if a.strip()]
-+    return str(alvo_nome).strip().lower() in permitidos
++    permitidos = [a.strip().strip('"\'').lower() for a in raw.split(",") if a.strip()]
++    return str(alvo_nome).strip().strip('"\'').lower() in permitidos
  
 -def processar(texto):
 -    global estado, limite, pendente
@@ -420,7 +420,7 @@
  
          # Correcao restrita ao teste de reconhecimento
          if texto == "dois ligar fusion":
-@@ -87,45 +435,163 @@
+@@ -87,45 +435,165 @@
  
          if texto not in COMANDOS:
              print("Comando ignorado.", flush=True)
@@ -514,6 +514,7 @@
 +
 +                    if acessivel:
 +                        print("Computador ja esta acessivel.", flush=True)
++                        print("Computador já está acessível.", flush=True)
 +                        atualizar_status_acao(ev_id, "concluido", acao="ligar", alvo=alvo_nome, resultado={"ja_ligado": True})
 +                        return
 +
@@ -547,6 +548,7 @@
 -                    print("SIMULACAO: Wake-on-LAN.", flush=True)
 -            estado = "espera"
 -            return
++                        print("Pacote Wake-on-LAN enviado.", flush=True)
 +                        atualizar_status_acao(ev_id, "concluido", acao="ligar", alvo=alvo_nome, resultado={"wol": True})
 +                    else:
 +                        print("SIMULAÇÃO: enviaria Wake-on-LAN.", flush=True)
@@ -603,9 +605,11 @@
  
          if not acessivel:
              print(
-@@ -134,24 +600,86 @@
+@@ -133,25 +601,88 @@
+                 "computador nao acessivel.",
                  flush=True
              )
++            print("Desligamento bloqueado: host não acessível.", flush=True)
              estado = "espera"
 -            return
 +            fonte_ativa = None
@@ -697,7 +701,7 @@
                      if texto != "confirmar desligamento":
                          print(
                              "Confirmacao insuficiente. Pedido cancelado.",
-@@ -159,94 +687,557 @@
+@@ -159,94 +690,559 @@
                          )
                          estado = "espera"
                          pendente = None
@@ -802,6 +806,7 @@
 -                            flush=True
 +                            if resultado.returncode == 0:
 +                                print("SSH enviado com sucesso. Codigo: 0", flush=True)
++                                print("SSH: código de retorno 0", flush=True)
 +                                print("Verifique se o computador desligou.", flush=True)
 +                                atualizar_status_acao(
 +                                    ev_id,
@@ -884,6 +889,7 @@
 +                status_acao = reg_status.get("status", "em_processamento") if reg_status else "em_processamento"
              else:
                  print("Cancelado: computador inacessivel.", flush=True)
++                print("Desligamento bloqueado: host não acessível.", flush=True)
 +                status_acao = "falha"
  
              estado = "espera"
@@ -1313,7 +1319,7 @@
          if item is None:
              break
  
-@@ -260,11 +1251,79 @@
+@@ -260,11 +1256,79 @@
          if rec.AcceptWaveform(audio):
              texto = json.loads(rec.Result()).get("text", "").strip()
              if texto and texto != "[unk]":

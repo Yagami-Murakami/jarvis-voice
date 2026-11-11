@@ -304,8 +304,8 @@ def alvo_real_permitido(alvo_nome):
     raw = os.getenv("JARVIS_ALLOWED_REAL_TARGETS", "")
     if not raw or not raw.strip():
         return False
-    permitidos = [a.strip().lower() for a in raw.split(",") if a.strip()]
-    return str(alvo_nome).strip().lower() in permitidos
+    permitidos = [a.strip().strip('"\'').lower() for a in raw.split(",") if a.strip()]
+    return str(alvo_nome).strip().strip('"\'').lower() in permitidos
 
 
 _recuperar_estado_na_inicializacao()
@@ -517,6 +517,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
 
                     if acessivel:
                         print("Computador ja esta acessivel.", flush=True)
+                        print("Computador já está acessível.", flush=True)
                         atualizar_status_acao(ev_id, "concluido", acao="ligar", alvo=alvo_nome, resultado={"ja_ligado": True})
                         return
 
@@ -539,6 +540,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                             )
 
                         print("Wake-on-LAN enviado.", flush=True)
+                        print("Pacote Wake-on-LAN enviado.", flush=True)
                         atualizar_status_acao(ev_id, "concluido", acao="ligar", alvo=alvo_nome, resultado={"wol": True})
                     else:
                         print("SIMULAÇÃO: enviaria Wake-on-LAN.", flush=True)
@@ -599,6 +601,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                 "computador nao acessivel.",
                 flush=True
             )
+            print("Desligamento bloqueado: host não acessível.", flush=True)
             estado = "espera"
             fonte_ativa = None
             sessao_ativa_id = None
@@ -762,6 +765,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                             )
                             if resultado.returncode == 0:
                                 print("SSH enviado com sucesso. Codigo: 0", flush=True)
+                                print("SSH: código de retorno 0", flush=True)
                                 print("Verifique se o computador desligou.", flush=True)
                                 atualizar_status_acao(
                                     ev_id,
@@ -838,6 +842,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                 status_acao = reg_status.get("status", "em_processamento") if reg_status else "em_processamento"
             else:
                 print("Cancelado: computador inacessivel.", flush=True)
+                print("Desligamento bloqueado: host não acessível.", flush=True)
                 status_acao = "falha"
 
             estado = "espera"

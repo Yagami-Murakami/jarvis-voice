@@ -10,7 +10,7 @@ set -euo pipefail
 # - JARVIS_REQUIRE_PERSISTENCE=1
 # ========================================================================
 
-EXPECTED_SHA="4a52006def0c54ddcb468561e53c09d2066faa231c86d653893998b73700707f"
+EXPECTED_SHA="63ffa8abc36265f65956677084fe574f1a206839d5b2051c066fab0361fc5c41"
 OPERACIONAL="/opt/jarvis-voice/jarvis-operacional.py"
 DROPIN_DIR="/etc/systemd/system/jarvis-voice.service.d"
 ETAPA1_CONF="${DROPIN_DIR}/zz-simulacao-etapa1.conf"
