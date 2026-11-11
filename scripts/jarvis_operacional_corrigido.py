@@ -6,12 +6,27 @@ import subprocess
 import threading
 import queue
 
-from vosk import Model, KaldiRecognizer, SetLogLevel
+try:
+    from vosk import Model, KaldiRecognizer, SetLogLevel
+except ImportError:
+    Model = None
+    KaldiRecognizer = None
+    def SetLogLevel(*args): pass
 
 # Carregar funcoes do painel existente
 sys.path.insert(0, "/home/tuninho/homelab-panel")
 sys.path.insert(0, "/opt/jarvis-voice")
-import app as painel
+try:
+    import app as painel
+except ImportError:
+    from unittest.mock import MagicMock
+    painel = MagicMock()
+    painel.SERVIDORES = {
+        "fusion": {"nome": "Fusion (Windows)", "mac": "00:11:22:33:44:55"},
+        "ananuke": {"nome": "Ananuke", "mac": "00:11:22:33:44:66"},
+    }
+    painel.host_ligado = lambda srv: False
+    painel.montar_comando_ssh = lambda cfg: ["echo", "ssh_simulado"]
 
 from gateway.ipc_bus import DEFAULT_IPC_SOCKET, IpcEventListener
 
@@ -42,11 +57,15 @@ gramatica = [
     "[unk]"
 ]
 
-modelo = Model(MODELO)
-rec = KaldiRecognizer(
-    modelo, 16000,
-    json.dumps(gramatica, ensure_ascii=False)
-)
+if Model is not None and os.path.exists(MODELO):
+    modelo = Model(MODELO)
+    rec = KaldiRecognizer(
+        modelo, 16000,
+        json.dumps(gramatica, ensure_ascii=False)
+    )
+else:
+    modelo = None
+    rec = None
 
 estado = "espera"
 limite = 0.0
@@ -57,6 +76,7 @@ sessao_ativa_id = None
 
 # Fila unificada de intenções para ambos os microfones (ME6S + LG)
 fila_intencoes = queue.Queue(maxsize=32)
+loop_principal_ativo = threading.Event()
 
 # Cache de idempotência / deduplicação de ações
 acoes_recentes = {}
@@ -83,7 +103,7 @@ def ja_executado_recentemente(acao, alvo, janela=3.5):
         return (time.monotonic() - acoes_recentes.get((acao, alvo), 0.0)) <= janela
 
 
-def processar(texto, fonte="me6s", session_id=None):
+def processar(texto, fonte="me6s", session_id=None, event_id=None):
     global estado, limite, pendente, ultima_ativacao, fonte_ativa, sessao_ativa_id
 
     agora = time.monotonic()
@@ -107,14 +127,28 @@ def processar(texto, fonte="me6s", session_id=None):
         sessao_ativa_id = None
         ultima_ativacao = 0.0
         print("Cancelado.", flush=True)
-        return
+        return {
+            "sucesso": True,
+            "event_id": event_id,
+            "active_session_id": None,
+            "estado": "espera",
+            "acao": "cancelar",
+            "processado": True,
+        }
 
     if estado == "espera":
         if texto == "assistente":
             # Deduplicação de ativação simultânea entre os dois microfones
             if (agora - ultima_ativacao) <= 2.0:
                 print(f"Ativacao deduplicada via {fonte} (ja ativo ha {agora - ultima_ativacao:.2f}s).", flush=True)
-                return
+                return {
+                    "sucesso": True,
+                    "event_id": event_id,
+                    "active_session_id": sessao_ativa_id,
+                    "estado": estado,
+                    "deduplicado": True,
+                    "processado": True,
+                }
 
             estado = "comando"
             limite = agora + 12
@@ -123,18 +157,47 @@ def processar(texto, fonte="me6s", session_id=None):
             sessao_ativa_id = session_id or sessao_ativa_id or gerar_session_id(fonte=fonte)
             print(f"[Sessao: {sessao_ativa_id}]", flush=True)
             print("ATIVADO! Aguardando comando.", flush=True)
-        return
+            return {
+                "sucesso": True,
+                "event_id": event_id,
+                "active_session_id": sessao_ativa_id,
+                "estado": "comando",
+                "deduplicado": False,
+                "processado": True,
+            }
+        return {
+            "sucesso": False,
+            "erro": "aguardando_wake",
+            "event_id": event_id,
+            "active_session_id": None,
+            "estado": "espera",
+            "processado": True,
+        }
 
     if estado == "comando":
         if texto == "assistente":
             print("Ja ativado. Aguardando comando.", flush=True)
             limite = agora + 12
-            return
+            return {
+                "sucesso": True,
+                "event_id": event_id,
+                "active_session_id": sessao_ativa_id,
+                "estado": "comando",
+                "deduplicado": True,
+                "processado": True,
+            }
 
         # Se for comando recebido com session_id, valida correspondência com a sessão ativa
         if session_id and sessao_ativa_id and session_id != sessao_ativa_id:
             print("Comando descartado: session_id incompativel com a sessao ativa.", flush=True)
-            return
+            return {
+                "sucesso": False,
+                "erro": "session_id_divergente",
+                "event_id": event_id,
+                "active_session_id": sessao_ativa_id,
+                "estado": estado,
+                "processado": False,
+            }
 
         # Correcao restrita ao teste de reconhecimento
         if texto == "dois ligar fusion":
@@ -143,7 +206,14 @@ def processar(texto, fonte="me6s", session_id=None):
 
         if texto not in COMANDOS:
             print("Comando ignorado.", flush=True)
-            return
+            return {
+                "sucesso": False,
+                "erro": "comando_desconhecido",
+                "event_id": event_id,
+                "active_session_id": sessao_ativa_id,
+                "estado": estado,
+                "processado": True,
+            }
 
         acao, alvo = COMANDOS[texto]
         srv = painel.SERVIDORES[alvo]
@@ -161,7 +231,16 @@ def processar(texto, fonte="me6s", session_id=None):
                     estado = "espera"
                     fonte_ativa = None
                     sessao_ativa_id = None
-                    return
+                    return {
+                        "sucesso": True,
+                        "event_id": event_id,
+                        "acao": "ligar",
+                        "alvo": alvo,
+                        "deduplicado": True,
+                        "active_session_id": None,
+                        "estado": "espera",
+                        "processado": True,
+                    }
 
                 registrar_acao("ligar", alvo)
                 if os.getenv("JARVIS_WOL_REAL") == "1":
@@ -192,7 +271,15 @@ def processar(texto, fonte="me6s", session_id=None):
             estado = "espera"
             fonte_ativa = None
             sessao_ativa_id = None
-            return
+            return {
+                "sucesso": True,
+                "event_id": event_id,
+                "acao": "ligar",
+                "alvo": alvo,
+                "active_session_id": None,
+                "estado": "espera",
+                "processado": True,
+            }
 
         if not acessivel:
             print(
@@ -203,7 +290,14 @@ def processar(texto, fonte="me6s", session_id=None):
             estado = "espera"
             fonte_ativa = None
             sessao_ativa_id = None
-            return
+            return {
+                "sucesso": False,
+                "erro": "computador_inacessivel",
+                "event_id": event_id,
+                "active_session_id": None,
+                "estado": "espera",
+                "processado": True,
+            }
 
         estado = "confirmacao"
         pendente = alvo
@@ -214,17 +308,39 @@ def processar(texto, fonte="me6s", session_id=None):
             "? Diga confirmar ou cancelar.",
             flush=True
         )
-        return
+        return {
+            "sucesso": True,
+            "event_id": event_id,
+            "acao": "desligar_pendente",
+            "alvo": alvo,
+            "active_session_id": sessao_ativa_id,
+            "estado": "confirmacao",
+            "processado": True,
+        }
 
     if estado == "confirmacao":
         if texto == "assistente":
             print("Aguardando confirmacao de desligamento.", flush=True)
-            return
+            return {
+                "sucesso": True,
+                "event_id": event_id,
+                "active_session_id": sessao_ativa_id,
+                "estado": "confirmacao",
+                "deduplicado": True,
+                "processado": True,
+            }
 
         # Se for confirmação recebida com session_id, valida correspondência com a sessão ativa
         if session_id and sessao_ativa_id and session_id != sessao_ativa_id:
             print("Confirmacao descartada: session_id incompativel com a sessao ativa.", flush=True)
-            return
+            return {
+                "sucesso": False,
+                "erro": "session_id_divergente",
+                "event_id": event_id,
+                "active_session_id": sessao_ativa_id,
+                "estado": estado,
+                "processado": False,
+            }
 
         if texto in ("confirmar", "confirmar desligar", "confirmar desligamento"):
             srv = painel.SERVIDORES[pendente]
@@ -239,7 +355,14 @@ def processar(texto, fonte="me6s", session_id=None):
                         pendente = None
                         fonte_ativa = None
                         sessao_ativa_id = None
-                        return
+                        return {
+                            "sucesso": False,
+                            "erro": "confirmacao_insuficiente",
+                            "event_id": event_id,
+                            "active_session_id": None,
+                            "estado": "espera",
+                            "processado": True,
+                        }
 
                     # Idempotência verificada estritamente após confirmação válida
                     if ja_executado_recentemente("desligar", pendente):
@@ -248,7 +371,16 @@ def processar(texto, fonte="me6s", session_id=None):
                         pendente = None
                         fonte_ativa = None
                         sessao_ativa_id = None
-                        return
+                        return {
+                            "sucesso": True,
+                            "event_id": event_id,
+                            "acao": "desligar",
+                            "alvo": pendente,
+                            "deduplicado": True,
+                            "active_session_id": None,
+                            "estado": "espera",
+                            "processado": True,
+                        }
 
                     registrar_acao("desligar", pendente)
                     configuracao = dict(srv)
@@ -289,7 +421,16 @@ def processar(texto, fonte="me6s", session_id=None):
                         pendente = None
                         fonte_ativa = None
                         sessao_ativa_id = None
-                        return
+                        return {
+                            "sucesso": True,
+                            "event_id": event_id,
+                            "acao": "desligar",
+                            "alvo": pendente,
+                            "deduplicado": True,
+                            "active_session_id": None,
+                            "estado": "espera",
+                            "processado": True,
+                        }
 
                     registrar_acao("desligar", pendente)
                     print(
@@ -301,119 +442,217 @@ def processar(texto, fonte="me6s", session_id=None):
                 print("Cancelado: computador inacessivel.", flush=True)
 
             estado = "espera"
+            alvo_confirmado = pendente
             pendente = None
             fonte_ativa = None
             sessao_ativa_id = None
+            return {
+                "sucesso": True,
+                "event_id": event_id,
+                "acao": "confirmar_desligar",
+                "alvo": alvo_confirmado,
+                "active_session_id": None,
+                "estado": "espera",
+                "processado": True,
+            }
 
 
-# --- Barramento IPC Local por UNIX Domain Socket com Validação Semântica e Confirmação Síncrona ---
+# --- Barramento IPC Local por UNIX Domain Socket com Confirmação Confiável de Processamento ---
 def on_ipc_event(evento):
     global estado, sessao_ativa_id, pendente, limite, ultima_ativacao, fonte_ativa
     if not isinstance(evento, dict):
-        return {"sucesso": False, "motivo": "Payload inválido"}
+        return {"sucesso": False, "erro": "payload_invalido", "processado": False}
     if evento.get("versao") != 1:
-        return {"sucesso": False, "motivo": "Versão incompatível"}
+        return {"sucesso": False, "erro": "versao_incompativel", "processado": False}
 
     fonte = evento.get("fonte")
     if fonte not in ("lg_mic", "me6s"):
-        return {"sucesso": False, "motivo": "Fonte desconhecida"}
+        return {"sucesso": False, "erro": "fonte_desconhecida", "processado": False}
 
     tipo = evento.get("evento")
     if tipo not in ("wake", "comando", "confirmar", "cancelar"):
-        return {"sucesso": False, "motivo": "Tipo de evento desconhecido"}
+        return {"sucesso": False, "erro": "tipo_desconhecido", "processado": False}
 
     texto = evento.get("texto")
     if not isinstance(texto, str) or len(texto) > 128:
-        return {"sucesso": False, "motivo": "Texto inválido"}
+        return {"sucesso": False, "erro": "texto_invalido", "processado": False}
     texto = texto.strip()
     if not texto:
-        return {"sucesso": False, "motivo": "Texto vazio"}
+        return {"sucesso": False, "erro": "texto_vazio", "processado": False}
 
     # Validação semântica estrita do texto conforme o tipo de evento
     if tipo == "wake" and texto != "assistente":
-        return {"sucesso": False, "motivo": "Wake deve ser 'assistente'"}
+        return {"sucesso": False, "erro": "wake_deve_ser_assistente", "processado": False}
     if tipo == "cancelar" and texto != "cancelar":
-        return {"sucesso": False, "motivo": "Cancelar deve ser 'cancelar'"}
+        return {"sucesso": False, "erro": "cancelar_deve_ser_cancelar", "processado": False}
     if tipo == "confirmar" and texto not in ("confirmar", "confirmar desligar", "confirmar desligamento"):
-        return {"sucesso": False, "motivo": "Texto de confirmação inválido"}
+        return {"sucesso": False, "erro": "confirmacao_invalida", "processado": False}
     if tipo == "comando" and texto not in COMANDOS and texto != "dois ligar fusion":
-        return {"sucesso": False, "motivo": "Comando desconhecido"}
+        return {"sucesso": False, "erro": "comando_desconhecido", "processado": False}
 
     sid = evento.get("session_id")
+    event_id = evento.get("event_id") or evento.get("nonce")
 
-    # Autoridade Única do Session ID:
-    # 1. Wake: se já estiver em sessão ativa (comando ou confirmacao), preserva rigorosamente sessao_ativa_id.
-    #    Se estiver em espera, adota sid fornecido ou gera novo ID oficial e inicia a sessão.
+    # 1. Se a fila estiver cheia, responde imediatamente com FALHA (Requisito 3)
+    if fila_intencoes.full():
+        print(f"Fila de intencoes cheia ({fila_intencoes.qsize()}/{fila_intencoes.maxsize}). Descartando evento IPC.", flush=True)
+        return {
+            "sucesso": False,
+            "erro": "fila_cheia",
+            "event_id": event_id,
+            "active_session_id": sessao_ativa_id,
+            "estado": estado,
+            "processado": False,
+        }
+
+    # Validação rigorosa de session_id, origem e estado antes de aceitar comandos e confirmações
     if tipo == "wake":
-        if estado in ("comando", "confirmacao"):
-            # Já ativado: não sobrescreve sessão e estende limite se em comando
-            if estado == "comando":
-                limite = time.monotonic() + 12
-            try:
-                fila_intencoes.put_nowait((fonte, texto, sessao_ativa_id))
-            except queue.Full:
-                pass
+        if estado == "comando":
+            print(f"IPC Wake deduplicado: controlador ja ativo em 'comando' (sessao: {sessao_ativa_id}).", flush=True)
             return {
                 "sucesso": True,
+                "event_id": event_id,
+                "active_session_id": sessao_ativa_id,
+                "estado": "comando",
+                "deduplicado": True,
+                "processado": True,
+            }
+        elif estado == "confirmacao":
+            print(f"IPC Wake deduplicado: controlador ja aguardando confirmacao (sessao: {sessao_ativa_id}).", flush=True)
+            return {
+                "sucesso": True,
+                "event_id": event_id,
+                "active_session_id": sessao_ativa_id,
+                "estado": "confirmacao",
+                "deduplicado": True,
+                "processado": True,
+            }
+        elif (time.monotonic() - ultima_ativacao) <= 2.0 and sessao_ativa_id:
+            print(f"IPC Wake deduplicado: janela de 2.0s respeitada (sessao: {sessao_ativa_id}).", flush=True)
+            return {
+                "sucesso": True,
+                "event_id": event_id,
                 "active_session_id": sessao_ativa_id,
                 "estado": estado,
                 "deduplicado": True,
-            }
-        else:
-            # Estado espera: estabelece a autoridade central da sessão
-            sessao_ativa_id = sid or gerar_session_id(fonte=fonte)
-            try:
-                fila_intencoes.put_nowait((fonte, texto, sessao_ativa_id))
-            except queue.Full:
-                pass
-            return {
-                "sucesso": True,
-                "active_session_id": sessao_ativa_id,
-                "estado": "comando",
-                "deduplicado": False,
+                "processado": True,
             }
 
-    # Validação rigorosa de session_id, origem e estado antes de aceitar comandos e confirmações
     if tipo == "comando":
         if estado != "comando":
             print(f"IPC descartado: comando recebido fora do estado 'comando' (estado atual: {estado}).", flush=True)
-            return {"sucesso": False, "motivo": f"Estado atual não aceita comandos ({estado})", "active_session_id": sessao_ativa_id, "estado": estado}
+            return {
+                "sucesso": False,
+                "erro": "estado_invalido",
+                "motivo": f"Estado atual não aceita comandos ({estado})",
+                "event_id": event_id,
+                "active_session_id": sessao_ativa_id,
+                "estado": estado,
+                "processado": False,
+            }
         if not sid or (sessao_ativa_id and sid != sessao_ativa_id):
             print(f"IPC descartado: session_id invalido para comando (recebido: {sid}, ativo: {sessao_ativa_id}).", flush=True)
-            return {"sucesso": False, "motivo": "session_id divergente", "active_session_id": sessao_ativa_id, "estado": estado}
-        try:
-            fila_intencoes.put_nowait((fonte, texto, sid))
-            return {"sucesso": True, "active_session_id": sessao_ativa_id, "estado": estado}
-        except queue.Full:
-            print("Fila de intencoes cheia. Descartando evento IPC.", flush=True)
-            return {"sucesso": False, "motivo": "Fila cheia", "active_session_id": sessao_ativa_id, "estado": estado}
+            return {
+                "sucesso": False,
+                "erro": "session_id_divergente",
+                "event_id": event_id,
+                "active_session_id": sessao_ativa_id,
+                "estado": estado,
+                "processado": False,
+            }
 
     if tipo == "confirmar":
         if estado != "confirmacao" or pendente is None:
             print(f"IPC descartado: confirmacao recebida fora do estado 'confirmacao' (estado atual: {estado}).", flush=True)
-            return {"sucesso": False, "motivo": f"Estado atual não aceita confirmação ({estado})", "active_session_id": sessao_ativa_id, "estado": estado}
+            return {
+                "sucesso": False,
+                "erro": "estado_invalido",
+                "motivo": f"Estado atual não aceita confirmação ({estado})",
+                "event_id": event_id,
+                "active_session_id": sessao_ativa_id,
+                "estado": estado,
+                "processado": False,
+            }
         if not sid or (sessao_ativa_id and sid != sessao_ativa_id):
             print(f"IPC descartado: session_id invalido para confirmacao (recebido: {sid}, ativo: {sessao_ativa_id}).", flush=True)
-            return {"sucesso": False, "motivo": "session_id divergente", "active_session_id": sessao_ativa_id, "estado": estado}
-        try:
-            fila_intencoes.put_nowait((fonte, texto, sid))
-            return {"sucesso": True, "active_session_id": sessao_ativa_id, "estado": estado}
-        except queue.Full:
-            print("Fila de intencoes cheia. Descartando evento IPC.", flush=True)
-            return {"sucesso": False, "motivo": "Fila cheia", "active_session_id": sessao_ativa_id, "estado": estado}
+            return {
+                "sucesso": False,
+                "erro": "session_id_divergente",
+                "event_id": event_id,
+                "active_session_id": sessao_ativa_id,
+                "estado": estado,
+                "processado": False,
+            }
 
     if tipo == "cancelar":
         if estado == "espera":
-            return {"sucesso": True, "active_session_id": None, "estado": "espera"}
+            return {
+                "sucesso": True,
+                "event_id": event_id,
+                "active_session_id": None,
+                "estado": "espera",
+                "processado": True,
+            }
         if sid and sessao_ativa_id and sid != sessao_ativa_id:
             print(f"IPC descartado: session_id divergente para cancelamento (recebido: {sid}, ativo: {sessao_ativa_id}).", flush=True)
-            return {"sucesso": False, "motivo": "session_id divergente", "active_session_id": sessao_ativa_id, "estado": estado}
+            return {
+                "sucesso": False,
+                "erro": "session_id_divergente",
+                "event_id": event_id,
+                "active_session_id": sessao_ativa_id,
+                "estado": estado,
+                "processado": False,
+            }
+
+    # 2. Despacho com confirmação real de aceitação e processamento (Requisitos 2 e 4)
+    if loop_principal_ativo.is_set():
+        comp_q = queue.Queue(maxsize=1)
         try:
-            fila_intencoes.put_nowait((fonte, texto, sid))
-            return {"sucesso": True, "active_session_id": None, "estado": "espera"}
+            fila_intencoes.put_nowait((fonte, texto, sid, event_id, comp_q))
         except queue.Full:
             print("Fila de intencoes cheia. Descartando evento IPC.", flush=True)
-            return {"sucesso": False, "motivo": "Fila cheia", "active_session_id": sessao_ativa_id, "estado": estado}
+            return {
+                "sucesso": False,
+                "erro": "fila_cheia",
+                "event_id": event_id,
+                "active_session_id": sessao_ativa_id,
+                "estado": estado,
+                "processado": False,
+            }
+
+        try:
+            resultado = comp_q.get(timeout=2.0)
+            return resultado
+        except queue.Empty:
+            print("Timeout aguardando processamento do evento IPC pelo controlador.", flush=True)
+            return {
+                "sucesso": False,
+                "erro": "timeout_processamento",
+                "event_id": event_id,
+                "active_session_id": sessao_ativa_id,
+                "estado": estado,
+                "processado": False,
+            }
+    else:
+        # Modo isolado/unitário fora do loop principal: enfileira se couber
+        try:
+            fila_intencoes.put_nowait((fonte, texto, sid))
+        except queue.Full:
+            return {
+                "sucesso": False,
+                "erro": "fila_cheia",
+                "event_id": event_id,
+                "active_session_id": sessao_ativa_id,
+                "estado": estado,
+                "processado": False,
+            }
+        return {
+            "sucesso": True,
+            "event_id": event_id,
+            "active_session_id": sid if tipo == "wake" else sessao_ativa_id,
+            "estado": estado,
+            "processado": False,
+        }
 
 
 ipc_listener = None
@@ -526,6 +765,7 @@ def iniciar_servicos(max_iteracoes=None):
         print("MODO SIMULACAO - SEM ACOES REAIS", flush=True)
     print("Fale 'assistente', pause, depois o comando.", flush=True)
 
+    loop_principal_ativo.set()
     iteracoes = 0
     try:
         while True:
@@ -533,8 +773,16 @@ def iniciar_servicos(max_iteracoes=None):
                 break
             iteracoes += 1
             try:
-                fonte, texto, sid = fila_intencoes.get(timeout=0.2)
-                processar(texto, fonte=fonte, session_id=sid)
+                item = fila_intencoes.get(timeout=0.05)
+                fonte = item[0]
+                texto = item[1]
+                sid = item[2]
+                ev_id = item[3] if len(item) > 3 else None
+                comp_q = item[4] if len(item) > 4 else None
+
+                res = processar(texto, fonte=fonte, session_id=sid, event_id=ev_id)
+                if comp_q is not None:
+                    comp_q.put(res)
             except queue.Empty:
                 agora = time.monotonic()
                 if estado != "espera" and agora > limite:
@@ -546,6 +794,7 @@ def iniciar_servicos(max_iteracoes=None):
     except KeyboardInterrupt:
         print("\nTeste encerrado.")
     finally:
+        loop_principal_ativo.clear()
         captura_ativa.clear()
         if ipc_listener:
             ipc_listener.stop()

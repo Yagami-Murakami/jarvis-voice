@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch
 # Carrega módulos do projeto
 sys.path.insert(0, "/home/tuninho/homelab-panel")
 sys.path.insert(0, "/opt/jarvis-voice")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gateway.ipc_bus import (
     DEFAULT_IPC_SOCKET,
@@ -38,6 +39,7 @@ from gateway.audio_gateway import (
     MAGIC_HANDSHAKE,
 )
 from display.server import JarvisDisplayState, JarvisLogMonitor
+from gateway.tests.test_ipc_real_socket_integration import TestIpcRealSocketIntegration
 
 
 class TestPatchedOperationalScript(unittest.TestCase):
@@ -45,7 +47,10 @@ class TestPatchedOperationalScript(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.isolated_path = "/opt/jarvis-voice/test_isolado/jarvis-operacional.py"
+        if os.path.exists("/opt/jarvis-voice/test_isolado/jarvis-operacional.py"):
+            cls.isolated_path = "/opt/jarvis-voice/test_isolado/jarvis-operacional.py"
+        else:
+            cls.isolated_path = os.path.join(os.path.dirname(__file__), "jarvis_operacional_corrigido.py")
         assert os.path.exists(cls.isolated_path), f"Arquivo não encontrado: {cls.isolated_path}"
 
         spec = importlib.util.spec_from_file_location("jarvis_isolado", cls.isolated_path)
@@ -373,10 +378,11 @@ class TestPatchedOperationalScript(unittest.TestCase):
     def test_11_real_speech_recognition_vosk(self):
         """Laboratório de Voz: Submete '5.wav' ('assistente') ao modelo Vosk com gramática operacional."""
         wav_path = "/opt/jarvis-voice/avaliacao-dorlir/negativo/5.wav"
-        self.assertTrue(os.path.exists(wav_path))
-
+        model_path = "/opt/jarvis-voice/vosk-model-small-pt-0.3"
+        if not os.path.exists(wav_path) or not os.path.exists(model_path):
+            raise unittest.SkipTest("Arquivos reais de áudio/modelo Vosk disponíveis apenas no LXC 110.")
         from vosk import Model, KaldiRecognizer
-        m = Model("/opt/jarvis-voice/vosk-model-small-pt-0.3")
+        m = Model(model_path)
         rec = KaldiRecognizer(m, 16000, json.dumps(self.mod.gramatica, ensure_ascii=False))
 
         wf = wave.open(wav_path, "rb")
@@ -392,6 +398,9 @@ class TestPatchedOperationalScript(unittest.TestCase):
 
     def test_12_real_audio_streaming_through_lg_mic_vosk(self):
         """Laboratório de Voz: Transmite frames PCM reais de '5.wav' via TCP para LgMicServer e valida wake pelo árbitro."""
+        wav_path = "/opt/jarvis-voice/avaliacao-dorlir/negativo/5.wav"
+        if not os.path.exists(wav_path):
+            raise unittest.SkipTest("Arquivo de áudio real disponível apenas no LXC 110.")
         arbitrator = SessionArbitrator(dedup_window_s=1.5)
         test_port = 18899
         test_token = "token-teste-streaming-audio-real-32-chars!"

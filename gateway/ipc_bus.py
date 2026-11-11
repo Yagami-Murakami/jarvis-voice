@@ -18,7 +18,12 @@ from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger("JarvisIPC")
 
-DEFAULT_IPC_SOCKET = "/run/jarvis/voice-event.sock"
+DEFAULT_IPC_SOCKET = os.getenv("JARVIS_IPC_SOCKET")
+if not DEFAULT_IPC_SOCKET:
+    if os.getuid() == 0 or os.path.exists("/run/jarvis"):
+        DEFAULT_IPC_SOCKET = "/run/jarvis/voice-event.sock"
+    else:
+        DEFAULT_IPC_SOCKET = f"/tmp/jarvis_voice_{os.getuid()}.sock"
 MAX_TIMESTAMP_DRIFT_S = 2.0
 NONCE_EXPIRY_S = 10.0
 
@@ -26,10 +31,13 @@ NONCE_EXPIRY_S = 10.0
 class IpcEventBroadcaster:
     """Emissor seguro de eventos para o barramento IPC local por UNIX Domain Socket."""
 
-    def __init__(self, socket_path: str = DEFAULT_IPC_SOCKET) -> None:
+    def __init__(self, socket_path: str = DEFAULT_IPC_SOCKET, timeout: float = 2.0) -> None:
         self.socket_path = socket_path
+        self.timeout = timeout
         self._seq = 0
         self._lock = threading.Lock()
+        self.last_ack: Optional[Dict[str, Any]] = None
+        self.last_error: Optional[str] = None
 
     def emit_event(
         self,
@@ -38,28 +46,37 @@ class IpcEventBroadcaster:
         text: str,
         session_id: Optional[str] = None,
         extra: Optional[Dict[str, Any]] = None,
-    ) -> bool:
-        """Transmite evento validado para o barramento local UNIX se o listener estiver ativo."""
+        event_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Transmite evento validado para o barramento local UNIX e aguarda confirmação (ACK).
+
+        Retorna o dicionário de ACK em caso de sucesso confirmado, ou None em caso de
+        falha, timeout, ACK ausente ou rejeição pelo listener.
+        """
         if not self.socket_path:
-            return False
+            return None
 
         try:
             if not os.path.exists(self.socket_path):
-                return False
+                return None
         except OSError:
-            return False
+            return None
+
+        ev_id = event_id or f"ev-{int(time.time() * 1000)}-{secrets.token_hex(4)}"
+        nonce = f"nonce_{ev_id}"
 
         with self._lock:
             self._seq += 1
             payload = {
                 "versao": 1,
+                "event_id": ev_id,
                 "fonte": source,
                 "evento": event_type,
                 "texto": text,
                 "session_id": session_id,
                 "timestamp": round(time.time(), 4),
                 "seq": self._seq,
-                "nonce": secrets.token_hex(8),
+                "nonce": nonce,
             }
             if extra:
                 payload["extra"] = extra
@@ -67,19 +84,70 @@ class IpcEventBroadcaster:
         dados = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
 
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(0.5)
+        sock.settimeout(self.timeout)
         try:
             sock.connect(self.socket_path)
             sock.sendall(dados)
+
+            resp = b""
+            while b"\n" not in resp:
+                chunk = sock.recv(1024)
+                if not chunk:
+                    break
+                resp += chunk
+                if len(resp) > 4096:
+                    break
+
+            if not resp:
+                logger.warning("Falha IPC: Conexão fechada pelo listener sem envio de ACK")
+                self.last_error = "ack_ausente"
+                self.last_ack = None
+                return None
+
             try:
-                resp = sock.recv(1024)
-                if resp:
-                    return json.loads(resp.decode("utf-8").strip())
-            except Exception:
-                pass
-            return {"sucesso": True}
+                ack = json.loads(resp.decode("utf-8").strip())
+            except Exception as e:
+                logger.warning("Falha IPC: ACK inválido recebido (JSON inválido: %s)", e)
+                self.last_error = "ack_invalido"
+                self.last_ack = None
+                return None
+
+            if not isinstance(ack, dict):
+                logger.warning("Falha IPC: ACK com formato incorreto (não é objeto JSON)")
+                self.last_error = "ack_formato_incorreto"
+                self.last_ack = None
+                return None
+
+            # Validação do event_id para garantir associação inequívoca
+            expected_event_id = ev_id
+            ack_event_id = ack.get("event_id") or ack.get("nonce")
+            if ack_event_id and ack_event_id != expected_event_id:
+                logger.warning(
+                    "Falha IPC: event_id divergente no ACK (esperado=%s, recebido=%s)",
+                    expected_event_id,
+                    ack_event_id,
+                )
+                self.last_error = "event_id_divergente"
+                self.last_ack = ack
+                return None
+
+            self.last_ack = ack
+            if not ack.get("sucesso"):
+                self.last_error = str(ack.get("erro") or ack.get("motivo") or "rejeitado")
+                logger.warning("Falha IPC: Listener rejeitou o evento: %s", self.last_error)
+                return None
+
+            self.last_error = None
+            return ack
+        except (socket.timeout, TimeoutError):
+            logger.warning("Falha IPC: Timeout (%.2fs) aguardando ACK em %s", self.timeout, self.socket_path)
+            self.last_error = "timeout_ack"
+            self.last_ack = None
+            return None
         except (socket.error, OSError) as e:
             logger.debug("Falha ao emitir evento IPC em %s: %s", self.socket_path, e)
+            self.last_error = str(e)
+            self.last_ack = None
             return None
         finally:
             try:
@@ -106,6 +174,7 @@ class IpcEventListener:
         self._server_sock: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
         self._seen_nonces: Dict[str, float] = {}
+        self._processed_events: Dict[str, Tuple[Dict[str, Any], float]] = {}
         self._lock = threading.Lock()
 
     def start(self) -> None:
@@ -206,6 +275,11 @@ class IpcEventListener:
             evento = json.loads(linha)
         except json.JSONDecodeError:
             logger.warning("Mensagem IPC com JSON inválido descartada")
+            resposta = {"sucesso": False, "erro": "json_invalido", "processado": False}
+            try:
+                client_sock.sendall((json.dumps(resposta) + "\n").encode("utf-8"))
+            except Exception:
+                pass
             return
 
         # 3. Proteção contra Replay e Timestamp Drift
@@ -213,32 +287,83 @@ class IpcEventListener:
         ts = evento.get("timestamp", 0.0)
         if abs(now - ts) > MAX_TIMESTAMP_DRIFT_S:
             logger.warning("Mensagem IPC descartada: timestamp expirado ou dessincronizado (delta=%.2fs)", abs(now - ts))
+            resposta = {
+                "sucesso": False,
+                "erro": "timestamp_expirado",
+                "delta": abs(now - ts),
+                "processado": False,
+            }
+            try:
+                client_sock.sendall((json.dumps(resposta) + "\n").encode("utf-8"))
+            except Exception:
+                pass
             return
 
         nonce = evento.get("nonce")
         if not nonce:
             logger.warning("Mensagem IPC sem nonce descartada")
+            resposta = {"sucesso": False, "erro": "nonce_ausente", "processado": False}
+            try:
+                client_sock.sendall((json.dumps(resposta) + "\n").encode("utf-8"))
+            except Exception:
+                pass
             return
+
+        event_id = evento.get("event_id") or nonce
 
         with self._lock:
             limite = now - NONCE_EXPIRY_S
             self._seen_nonces = {n: t for n, t in self._seen_nonces.items() if t > limite}
+            self._processed_events = {n: (r, t) for n, (r, t) in self._processed_events.items() if t > limite}
 
-            if nonce in self._seen_nonces:
-                logger.warning("Mensagem IPC descartada: tentativa de replay detectada (nonce=%s)", nonce)
+            # Retransmissão: verifica se este event_id ou nonce já foi processado
+            lookup_key = event_id if event_id in self._processed_events else (nonce if nonce in self._processed_events else None)
+            if lookup_key:
+                cached_resp, _ = self._processed_events[lookup_key]
+                logger.info("Retransmissão de evento detectada (%s). Retornando resposta em cache.", lookup_key)
+                cached_copy = dict(cached_resp)
+                cached_copy["retransmissao"] = True
+                try:
+                    dados_resposta = (json.dumps(cached_copy, ensure_ascii=False) + "\n").encode("utf-8")
+                    client_sock.sendall(dados_resposta)
+                except Exception:
+                    pass
                 return
+
+            if nonce in self._seen_nonces or (event_id and event_id in self._seen_nonces):
+                logger.warning("Mensagem IPC descartada: tentativa de replay em processamento (nonce=%s, event_id=%s)", nonce, event_id)
+                resposta = {"sucesso": False, "erro": "replay_detectado", "nonce": nonce, "event_id": event_id, "processado": False}
+                try:
+                    client_sock.sendall((json.dumps(resposta) + "\n").encode("utf-8"))
+                except Exception:
+                    pass
+                return
+
             self._seen_nonces[nonce] = now
+            if event_id:
+                self._seen_nonces[event_id] = now
 
         # 4. Despacho do evento para callback com suporte a resposta / confirmação
-        resposta = {"sucesso": True, "active_session_id": None}
+        resposta = {"sucesso": True, "active_session_id": None, "event_id": event_id, "processado": True}
         if self.on_event:
             try:
                 res = self.on_event(evento)
                 if isinstance(res, dict):
-                    resposta.update(res)
+                    resposta = res
+                elif res is not None:
+                    resposta = {"sucesso": bool(res), "processado": bool(res)}
             except Exception as e:
                 logger.error("Erro no callback do evento IPC: %s", e)
-                resposta = {"sucesso": False, "erro": str(e)}
+                resposta = {"sucesso": False, "erro": str(e), "processado": False}
+
+        if "event_id" not in resposta:
+            resposta["event_id"] = event_id
+
+        # Cacheia a resposta para tolerar retransmissões do mesmo evento sem duplicar ações
+        with self._lock:
+            self._processed_events[nonce] = (resposta, now)
+            if event_id:
+                self._processed_events[event_id] = (resposta, now)
 
         try:
             dados_resposta = (json.dumps(resposta, ensure_ascii=False) + "\n").encode("utf-8")
