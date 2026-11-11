@@ -62,6 +62,16 @@ fila_intencoes = queue.Queue(maxsize=32)
 acoes_recentes = {}
 lock_acoes = threading.Lock()
 
+contador_sessao = 0
+lock_sessao = threading.Lock()
+
+
+def gerar_session_id(fonte="me6s"):
+    global contador_sessao
+    with lock_sessao:
+        contador_sessao += 1
+        return f"sess-{int(time.time())}-{contador_sessao}"
+
 
 def registrar_acao(acao, alvo):
     with lock_acoes:
@@ -110,7 +120,8 @@ def processar(texto, fonte="me6s", session_id=None):
             limite = agora + 12
             ultima_ativacao = agora
             fonte_ativa = fonte
-            sessao_ativa_id = session_id or f"sess-{int(agora)}"
+            sessao_ativa_id = session_id or gerar_session_id(fonte=fonte)
+            print(f"[Sessao: {sessao_ativa_id}]", flush=True)
             print("ATIVADO! Aguardando comando.", flush=True)
         return
 

@@ -93,7 +93,7 @@ class SessionArbitrator:
         self.history: List[Dict[str, Any]] = []
         self._recent_actions: Dict[Tuple[str, str], float] = {}
 
-    def report_wake(self, source: str) -> Tuple[bool, str]:
+    def report_wake(self, source: str, session_id: Optional[str] = None) -> Tuple[bool, str]:
         """Reporta palavra de ativação 'assistente' detectada por uma fonte.
 
         Retorna: (is_new_session, session_id)
@@ -117,7 +117,10 @@ class SessionArbitrator:
 
             # 2. Abre nova sessão
             self.total_activations += 1
-            self.session_id = f"sess-{int(time.time())}-{self.total_activations}"
+            if session_id:
+                self.session_id = session_id
+            else:
+                self.session_id = f"sess-{int(time.time())}-{self.total_activations}"
             self.state = "comando"
             self.primary_source = source
             self.last_trigger_source = source
@@ -609,6 +612,7 @@ class Me6sJournalMonitor(threading.Thread):
         self.service_active: bool = False
         self.current_origin: str = "me6s"
         self.last_origin_time: float = 0.0
+        self.pending_session_id: Optional[str] = None
 
     def run(self) -> None:
         import subprocess
@@ -654,6 +658,12 @@ class Me6sJournalMonitor(threading.Thread):
             self.last_origin_time = agora
             return
 
+        # Captura session_id coerente emitido pelo controlador para o ME6S
+        if linha.startswith("[Sessao:"):
+            sid = linha.replace("[Sessao:", "").replace("]", "").strip()
+            self.pending_session_id = sid
+            return
+
         # Reseta origem por expiração se passou da janela temporal
         if self.current_origin != "me6s" and (agora - self.last_origin_time) > 2.0:
             self.current_origin = "me6s"
@@ -664,6 +674,7 @@ class Me6sJournalMonitor(threading.Thread):
             if "ATIVADO!" in linha:
                 logger.debug("[Me6sJournalMonitor] Ignorando ativação espelhada da fonte '%s'", self.current_origin)
                 self.current_origin = "me6s"
+                self.pending_session_id = None
                 return
             if linha.startswith("Ouvi:"):
                 texto = linha.replace("Ouvi:", "").strip()
@@ -673,16 +684,20 @@ class Me6sJournalMonitor(threading.Thread):
                 return
             return
 
+        # Ativação do ME6S: consumada estritamente em 'ATIVADO! Aguardando comando.'
+        # Evita ativação duplicada entre 'Ouvi: assistente' e 'ATIVADO!' (Problema 2)
         if "ATIVADO! Aguardando comando." in linha:
-            is_new, sid = self.arbitrator.report_wake("me6s")
+            is_new, sid = self.arbitrator.report_wake("me6s", session_id=self.pending_session_id)
             logger.info("[ME6S] Ativação reconhecida pelo Vosk principal (sessão %s)", sid)
+            self.pending_session_id = None
             return
 
         if linha.startswith("Ouvi:"):
             texto = linha.replace("Ouvi:", "").strip()
+            # Ignora 'assistente' para evitar ativação duplicada com 'ATIVADO!' (Problema 2)
             if texto == "assistente":
-                self.arbitrator.report_wake("me6s")
-            elif self.arbitrator.state == "comando":
+                return
+            if self.arbitrator.state == "comando":
                 self.arbitrator.report_command("me6s", texto)
             elif self.arbitrator.state == "confirmacao" and "confirmar" in texto:
                 self.arbitrator.report_confirmation("me6s")

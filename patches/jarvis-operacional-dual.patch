@@ -1,5 +1,5 @@
 --- /tmp/jarvis_orig.py	2026-11-10 23:25:37.343830537 -0300
-+++ jarvis-voice/scripts/jarvis_operacional_corrigido.py	2026-11-10 23:25:22.599651046 -0300
++++ jarvis-voice/scripts/jarvis_operacional_corrigido.py	2026-11-10 23:38:37.377820849 -0300
 @@ -10,8 +10,11 @@
  
  # Carregar funcoes do painel existente
@@ -12,7 +12,7 @@
  SetLogLevel(-1)
  
  MODELO = "/opt/jarvis-voice/vosk-model-small-pt-0.3"
-@@ -46,12 +49,32 @@
+@@ -46,12 +49,42 @@
  )
  
  estado = "espera"
@@ -30,25 +30,35 @@
 +acoes_recentes = {}
 +lock_acoes = threading.Lock()
 +
++contador_sessao = 0
++lock_sessao = threading.Lock()
++
++
++def gerar_session_id(fonte="me6s"):
++    global contador_sessao
++    with lock_sessao:
++        contador_sessao += 1
++        return f"sess-{int(time.time())}-{contador_sessao}"
++
 +
 +def registrar_acao(acao, alvo):
 +    with lock_acoes:
 +        acoes_recentes[(acao, alvo)] = time.monotonic()
++
  
- 
--def processar(texto):
--    global estado, limite, pendente
 +def ja_executado_recentemente(acao, alvo, janela=3.5):
 +    with lock_acoes:
 +        return (time.monotonic() - acoes_recentes.get((acao, alvo), 0.0)) <= janela
-+
+ 
+-def processar(texto):
+-    global estado, limite, pendente
 +
 +def processar(texto, fonte="me6s", session_id=None):
 +    global estado, limite, pendente, ultima_ativacao, fonte_ativa, sessao_ativa_id
  
      agora = time.monotonic()
  
-@@ -59,19 +82,35 @@
+@@ -59,19 +92,36 @@
          print("Tempo esgotado.", flush=True)
          estado = "espera"
          pendente = None
@@ -80,11 +90,12 @@
              limite = agora + 12
 +            ultima_ativacao = agora
 +            fonte_ativa = fonte
-+            sessao_ativa_id = session_id or f"sess-{int(agora)}"
++            sessao_ativa_id = session_id or gerar_session_id(fonte=fonte)
++            print(f"[Sessao: {sessao_ativa_id}]", flush=True)
              print("ATIVADO! Aguardando comando.", flush=True)
          return
  
-@@ -80,6 +119,11 @@
+@@ -80,6 +130,11 @@
              print("Ja ativado. Aguardando comando.", flush=True)
              return
  
@@ -96,7 +107,7 @@
          # Correcao restrita ao teste de reconhecimento
          if texto == "dois ligar fusion":
              print("Normalizado: ligar fusion", flush=True)
-@@ -99,6 +143,15 @@
+@@ -99,6 +154,15 @@
              if acessivel:
                  print("Computador ja esta acessivel.", flush=True)
              else:
@@ -112,7 +123,7 @@
                  if os.getenv("JARVIS_WOL_REAL") == "1":
                      try:
                          if not srv.get("mac"):
-@@ -125,6 +178,8 @@
+@@ -125,6 +189,8 @@
                  else:
                      print("SIMULACAO: Wake-on-LAN.", flush=True)
              estado = "espera"
@@ -121,7 +132,7 @@
              return
  
          if not acessivel:
-@@ -134,6 +189,8 @@
+@@ -134,6 +200,8 @@
                  flush=True
              )
              estado = "espera"
@@ -130,7 +141,7 @@
              return
  
          estado = "confirmacao"
-@@ -148,6 +205,15 @@
+@@ -148,6 +216,15 @@
          return
  
      if estado == "confirmacao":
@@ -146,7 +157,7 @@
          if texto in ("confirmar", "confirmar desligar", "confirmar desligamento"):
              srv = painel.SERVIDORES[pendente]
              if painel.host_ligado(srv):
-@@ -159,8 +225,20 @@
+@@ -159,8 +236,20 @@
                          )
                          estado = "espera"
                          pendente = None
@@ -167,7 +178,7 @@
                      configuracao = dict(srv)
  
                      if pendente == "ananuke":
-@@ -192,6 +270,16 @@
+@@ -192,6 +281,16 @@
                      except Exception as erro:
                          print("Erro no SSH:", erro, flush=True)
                  else:
@@ -184,14 +195,14 @@
                      print(
                          "SIMULACAO SSH para",
                          srv["nome"],
-@@ -202,51 +290,142 @@
+@@ -202,51 +301,142 @@
  
              estado = "espera"
              pendente = None
 +            fonte_ativa = None
 +            sessao_ativa_id = None
 +
- 
++
 +# --- Barramento IPC Local por UNIX Domain Socket com Validação Semântica ---
 +def on_ipc_event(evento):
 +    global estado, sessao_ativa_id, pendente
@@ -203,26 +214,18 @@
 +    fonte = evento.get("fonte")
 +    if fonte not in ("lg_mic", "me6s"):
 +        return
- 
--microfone = subprocess.Popen([
--    "arecord", "-q",
--    "-D", "plughw:CARD=ME6S,DEV=0",
--    "-f", "S16_LE",
--    "-r", "16000",
--    "-c", "1",
--    "-t", "raw"
--], stdout=subprocess.PIPE)
++
 +    tipo = evento.get("evento")
 +    if tipo not in ("wake", "comando", "confirmar", "cancelar"):
 +        return
- 
++
 +    texto = evento.get("texto")
 +    if not isinstance(texto, str) or len(texto) > 128:
 +        return
 +    texto = texto.strip()
 +    if not texto:
 +        return
- 
++
 +    # Validação semântica estrita do texto conforme o tipo de evento
 +    if tipo == "wake" and texto != "assistente":
 +        return
@@ -232,7 +235,7 @@
 +        return
 +    if tipo == "comando" and texto not in COMANDOS and texto != "dois ligar fusion":
 +        return
-+
+ 
 +    sid = evento.get("session_id")
 +
 +    # Validação rigorosa de session_id, origem e estado antes de aceitar comandos e confirmações
@@ -258,13 +261,21 @@
 +        if sid and sessao_ativa_id and sid != sessao_ativa_id:
 +            print(f"IPC descartado: session_id divergente para cancelamento (recebido: {sid}, ativo: {sessao_ativa_id}).", flush=True)
 +            return
-+
+ 
+-microfone = subprocess.Popen([
+-    "arecord", "-q",
+-    "-D", "plughw:CARD=ME6S,DEV=0",
+-    "-f", "S16_LE",
+-    "-r", "16000",
+-    "-c", "1",
+-    "-t", "raw"
+-], stdout=subprocess.PIPE)
 +    try:
 +        fila_intencoes.put_nowait((fonte, texto, sid))
 +    except queue.Full:
 +        print("Fila de intencoes cheia. Descartando evento IPC.", flush=True)
-+
-+
+ 
+ 
 +ipc_listener = None
 +microfone = None
  fila_audio = queue.Queue(maxsize=64)
@@ -352,7 +363,7 @@
          if item is None:
              break
  
-@@ -260,11 +439,66 @@
+@@ -260,11 +450,66 @@
          if rec.AcceptWaveform(audio):
              texto = json.loads(rec.Result()).get("text", "").strip()
              if texto and texto != "[unk]":
