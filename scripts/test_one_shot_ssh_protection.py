@@ -318,6 +318,63 @@ class TestOneShotSshProtection(unittest.TestCase):
             self.assertTrue(disco["consumed"])
             self.assertEqual(disco["status"], "consumed")
 
+    def test_14_end_to_end_ssh_worker_missing_token_fails_closed(self):
+        """14. Integração fim a fim: Com JARVIS_SSH_REAL=1 e arquivo de token ausente, bloqueia estritamente e nunca executa subprocess."""
+        os.environ["JARVIS_SSH_REAL"] = "1"
+        os.environ["JARVIS_ALLOWED_REAL_TARGETS"] = "fusion"
+        if os.path.exists(self.token_file):
+            os.unlink(self.token_file)
+
+        with patch.object(jarvis.painel, "host_ligado", return_value=True), \
+             patch("subprocess.run") as mock_run:
+
+            jarvis.processar("assistente", fonte="lg_mic")
+            jarvis.processar("desligar fusion", fonte="lg_mic")
+            jarvis.processar("confirmar desligamento", fonte="me6s")
+            time.sleep(0.2)
+
+            mock_run.assert_not_called()
+
+    def test_15_end_to_end_finalizar_token_records_completion(self):
+        """15. Conclusão do SSH registra status finished no token para sinalizar o watchdog."""
+        os.environ["JARVIS_SSH_REAL"] = "1"
+        os.environ["JARVIS_ALLOWED_REAL_TARGETS"] = "fusion"
+        self._criar_token_valido(alvo="fusion", acao="desligar", bound_pid=os.getpid())
+
+        mock_cmd_ssh = ["ssh", "-o", "BatchMode=yes", "anakin@192.168.0.128", "shutdown /s /t 0"]
+        mock_result = subprocess.CompletedProcess(args=mock_cmd_ssh, returncode=0, stdout="", stderr="")
+
+        with patch.object(jarvis.painel, "host_ligado", return_value=True), \
+             patch.object(jarvis.painel, "montar_comando_ssh", return_value=mock_cmd_ssh), \
+             patch("subprocess.run", return_value=mock_result) as mock_run:
+
+            jarvis.processar("assistente", fonte="lg_mic")
+            jarvis.processar("desligar fusion", fonte="lg_mic")
+            jarvis.processar("confirmar desligamento", fonte="me6s")
+            time.sleep(0.2)
+
+            with open(self.token_file, "r", encoding="utf-8") as f:
+                disco = json.load(f)
+            self.assertTrue(disco.get("finished"))
+            self.assertEqual(disco.get("execution_result"), {"codigo": 0})
+
+    def test_16_end_to_end_ssh_worker_corrupted_token_fails_closed(self):
+        """16. Integração fim a fim: Com JARVIS_SSH_REAL=1 e arquivo corrompido, bloqueia estritamente."""
+        os.environ["JARVIS_SSH_REAL"] = "1"
+        os.environ["JARVIS_ALLOWED_REAL_TARGETS"] = "fusion"
+        with open(self.token_file, "w", encoding="utf-8") as f:
+            f.write("{ INVALID JSON NOT VALID")
+
+        with patch.object(jarvis.painel, "host_ligado", return_value=True), \
+             patch("subprocess.run") as mock_run:
+
+            jarvis.processar("assistente", fonte="lg_mic")
+            jarvis.processar("desligar fusion", fonte="lg_mic")
+            jarvis.processar("confirmar desligamento", fonte="me6s")
+            time.sleep(0.2)
+
+            mock_run.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -75,8 +75,12 @@ fi
 
 echo "[4/4] JARVIS_SSH_REAL=0 auditado com sucesso no PID ${PID}."
 
-# 5. Encerrar instâncias do watchdog em execução
-pkill -f "jarvis_ssh_watchdog.py" 2>/dev/null || true
+# 5. Encerrar instâncias do watchdog em execução (sem abortar o processo pai se este for o watchdog)
+for wp in $(pgrep -f "jarvis_ssh_watchdog.py" || true); do
+    if [[ "$wp" != "$$" && "$wp" != "$PPID" ]]; then
+        kill "$wp" 2>/dev/null || true
+    fi
+done
 
 echo "=========================================================================="
 echo "DESATIVAÇÃO CONCLUÍDA COM SUCESSO!"

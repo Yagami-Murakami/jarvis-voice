@@ -73,7 +73,7 @@ DEFAULT_STATE_FILE = "/var/lib/jarvis/acoes_recentes.json"
 # --- Proteção de Execução Única para SSH Real (One-Shot Token) ---
 DEFAULT_ONE_SHOT_TOKEN_FILE = "/var/lib/jarvis/one_shot_ssh_token.json"
 _ONE_SHOT_SSH_CONSUMED_IN_MEMORY = False
-_LOCK_ONE_SHOT_TOKEN = threading.Lock()
+_LOCK_ONE_SHOT_TOKEN = threading.RLock()
 
 
 def _obter_caminho_token_one_shot():
@@ -92,8 +92,13 @@ def _resetar_estado_token_memoria():
 
 def token_one_shot_requerido():
     """Verifica se o token de execução única é estritamente obrigatório.
-    Obrigatório sempre que JARVIS_REQUIRE_ONE_SHOT_TOKEN=1 ou o arquivo de token existir.
+    Fail-closed: Obrigatório sempre que JARVIS_SSH_REAL=1 ou JARVIS_REQUIRE_ONE_SHOT_TOKEN=1.
+    Apenas desativado se explicitamente configurado como '0' (ex: testes legados sem token).
     """
+    if os.getenv("JARVIS_REQUIRE_ONE_SHOT_TOKEN") == "0":
+        return False
+    if os.getenv("JARVIS_SSH_REAL") == "1":
+        return True
     if os.getenv("JARVIS_REQUIRE_ONE_SHOT_TOKEN") == "1":
         return True
     caminho = _obter_caminho_token_one_shot()
@@ -107,48 +112,49 @@ def verificar_token_one_shot(alvo, acao="desligar"):
     Retorna (valido: bool, detalhe_ou_motivo: dict | str).
     """
     global _ONE_SHOT_SSH_CONSUMED_IN_MEMORY
-    if _ONE_SHOT_SSH_CONSUMED_IN_MEMORY:
-        return False, "token_ja_consumido_na_memoria_deste_processo"
+    with _LOCK_ONE_SHOT_TOKEN:
+        if _ONE_SHOT_SSH_CONSUMED_IN_MEMORY:
+            return False, "token_ja_consumido_na_memoria_deste_processo"
 
-    caminho = _obter_caminho_token_one_shot()
-    if not os.path.exists(caminho):
-        return False, "token_arquivo_inexistente"
+        caminho = _obter_caminho_token_one_shot()
+        if not os.path.exists(caminho):
+            return False, "token_arquivo_inexistente"
 
-    try:
-        with open(caminho, "r", encoding="utf-8") as f:
-            dados = json.load(f)
-    except Exception as e:
-        return False, f"token_corrompido: {e}"
+        try:
+            with open(caminho, "r", encoding="utf-8") as f:
+                dados = json.load(f)
+        except Exception as e:
+            return False, f"token_corrompido: {e}"
 
-    if not isinstance(dados, dict):
-        return False, "token_formato_invalido"
+        if not isinstance(dados, dict):
+            return False, "token_formato_invalido"
 
-    if dados.get("status") != "active":
-        return False, f"token_status_inativo: {dados.get('status')}"
+        if dados.get("status") != "active":
+            return False, f"token_status_inativo: {dados.get('status')}"
 
-    if dados.get("consumed") is True:
-        return False, "token_ja_consumido"
+        if dados.get("consumed") is True:
+            return False, "token_ja_consumido"
 
-    alvo_token = str(dados.get("alvo", "")).strip().lower()
-    alvo_esperado = str(alvo).strip().lower()
-    if alvo_token != alvo_esperado:
-        return False, f"token_alvo_incompativel: {alvo_token} != {alvo_esperado}"
+        alvo_token = str(dados.get("alvo", "")).strip().lower()
+        alvo_esperado = str(alvo).strip().lower()
+        if alvo_token != alvo_esperado:
+            return False, f"token_alvo_incompativel: {alvo_token} != {alvo_esperado}"
 
-    acao_token = str(dados.get("acao", "")).strip().lower()
-    acao_esperada = str(acao).strip().lower()
-    if acao_token != acao_esperada:
-        return False, f"token_acao_incompativel: {acao_token} != {acao_esperada}"
+        acao_token = str(dados.get("acao", "")).strip().lower()
+        acao_esperada = str(acao).strip().lower()
+        if acao_token != acao_esperada:
+            return False, f"token_acao_incompativel: {acao_token} != {acao_esperada}"
 
-    agora = time.time()
-    expires_at = dados.get("expires_at", 0.0)
-    if not isinstance(expires_at, (int, float)) or agora > expires_at:
-        return False, f"token_expirado: {agora} > {expires_at}"
+        agora = time.time()
+        expires_at = dados.get("expires_at", 0.0)
+        if not isinstance(expires_at, (int, float)) or agora > expires_at:
+            return False, f"token_expirado: {agora} > {expires_at}"
 
-    bound_pid = dados.get("bound_service_pid")
-    if bound_pid is not None and int(bound_pid) != os.getpid():
-        return False, f"token_invalido_por_reinicio: bound_pid {bound_pid} != pid atual {os.getpid()}"
+        bound_pid = dados.get("bound_service_pid")
+        if bound_pid is not None and int(bound_pid) != os.getpid():
+            return False, f"token_invalido_por_reinicio: bound_pid {bound_pid} != pid atual {os.getpid()}"
 
-    return True, dados
+        return True, dados
 
 
 def consumir_token_one_shot(alvo, acao="desligar", event_id=None):
@@ -194,6 +200,35 @@ def consumir_token_one_shot(alvo, acao="desligar", event_id=None):
 
         _ONE_SHOT_SSH_CONSUMED_IN_MEMORY = True
         return True, dados
+
+
+def finalizar_token_one_shot(alvo=None, event_id=None, resultado=None, erro=None):
+    """Atualiza o token one-shot após a conclusão da tentativa SSH, notificando o watchdog."""
+    caminho = _obter_caminho_token_one_shot()
+    if not os.path.exists(caminho):
+        return
+    with _LOCK_ONE_SHOT_TOKEN:
+        try:
+            with open(caminho, "r", encoding="utf-8") as f:
+                dados = json.load(f)
+            if isinstance(dados, dict):
+                dados["finished"] = True
+                dados["finished_at"] = time.time()
+                dados["execution_result"] = resultado
+                dados["execution_error"] = erro
+                diretorio = os.path.dirname(os.path.abspath(caminho)) or "."
+                fd, tmp_file = tempfile.mkstemp(prefix="one_shot_token_", dir=diretorio)
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(dados, f, indent=2, sort_keys=True)
+                    f.flush()
+                    os.fsync(f.fileno())
+                try:
+                    os.chmod(tmp_file, 0o600)
+                except OSError:
+                    pass
+                os.replace(tmp_file, caminho)
+        except Exception as e:
+            print(f"Aviso ao finalizar token one-shot: {e}", flush=True)
 
 
 def _reconciliar_token_one_shot_inicializacao():
@@ -959,6 +994,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                                     alvo=alvo_nome,
                                     resultado={"codigo": 0, "token_id": dados_token.get("token_id") if dados_token else None}
                                 )
+                                finalizar_token_one_shot(alvo=alvo_nome, event_id=ev_id, resultado={"codigo": 0})
                             else:
                                 print(f"Falha no SSH: codigo de retorno {resultado.returncode}.", flush=True)
                                 if resultado.stderr:
@@ -970,6 +1006,12 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                                     alvo=alvo_nome,
                                     erro=f"ssh_returncode_{resultado.returncode}",
                                     resultado={"codigo": resultado.returncode, "token_id": dados_token.get("token_id") if dados_token else None}
+                                )
+                                finalizar_token_one_shot(
+                                    alvo=alvo_nome,
+                                    event_id=ev_id,
+                                    resultado={"codigo": resultado.returncode},
+                                    erro=f"ssh_returncode_{resultado.returncode}"
                                 )
                         else:
                             codigo_simulado = getattr(painel, "simular_codigo_ssh", 0)
@@ -1005,6 +1047,8 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                             alvo=alvo_nome,
                             erro="ssh_timeout_25s"
                         )
+                        if token_consumido:
+                            finalizar_token_one_shot(alvo=alvo_nome, event_id=ev_id, erro="ssh_timeout_25s")
                     except Exception as erro:
                         print("Erro no SSH:", erro, flush=True)
                         atualizar_status_acao(
@@ -1014,6 +1058,8 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                             alvo=alvo_nome,
                             erro=str(erro)
                         )
+                        if token_consumido:
+                            finalizar_token_one_shot(alvo=alvo_nome, event_id=ev_id, erro=str(erro))
 
                 th_ssh = threading.Thread(
                     target=_executar_ssh_worker,

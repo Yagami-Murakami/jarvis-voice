@@ -97,9 +97,35 @@ def main():
         expires_at = dados.get("expires_at", 0)
 
         if consumed or status == "consumed":
-            log(f"SUCESSO: Token {dados.get('token_id')} foi consumido pelo evento {dados.get('consumed_by_event')}.")
-            log("Aguardando 3 segundos para conclusão de logs e persistência...")
-            time.sleep(3.0)
+            ev_id = dados.get("consumed_by_event")
+            log(f"SUCESSO: Token {dados.get('token_id')} foi consumido pelo evento {ev_id}.")
+            log("Aguardando conclusão da execução SSH no controlador...")
+            t_espera_inicio = time.time()
+            concluido = False
+            state_file = os.getenv("JARVIS_STATE_FILE", "/var/lib/jarvis/acoes_recentes.json")
+            while (time.time() - t_espera_inicio) < 35.0:
+                if dados.get("finished"):
+                    concluido = True
+                    break
+                if ev_id and os.path.exists(state_file):
+                    try:
+                        with open(state_file, "r", encoding="utf-8") as sf:
+                            st_data = json.load(sf)
+                        reg = st_data.get("registro_acoes", {}).get(ev_id, {})
+                        if reg.get("status") in ("concluido", "falha", "indeterminado"):
+                            concluido = True
+                            break
+                    except Exception:
+                        pass
+                time.sleep(0.5)
+                try:
+                    with open(TOKEN_FILE, "r", encoding="utf-8") as f:
+                        dados = json.load(f)
+                except Exception:
+                    pass
+
+            log(f"Execução SSH concluída (finalizado={concluido}, decorrido={time.time()-t_espera_inicio:.2f}s). Aguardando sincronização de buffers...")
+            time.sleep(2.0)
             desarmar()
             log("Ciclo One-Shot concluído com sucesso e SSH real desativado.")
             return

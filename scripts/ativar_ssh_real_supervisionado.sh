@@ -11,7 +11,7 @@ set -euo pipefail
 # - Fail-closed total em reinicialização, crash ou alvo não autorizado
 # ========================================================================
 
-EXPECTED_SHA="8d27abd775cd28355727713d49f1793c99bd2dc5ff53a5a8682f341ea48edca8"
+EXPECTED_SHA="569799f94cd476f0cdac20dbbaee20e4fe7dce87672af2f666278635f18c05d8"
 OPERACIONAL="/opt/jarvis-voice/jarvis-operacional.py"
 DROPIN_DIR="/etc/systemd/system/jarvis-voice.service.d"
 SSH_ONESHOT_CONF="${DROPIN_DIR}/zz-ssh-real-oneshot.conf"
@@ -110,6 +110,7 @@ echo "[5/7] Instalando drop-in temporário ${SSH_ONESHOT_CONF}..."
 cat << 'EOF' > "${SSH_ONESHOT_CONF}"
 [Service]
 Environment=JARVIS_SSH_REAL=1
+Environment=JARVIS_REQUIRE_ONE_SHOT_TOKEN=1
 EOF
 chmod 0644 "${SSH_ONESHOT_CONF}"
 
@@ -130,6 +131,13 @@ ENV_DATA=$(tr '\0' '\n' < "/proc/${PID}/environ")
 
 echo "${ENV_DATA}" | grep -q "^JARVIS_SSH_REAL=1$" || {
     echo "ERRO: JARVIS_SSH_REAL=1 não ativo no PID ${PID}!" >&2
+    rm -f "${SSH_ONESHOT_CONF}"
+    systemctl daemon-reload
+    exit 1
+}
+
+echo "${ENV_DATA}" | grep -q "^JARVIS_REQUIRE_ONE_SHOT_TOKEN=1$" || {
+    echo "ERRO: JARVIS_REQUIRE_ONE_SHOT_TOKEN=1 não ativo no PID ${PID}!" >&2
     rm -f "${SSH_ONESHOT_CONF}"
     systemctl daemon-reload
     exit 1
