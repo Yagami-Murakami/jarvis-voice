@@ -17,7 +17,16 @@ BACKUP_PRIMARY="${JARVIS_BACKUP_ORIGINAL:-/opt/jarvis-voice/jarvis-operacional.p
 BACKUP_EXTERNAL="${JARVIS_BACKUP_EXTERNAL:-/var/backups/jarvis/jarvis-operacional.py.backup_original}"
 PATCH_FILE="${JARVIS_PATCH_FILE:-/opt/jarvis-voice/patches/jarvis-operacional-dual.patch}"
 STATE_DIR="${JARVIS_STATE_DIR:-/var/lib/jarvis}"
-DROPIN_FILE="${JARVIS_DROPIN_FILE:-/etc/systemd/system/jarvis-voice.service.d/zz-simulacao-etapa1.conf}"
+DROPIN_DEFAULT="/etc/systemd/system/jarvis-voice.service.d"
+if [ -n "${JARVIS_DROPIN_FILE:-}" ] && [ -f "$JARVIS_DROPIN_FILE" ]; then
+    DROPIN_FILE="$JARVIS_DROPIN_FILE"
+elif [ -f "${DROPIN_DEFAULT}/zz-fase-b-supervisionada.conf" ]; then
+    DROPIN_FILE="${DROPIN_DEFAULT}/zz-fase-b-supervisionada.conf"
+elif [ -f "${DROPIN_DEFAULT}/zz-simulacao-etapa1.conf" ]; then
+    DROPIN_FILE="${DROPIN_DEFAULT}/zz-simulacao-etapa1.conf"
+else
+    DROPIN_FILE="${JARVIS_DROPIN_FILE:-${DROPIN_DEFAULT}/zz-simulacao-etapa1.conf}"
+fi
 VENV_PY="${JARVIS_VENV_PY:-/opt/jarvis-voice/venv/bin/python3}"
 CORRIGIDO_PY="${JARVIS_CORRIGIDO_PY:-/opt/jarvis-voice/scripts/jarvis_operacional_corrigido.py}"
 
@@ -109,11 +118,11 @@ fi
 rm -f "$TEMP_TEST"
 echo "OK (Reversibilidade 100% garantida)"
 
-# 5. Verificação estrita das configurações systemd (Simulação Obrigatória)
-echo -n "[5/8] Verificando drop-in e variáveis systemd (WoL=0, SSH=0, PERSISTENCE=1)... "
+# 5. Verificação estrita das configurações systemd (Simulação ou Fase B supervisionada)
+echo -n "[5/8] Verificando drop-in e variáveis systemd... "
 if [ ! -f "$DROPIN_FILE" ]; then
     echo "FALHA!"
-    echo "ERRO CRÍTICO: Drop-in de simulação $DROPIN_FILE não existe!"
+    echo "ERRO CRÍTICO: Drop-in $DROPIN_FILE não existe!"
     exit 1
 fi
 DROPIN_DIR="$(dirname "$DROPIN_FILE")"
@@ -123,29 +132,53 @@ if [ -f "${DROPIN_DIR}/producao.conf" ]; then
     exit 1
 fi
 
-if ! grep -q "JARVIS_WOL_REAL=0" "$DROPIN_FILE" || \
-   ! grep -q "JARVIS_SSH_REAL=0" "$DROPIN_FILE" || \
-   ! grep -q "JARVIS_REQUIRE_PERSISTENCE=1" "$DROPIN_FILE"; then
-    echo "FALHA!"
-    echo "ERRO CRÍTICO: Configurações de simulação incompletas em $DROPIN_FILE!"
-    exit 1
-fi
-
-if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet jarvis-voice.service 2>/dev/null; then
-    ENV_OUTPUT=$(systemctl show -p Environment jarvis-voice.service 2>/dev/null || true)
-    if [ -n "$ENV_OUTPUT" ]; then
-        if ! echo "$ENV_OUTPUT" | grep -q "JARVIS_WOL_REAL=0" || \
-           ! echo "$ENV_OUTPUT" | grep -q "JARVIS_SSH_REAL=0" || \
-           ! echo "$ENV_OUTPUT" | grep -q "JARVIS_REQUIRE_PERSISTENCE=1" || \
-           echo "$ENV_OUTPUT" | grep -q "JARVIS_WOL_REAL=1" || \
-           echo "$ENV_OUTPUT" | grep -q "JARVIS_SSH_REAL=1"; then
-            echo "FALHA!"
-            echo "ERRO CRÍTICO: Variáveis no systemd violam modo simulação ($ENV_OUTPUT)!"
-            exit 1
+if grep -q "JARVIS_ALLOWED_REAL_TARGETS=fusion" "$DROPIN_FILE"; then
+    if ! grep -q "JARVIS_WOL_REAL=1" "$DROPIN_FILE" || \
+       ! grep -q "JARVIS_SSH_REAL=0" "$DROPIN_FILE" || \
+       ! grep -q "JARVIS_REQUIRE_PERSISTENCE=1" "$DROPIN_FILE"; then
+        echo "FALHA!"
+        echo "ERRO CRÍTICO: Configurações de Fase B incompletas em $DROPIN_FILE!"
+        exit 1
+    fi
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet jarvis-voice.service 2>/dev/null; then
+        ENV_OUTPUT=$(systemctl show -p Environment jarvis-voice.service 2>/dev/null || true)
+        if [ -n "$ENV_OUTPUT" ]; then
+            if ! echo "$ENV_OUTPUT" | grep -q "JARVIS_WOL_REAL=1" || \
+               ! echo "$ENV_OUTPUT" | grep -q "JARVIS_SSH_REAL=0" || \
+               ! echo "$ENV_OUTPUT" | grep -q "JARVIS_ALLOWED_REAL_TARGETS=fusion" || \
+               ! echo "$ENV_OUTPUT" | grep -q "JARVIS_REQUIRE_PERSISTENCE=1" || \
+               echo "$ENV_OUTPUT" | grep -q "JARVIS_SSH_REAL=1"; then
+                echo "FALHA!"
+                echo "ERRO CRÍTICO: Variáveis no systemd violam modo Fase B pré-armação ($ENV_OUTPUT)!"
+                exit 1
+            fi
         fi
     fi
+    echo "OK (Configuração Fase B supervisionada verificada: WoL=1[fusion], SSH=0, PERSISTENCE=1)"
+else
+    if ! grep -q "JARVIS_WOL_REAL=0" "$DROPIN_FILE" || \
+       ! grep -q "JARVIS_SSH_REAL=0" "$DROPIN_FILE" || \
+       ! grep -q "JARVIS_REQUIRE_PERSISTENCE=1" "$DROPIN_FILE"; then
+        echo "FALHA!"
+        echo "ERRO CRÍTICO: Configurações de simulação incompletas em $DROPIN_FILE!"
+        exit 1
+    fi
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet jarvis-voice.service 2>/dev/null; then
+        ENV_OUTPUT=$(systemctl show -p Environment jarvis-voice.service 2>/dev/null || true)
+        if [ -n "$ENV_OUTPUT" ]; then
+            if ! echo "$ENV_OUTPUT" | grep -q "JARVIS_WOL_REAL=0" || \
+               ! echo "$ENV_OUTPUT" | grep -q "JARVIS_SSH_REAL=0" || \
+               ! echo "$ENV_OUTPUT" | grep -q "JARVIS_REQUIRE_PERSISTENCE=1" || \
+               echo "$ENV_OUTPUT" | grep -q "JARVIS_WOL_REAL=1" || \
+               echo "$ENV_OUTPUT" | grep -q "JARVIS_SSH_REAL=1"; then
+                echo "FALHA!"
+                echo "ERRO CRÍTICO: Variáveis no systemd violam modo simulação ($ENV_OUTPUT)!"
+                exit 1
+            fi
+        fi
+    fi
+    echo "OK (Configuração de simulação obrigatória verificada)"
 fi
-echo "OK (Configuração de simulação obrigatória verificada)"
 
 # 6. Verificação do diretório de armazenamento privado e persistente
 echo -n "[6/8] Verificando diretório persistente $STATE_DIR... "
