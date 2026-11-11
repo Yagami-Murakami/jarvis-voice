@@ -1,11 +1,13 @@
 [Unit]
 Description=Jarvis Dual-Mic Audio Gateway & Session Arbitrator
-After=network.target jarvis-voice.service
+After=network.target
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/opt/jarvis-voice/gateway
+# Credencial individual provisionada localmente, arquivo protegido root:root 0600
+EnvironmentFile=/etc/jarvis/audio-gateway.env
 ExecStart=/opt/jarvis-voice/venv/bin/python /opt/jarvis-voice/gateway/audio_gateway.py --tcp-port 8088 --http-port 8089 --host 0.0.0.0 --model /opt/jarvis-voice/vosk-model-small-pt-0.3
 Restart=always
 RestartSec=5
