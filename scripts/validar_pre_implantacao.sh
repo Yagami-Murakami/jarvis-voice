@@ -7,15 +7,17 @@ set -euo pipefail
 
 EXPECTED_SHA="c51d58e6d3a19003eac55a827212e5e084d583fea43389ec0ea5466080ee2d54"
 TARGET_FILE="/opt/jarvis-voice/jarvis-operacional.py"
-BACKUP_FILE="/opt/jarvis-voice/jarvis-operacional.py.backup_original"
+BACKUP_PRIMARY="/opt/jarvis-voice/jarvis-operacional.py.backup_original"
+BACKUP_EXTERNAL="/var/backups/jarvis/jarvis-operacional.py.backup_original"
 PATCH_FILE="/opt/jarvis-voice/patches/jarvis-operacional-dual.patch"
 STATE_DIR="/var/lib/jarvis"
+DROPIN_FILE="/etc/systemd/system/jarvis-voice.service.d/zz-simulacao-etapa1.conf"
 VENV_PY="/opt/jarvis-voice/venv/bin/python3"
 
-echo "=== INICIANDO VERIFICAÇÃO PRÉ-IMPLANTAÇÃO (SAFETY CHECK) ==="
+echo "=== INICIANDO VERIFICAÇÃO PRÉ-IMPLANTAÇÃO (PRE-FLIGHT FAIL-CLOSED) ==="
 
-# 1. Verificação de integridade do arquivo original em produção e do backup
-echo -n "[1/8] Verificando SHA-256 do arquivo original e do backup... "
+# 1. Verificação antecipada de existência e SHA-256 do arquivo original e de ambos os backups
+echo -n "[1/8] Verificando SHA-256 do arquivo original e backups (primário e externo)... "
 CURRENT_SHA=$(sha256sum "$TARGET_FILE" | awk '{print $1}')
 if [ "$CURRENT_SHA" != "$EXPECTED_SHA" ]; then
     echo "FALHA!"
@@ -24,21 +26,33 @@ if [ "$CURRENT_SHA" != "$EXPECTED_SHA" ]; then
     echo "  Obtido:   $CURRENT_SHA"
     exit 1
 fi
-if [ -f "$BACKUP_FILE" ]; then
-    BACKUP_SHA=$(sha256sum "$BACKUP_FILE" | awk '{print $1}')
-    if [ "$BACKUP_SHA" != "$EXPECTED_SHA" ]; then
-        echo "FALHA!"
-        echo "ERRO CRÍTICO: SHA-256 do backup $BACKUP_FILE divergente!"
-        exit 1
-    fi
-else
+
+if [ ! -f "$BACKUP_PRIMARY" ]; then
     echo "FALHA!"
-    echo "ERRO CRÍTICO: Arquivo de backup $BACKUP_FILE não encontrado!"
+    echo "ERRO CRÍTICO: Backup primário $BACKUP_PRIMARY não encontrado!"
     exit 1
 fi
-echo "OK ($CURRENT_SHA)"
+PRIMARY_SHA=$(sha256sum "$BACKUP_PRIMARY" | awk '{print $1}')
+if [ "$PRIMARY_SHA" != "$EXPECTED_SHA" ]; then
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: SHA-256 do backup primário $BACKUP_PRIMARY divergente ($PRIMARY_SHA)!"
+    exit 1
+fi
 
-# 2. Verificação de sintaxe e ausência de mocks no código proposto
+if [ ! -f "$BACKUP_EXTERNAL" ]; then
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: Backup externo $BACKUP_EXTERNAL não encontrado!"
+    exit 1
+fi
+EXTERNAL_SHA=$(sha256sum "$BACKUP_EXTERNAL" | awk '{print $1}')
+if [ "$EXTERNAL_SHA" != "$EXPECTED_SHA" ]; then
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: SHA-256 do backup externo $BACKUP_EXTERNAL divergente ($EXTERNAL_SHA)!"
+    exit 1
+fi
+echo "OK (Todos 100% íntegros: $CURRENT_SHA)"
+
+# 2. Verificação de sintaxe e ausência estrita de mocks no código proposto
 echo -n "[2/8] Verificando ausência de mocks e syntax check no código de produção... "
 if grep -iE "MagicMock" /opt/jarvis-voice/scripts/jarvis_operacional_corrigido.py >/dev/null 2>&1; then
     echo "FALHA!"
@@ -48,8 +62,13 @@ fi
 "$VENV_PY" -m py_compile /opt/jarvis-voice/scripts/jarvis_operacional_corrigido.py
 echo "OK (Sintaxe limpa, 0 mocks)"
 
-# 3. Teste de aplicação do patch em modo dry-run
+# 3. Teste de aplicação do patch em modo dry-run e disponibilidade do arquivo
 echo -n "[3/8] Testando aplicação do patch (dry-run)... "
+if [ ! -f "$PATCH_FILE" ] || [ ! -r "$PATCH_FILE" ]; then
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: Arquivo de patch $PATCH_FILE inexistente ou inacessível!"
+    exit 1
+fi
 if ! (cd /opt/jarvis-voice && patch --dry-run -p1 < "$PATCH_FILE" >/dev/null 2>&1); then
     echo "FALHA!"
     echo "ERRO CRÍTICO: patch --dry-run falhou em aplicar $PATCH_FILE!"
@@ -71,30 +90,41 @@ fi
 rm -f "$TEMP_TEST"
 echo "OK (Reversibilidade 100% garantida)"
 
-# 5. Verificação estrita das variáveis de ambiente systemd (Simulação Obrigatória)
-echo -n "[5/8] Verificando variáveis de ambiente systemd (WoL=0, SSH=0, PERSISTENCE=1)... "
-ENV_OUTPUT=$(systemctl show -p Environment jarvis-voice.service)
-if ! echo "$ENV_OUTPUT" | grep -q "JARVIS_WOL_REAL=0"; then
+# 5. Verificação estrita das configurações systemd (Simulação Obrigatória)
+echo -n "[5/8] Verificando drop-in e variáveis systemd (WoL=0, SSH=0, PERSISTENCE=1)... "
+if [ ! -f "$DROPIN_FILE" ]; then
     echo "FALHA!"
-    echo "ERRO CRÍTICO: JARVIS_WOL_REAL=0 não configurado no systemd ($ENV_OUTPUT)!"
-    exit 1
-fi
-if ! echo "$ENV_OUTPUT" | grep -q "JARVIS_SSH_REAL=0"; then
-    echo "FALHA!"
-    echo "ERRO CRÍTICO: JARVIS_SSH_REAL=0 não configurado no systemd ($ENV_OUTPUT)!"
-    exit 1
-fi
-if ! echo "$ENV_OUTPUT" | grep -q "JARVIS_REQUIRE_PERSISTENCE=1"; then
-    echo "FALHA!"
-    echo "ERRO CRÍTICO: JARVIS_REQUIRE_PERSISTENCE=1 não configurado no systemd ($ENV_OUTPUT)!"
+    echo "ERRO CRÍTICO: Drop-in de simulação $DROPIN_FILE não existe!"
     exit 1
 fi
 if [ -f /etc/systemd/system/jarvis-voice.service.d/producao.conf ]; then
     echo "FALHA!"
-    echo "ERRO CRÍTICO: producao.conf ativo em drop-in! Deve estar desabilitado para simulação."
+    echo "ERRO CRÍTICO: producao.conf ativo em drop-in! Deve permanecer desabilitado."
     exit 1
 fi
-echo "OK (JARVIS_WOL=0, JARVIS_SSH=0, JARVIS_REQUIRE_PERSISTENCE=1 prevalecem)"
+
+ENV_OUTPUT=$(systemctl show -p Environment jarvis-voice.service)
+if ! echo "$ENV_OUTPUT" | grep -q "JARVIS_WOL_REAL=0"; then
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: JARVIS_WOL_REAL=0 ausente no systemd ($ENV_OUTPUT)!"
+    exit 1
+fi
+if ! echo "$ENV_OUTPUT" | grep -q "JARVIS_SSH_REAL=0"; then
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: JARVIS_SSH_REAL=0 ausente no systemd ($ENV_OUTPUT)!"
+    exit 1
+fi
+if ! echo "$ENV_OUTPUT" | grep -q "JARVIS_REQUIRE_PERSISTENCE=1"; then
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: JARVIS_REQUIRE_PERSISTENCE=1 ausente no systemd ($ENV_OUTPUT)!"
+    exit 1
+fi
+if echo "$ENV_OUTPUT" | grep -q "JARVIS_WOL_REAL=1" || echo "$ENV_OUTPUT" | grep -q "JARVIS_SSH_REAL=1"; then
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: Flag de modo real detectada no systemd ($ENV_OUTPUT)!"
+    exit 1
+fi
+echo "OK (Configuração de simulação obrigatória verificada)"
 
 # 6. Verificação do diretório de armazenamento privado e persistente
 echo -n "[6/8] Verificando diretório persistente /var/lib/jarvis... "

@@ -16,23 +16,24 @@ O objetivo desta etapa é validar a integração operacional entre o microfone U
 ### Princípios Inegociáveis:
 1. **Simulação Obrigatória:** `JARVIS_WOL_REAL=0` e `JARVIS_SSH_REAL=0` prevalecem em nível de serviço systemd.
 2. **Durabilidade e Idempotência:** `JARVIS_REQUIRE_PERSISTENCE=1` garante que falhas de gravação em `/var/lib/jarvis/acoes_recentes.json` bloqueiem execuções de hardware (fail-closed).
-3. **Rollback Seguro:** O procedimento de rollback restaura o backup verificado por SHA-256 e **NUNCA reativa hardware real automaticamente**.
-4. **Preservação de Serviços:** O painel `ligar.casa` (`homelab-panel`), a interface `jarvis-display.service` e a configuração do LG são estritamente preservados.
-5. **Execução Supervisionada:** A aplicação do patch e o reinício de serviços dependem de autorização explícita do operador.
+3. **Backup Duplo Imutável:** Backup original mantido na pasta do projeto e em `/var/backups/jarvis/jarvis-operacional.py.backup_original` (somente leitura `0444`, fora da árvore atualizável).
+4. **Rollback Seguro:** O procedimento de rollback valida o hash do backup **ANTES** de copiar e **NUNCA reativa hardware real automaticamente**.
+5. **Preservação de Serviços:** O painel `ligar.casa` (`homelab-panel`), a interface `jarvis-display.service` e a configuração do LG são estritamente preservados.
+6. **Execução Supervisionada:** A aplicação do patch e o reinício de serviços dependem de autorização explícita do operador.
 
 ---
 
-## 2. Pré-Requisitos e Condições de Segurança Pré-Voo (Pre-Flight)
+## 2. Pré-Requisitos e Condições de Segurança Pré-Voo (Pre-Flight Fail-Closed)
 
 Antes de qualquer alteração, o script automatizado `scripts/validar_pre_implantacao.sh` verifica 8 condições críticas, interrompendo o processo imediatamente (`exit 1`) caso ocorra qualquer divergência:
 
 | # | Condição de Segurança | Verificação Técnica | Critério de Sucesso |
 |---|---|---|---|
-| 1 | **Integridade do Arquivo Original e Backup** | `sha256sum /opt/jarvis-voice/jarvis-operacional.py` e `.backup_original` | SHA-256 = `c51d58e6d3a19003eac55a827212e5e084d583fea43389ec0ea5466080ee2d54` |
+| 1 | **Integridade do Arquivo Original e Backups** | `sha256sum` do arquivo de produção, backup primário e backup externo imutável (`/var/backups/jarvis/`) | SHA-256 = `c51d58e6d3a19003eac55a827212e5e084d583fea43389ec0ea5466080ee2d54` em todos |
 | 2 | **Ausência de Mocks e Sintaxe** | `grep -iE "MagicMock"` e `py_compile` | 0 ocorrências de mocks; sintaxe Python 3.11 limpa |
-| 3 | **Patch Dry-Run** | `patch --dry-run -p1 < patches/jarvis-operacional-dual.patch` | Código de saída 0 (sem rejeições/hunks) |
+| 3 | **Disponibilidade e Dry-Run do Patch** | Existência de `patches/jarvis-operacional-dual.patch` e `patch --dry-run -p1` | Código de saída 0 (sem rejeições/hunks) |
 | 4 | **Reversibilidade Garantida** | `patch -R --dry-run` sobre cópia temporária | Código de saída 0; restauração idêntica |
-| 5 | **Simulação no Systemd** | `systemctl show -p Environment jarvis-voice.service` | `JARVIS_WOL_REAL=0`, `JARVIS_SSH_REAL=0`, `JARVIS_REQUIRE_PERSISTENCE=1` ativos; `producao.conf` desabilitado |
+| 5 | **Simulação no Systemd** | Drop-in `zz-simulacao-etapa1.conf` presente; `producao.conf` ausente; `systemctl show -p Environment` | `JARVIS_WOL_REAL=0`, `JARVIS_SSH_REAL=0`, `JARVIS_REQUIRE_PERSISTENCE=1` ativos; flags reais bloqueadas |
 | 6 | **Diretório Persistente** | `ls -ld /var/lib/jarvis` e teste de escrita por `tuninho` | Permissões `0750`, proprietário `tuninho:tuninho`, escrita validada |
 | 7 | **Serviços Auxiliares Ativos** | `systemctl is-active` para Gateway e Display | Ambos retornam `active` |
 | 8 | **Dependências de Runtime** | Importação de Vosk, Kaldi e `app.SERVIDORES` (`homelab-panel`) | Módulos carregados com sucesso |
@@ -61,26 +62,26 @@ systemctl restart jarvis-voice.service
 systemctl restart jarvis-audio-gateway.service
 ```
 
-### Passo 3.4: Auditoria em Runtime do Novo Processo
+### Passo 3.4: Auditoria em Runtime do Processo Ativo
 ```bash
-NEW_PID=$(systemctl show -p MainPID --value jarvis-voice.service)
-echo "Novo PID: $NEW_PID"
-# Confirmar que o processo em execução NÃO possui permissão para comandos reais:
-strings /proc/$NEW_PID/environ | grep -E "JARVIS_WOL_REAL|JARVIS_SSH_REAL|JARVIS_REQUIRE_PERSISTENCE"
+/opt/jarvis-voice/scripts/validar_pos_inicializacao.sh
 ```
-*Saída obrigatória:*
-```text
-JARVIS_WOL_REAL=0
-JARVIS_SSH_REAL=0
-JARVIS_REQUIRE_PERSISTENCE=1
-```
+*Validações executadas pelo script:*
+- Status do serviço ativo;
+- Leitura de `/proc/$PID/environ` confirmando `JARVIS_WOL_REAL=0`, `JARVIS_SSH_REAL=0`, `JARVIS_REQUIRE_PERSISTENCE=1` (sem expor segredos);
+- Presença de `MODO SIMULACAO - SEM ACOES REAIS` no journal de inicialização;
+- Existência e permissões `0600` do socket IPC `/run/jarvis/voice-event.sock`.
 
 ---
 
-## 4. Plano de Testes Operacionais em Simulação
+## 4. Plano de Testes Operacionais Cruzados em Simulação
 
-Com o sistema rodando em modo simulado, executar os seguintes cenários de bancada:
+Executar a suíte de testes cruzados com coleta contínua e sanitizada de logs:
+```bash
+/opt/jarvis-voice/scripts/testes_cruzados_etapa1_simulacao.sh
+```
 
+### Cenários Cobertos:
 1. **Ativação pelo ME6S e Comando pelo LG:**
    - Pronunciar "assistente" próximo ao microfone ME6S (verificar log `[ME6S] Ouvi: assistente` e Jarvis Display).
    - Pronunciar comando pelo LG (ex.: "ligar fusion").
@@ -101,21 +102,20 @@ Com o sistema rodando em modo simulado, executar os seguintes cenários de banca
    - Confirmar que o computador permanece ligado e o estado de conclusão foi gravado em `/var/lib/jarvis/acoes_recentes.json`.
 
 5. **Recuperação de Desconexão do ME6S (USB):**
-   - Desconectar temporariamente o cabo USB do microfone Fifine ME6S (ou suspender processo de captura).
-   - Reconectar o cabo.
-   - Verificar log do monitor: reabertura do stream de áudio pelo `arecord` e recuperação sem falha.
+   - Simular desconexão temporária do microfone Fifine ME6S (ou interrupção do stream ALSA).
+   - Reconectar o microfone.
+   - Verificar reabertura automática pelo `arecord` e auto-recovery do monitor.
 
 6. **Reconexão de Rede do LG:**
-   - Alternar brevemente Wi-Fi no LG.
-   - Verificar reconexão TLS automática ao gateway na porta 8088.
+   - Reconexão TLS automática na porta 8088 com handshake validado.
 
 7. **Validação do Jarvis Display:**
-   - Verificar sincronização de estados no aplicativo LG (`IDLE` -> `OUVINDO` -> `CONFIRMANDO` -> `IDLE`).
-   - Capturar screenshot do display para evidência.
+   - Sincronização visual de estados no aplicativo LG (`IDLE` -> `OUVINDO` -> `CONFIRMANDO` -> `IDLE`).
+   - Som de chime de ativação reproduzido.
 
 ---
 
-## 5. Procedimento de Rollback de Emergência
+## 5. Procedimento de Rollback de Emergência Seguro
 
 Caso ocorra qualquer comportamento anômalo durante a Etapa 1:
 
@@ -123,11 +123,11 @@ Caso ocorra qualquer comportamento anômalo durante a Etapa 1:
 /opt/jarvis-voice/scripts/rollback_emergencia.sh
 ```
 
-### O que o script de rollback executa:
-1. Garante que `zz-simulacao-etapa1.conf` permaneça ativo (`JARVIS_WOL_REAL=0`, `JARVIS_SSH_REAL=0`, `JARVIS_REQUIRE_PERSISTENCE=1`).
-2. Garante que `producao.conf` permaneça desabilitado (`producao.conf.disabled`).
-3. Restaura o arquivo original `/opt/jarvis-voice/jarvis-operacional.py` a partir do backup `/opt/jarvis-voice/jarvis-operacional.py.backup_original`.
-4. Valida a integridade por SHA-256 (`c51d58e6d3a19003eac55a827212e5e084d583fea43389ec0ea5466080ee2d54`).
-5. Executa `systemctl daemon-reload` e reinicia `jarvis-voice.service`.
+### O que o script de rollback executa compulsoriamente:
+1. **Validação prévia do hash SHA-256 do backup ANTES de copiar:** Se o hash do backup em `/opt/jarvis-voice/` ou `/var/backups/jarvis/` divergir de `c51d58e6d3a19003eac55a827212e5e084d583fea43389ec0ea5466080ee2d54`, o rollback aborta imediatamente (fail-closed) sem tocar no arquivo operacional.
+2. **Garante simulação ativa no systemd:** Mantém `JARVIS_WOL_REAL=0`, `JARVIS_SSH_REAL=0` e `JARVIS_REQUIRE_PERSISTENCE=1` no drop-in `zz-simulacao-etapa1.conf`. Se `producao.conf` existir, é renomeado para `.disabled`.
+3. **Restauração a partir do backup verificado:** Copia o backup sobre o arquivo de produção e valida o SHA-256 novamente.
+4. **Reinício seguro:** Executa `systemctl daemon-reload` e reinicia `jarvis-voice.service`.
+5. **Auditoria em memória:** Inspeciona `/proc/$PID/environ` do novo processo e confirma que as flags de simulação estão presentes na memória física do processo restaurado.
 
 **Garantia de Segurança:** O rollback NUNCA reativa hardware real de forma automática.
