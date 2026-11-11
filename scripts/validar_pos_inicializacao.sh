@@ -67,8 +67,8 @@ fi
 echo "OK (Banner de simulação registrado no journal)"
 
 # 4. Verificar disponibilidade do barramento IPC local
-echo -n "[4/4] Verificando barramento IPC /run/jarvis/voice-event.sock... "
-IPC_SOCK="/run/jarvis/voice-event.sock"
+IPC_SOCK="${JARVIS_IPC_SOCK:-/run/jarvis/voice-event.sock}"
+echo -n "[4/4] Verificando barramento IPC $IPC_SOCK... "
 if [ ! -S "$IPC_SOCK" ]; then
     echo "FALHA!"
     echo "ERRO CRÍTICO: Socket IPC $IPC_SOCK não foi criado!"

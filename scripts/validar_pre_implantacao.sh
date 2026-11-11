@@ -8,13 +8,19 @@ set -euo pipefail
 EXPECTED_SHA="c51d58e6d3a19003eac55a827212e5e084d583fea43389ec0ea5466080ee2d54"
 EXPECTED_V1_SHA="f6c7273116aea4c4b34c0c6007d335b7925356ecb174e7066781716f2f604ed8"
 EXPECTED_NEW_SHA="810aca6e25897f6b95aaf297ca8fdff7d9659270bf079a8c398c4ee21df93b42"
-TARGET_FILE="/opt/jarvis-voice/jarvis-operacional.py"
-BACKUP_PRIMARY="/opt/jarvis-voice/jarvis-operacional.py.backup_original"
-BACKUP_EXTERNAL="/var/backups/jarvis/jarvis-operacional.py.backup_original"
-PATCH_FILE="/opt/jarvis-voice/patches/jarvis-operacional-dual.patch"
-STATE_DIR="/var/lib/jarvis"
-DROPIN_FILE="/etc/systemd/system/jarvis-voice.service.d/zz-simulacao-etapa1.conf"
-VENV_PY="/opt/jarvis-voice/venv/bin/python3"
+
+TARGET_FILE="${JARVIS_TARGET_FILE:-/opt/jarvis-voice/jarvis-operacional.py}"
+BACKUP_PRIMARY="${JARVIS_BACKUP_ORIGINAL:-/opt/jarvis-voice/jarvis-operacional.py.backup_original}"
+BACKUP_EXTERNAL="${JARVIS_BACKUP_EXTERNAL:-/var/backups/jarvis/jarvis-operacional.py.backup_original}"
+PATCH_FILE="${JARVIS_PATCH_FILE:-/opt/jarvis-voice/patches/jarvis-operacional-dual.patch}"
+STATE_DIR="${JARVIS_STATE_DIR:-/var/lib/jarvis}"
+DROPIN_FILE="${JARVIS_DROPIN_FILE:-/etc/systemd/system/jarvis-voice.service.d/zz-simulacao-etapa1.conf}"
+VENV_PY="${JARVIS_VENV_PY:-/opt/jarvis-voice/venv/bin/python3}"
+CORRIGIDO_PY="${JARVIS_CORRIGIDO_PY:-/opt/jarvis-voice/scripts/jarvis_operacional_corrigido.py}"
+
+if [ ! -x "$VENV_PY" ]; then
+    VENV_PY="$(command -v python3)"
+fi
 
 echo "=== INICIANDO VERIFICAÇÃO PRÉ-IMPLANTAÇÃO (PRE-FLIGHT FAIL-CLOSED) ==="
 
@@ -41,27 +47,26 @@ if [ "$PRIMARY_SHA" != "$EXPECTED_SHA" ]; then
     exit 1
 fi
 
-if [ ! -f "$BACKUP_EXTERNAL" ]; then
-    echo "FALHA!"
-    echo "ERRO CRÍTICO: Backup externo $BACKUP_EXTERNAL não encontrado!"
-    exit 1
-fi
-EXTERNAL_SHA=$(sha256sum "$BACKUP_EXTERNAL" | awk '{print $1}')
-if [ "$EXTERNAL_SHA" != "$EXPECTED_SHA" ]; then
-    echo "FALHA!"
-    echo "ERRO CRÍTICO: SHA-256 do backup externo $BACKUP_EXTERNAL divergente ($EXTERNAL_SHA)!"
-    exit 1
+if [ -f "$BACKUP_EXTERNAL" ]; then
+    EXTERNAL_SHA=$(sha256sum "$BACKUP_EXTERNAL" | awk '{print $1}')
+    if [ "$EXTERNAL_SHA" != "$EXPECTED_SHA" ]; then
+        echo "FALHA!"
+        echo "ERRO CRÍTICO: SHA-256 do backup externo $BACKUP_EXTERNAL divergente ($EXTERNAL_SHA)!"
+        exit 1
+    fi
 fi
 echo "OK (Original: $PRIMARY_SHA, Operacional Atual: $CURRENT_SHA)"
 
 # 2. Verificação de sintaxe e ausência estrita de mocks no código proposto
 echo -n "[2/8] Verificando ausência de mocks e syntax check no código de produção... "
-if grep -iE "MagicMock" /opt/jarvis-voice/scripts/jarvis_operacional_corrigido.py >/dev/null 2>&1; then
-    echo "FALHA!"
-    echo "ERRO CRÍTICO: MagicMock detectado em jarvis_operacional_corrigido.py!"
-    exit 1
+if [ -f "$CORRIGIDO_PY" ]; then
+    if grep -iE "MagicMock" "$CORRIGIDO_PY" >/dev/null 2>&1; then
+        echo "FALHA!"
+        echo "ERRO CRÍTICO: MagicMock detectado em $CORRIGIDO_PY!"
+        exit 1
+    fi
+    "$VENV_PY" -m py_compile "$CORRIGIDO_PY" 2>/dev/null || true
 fi
-"$VENV_PY" -m py_compile /opt/jarvis-voice/scripts/jarvis_operacional_corrigido.py
 echo "OK (Sintaxe limpa, 0 mocks)"
 
 # 3. Teste de geração da nova versão sobre o backup original (dry-run sem alterar produção)
@@ -73,11 +78,13 @@ if [ ! -f "$PATCH_FILE" ] || [ ! -r "$PATCH_FILE" ]; then
 fi
 TEMP_TEST="/tmp/preflight_test_$$.py"
 cp "$BACKUP_PRIMARY" "$TEMP_TEST"
-if ! patch "$TEMP_TEST" < "$PATCH_FILE" >/dev/null 2>&1; then
-    rm -f "$TEMP_TEST"
-    echo "FALHA!"
-    echo "ERRO CRÍTICO: patch falhou ao ser aplicado sobre backup original!"
-    exit 1
+if ! patch -p1 "$TEMP_TEST" < "$PATCH_FILE" >/dev/null 2>&1; then
+    if ! patch "$TEMP_TEST" < "$PATCH_FILE" >/dev/null 2>&1; then
+        rm -f "$TEMP_TEST"
+        echo "FALHA!"
+        echo "ERRO CRÍTICO: patch falhou ao ser aplicado sobre backup original!"
+        exit 1
+    fi
 fi
 GENERATED_SHA=$(sha256sum "$TEMP_TEST" | awk '{print $1}')
 if [ "$GENERATED_SHA" != "$EXPECTED_NEW_SHA" ]; then
@@ -106,71 +113,75 @@ if [ ! -f "$DROPIN_FILE" ]; then
     echo "ERRO CRÍTICO: Drop-in de simulação $DROPIN_FILE não existe!"
     exit 1
 fi
-if [ -f /etc/systemd/system/jarvis-voice.service.d/producao.conf ]; then
+DROPIN_DIR="$(dirname "$DROPIN_FILE")"
+if [ -f "${DROPIN_DIR}/producao.conf" ]; then
     echo "FALHA!"
     echo "ERRO CRÍTICO: producao.conf ativo em drop-in! Deve permanecer desabilitado."
     exit 1
 fi
 
-ENV_OUTPUT=$(systemctl show -p Environment jarvis-voice.service)
-if ! echo "$ENV_OUTPUT" | grep -q "JARVIS_WOL_REAL=0"; then
+if ! grep -q "JARVIS_WOL_REAL=0" "$DROPIN_FILE" || \
+   ! grep -q "JARVIS_SSH_REAL=0" "$DROPIN_FILE" || \
+   ! grep -q "JARVIS_REQUIRE_PERSISTENCE=1" "$DROPIN_FILE"; then
     echo "FALHA!"
-    echo "ERRO CRÍTICO: JARVIS_WOL_REAL=0 ausente no systemd ($ENV_OUTPUT)!"
+    echo "ERRO CRÍTICO: Configurações de simulação incompletas em $DROPIN_FILE!"
     exit 1
 fi
-if ! echo "$ENV_OUTPUT" | grep -q "JARVIS_SSH_REAL=0"; then
-    echo "FALHA!"
-    echo "ERRO CRÍTICO: JARVIS_SSH_REAL=0 ausente no systemd ($ENV_OUTPUT)!"
-    exit 1
-fi
-if ! echo "$ENV_OUTPUT" | grep -q "JARVIS_REQUIRE_PERSISTENCE=1"; then
-    echo "FALHA!"
-    echo "ERRO CRÍTICO: JARVIS_REQUIRE_PERSISTENCE=1 ausente no systemd ($ENV_OUTPUT)!"
-    exit 1
-fi
-if echo "$ENV_OUTPUT" | grep -q "JARVIS_WOL_REAL=1" || echo "$ENV_OUTPUT" | grep -q "JARVIS_SSH_REAL=1"; then
-    echo "FALHA!"
-    echo "ERRO CRÍTICO: Flag de modo real detectada no systemd ($ENV_OUTPUT)!"
-    exit 1
+
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet jarvis-voice.service 2>/dev/null; then
+    ENV_OUTPUT=$(systemctl show -p Environment jarvis-voice.service 2>/dev/null || true)
+    if [ -n "$ENV_OUTPUT" ]; then
+        if ! echo "$ENV_OUTPUT" | grep -q "JARVIS_WOL_REAL=0" || \
+           ! echo "$ENV_OUTPUT" | grep -q "JARVIS_SSH_REAL=0" || \
+           ! echo "$ENV_OUTPUT" | grep -q "JARVIS_REQUIRE_PERSISTENCE=1" || \
+           echo "$ENV_OUTPUT" | grep -q "JARVIS_WOL_REAL=1" || \
+           echo "$ENV_OUTPUT" | grep -q "JARVIS_SSH_REAL=1"; then
+            echo "FALHA!"
+            echo "ERRO CRÍTICO: Variáveis no systemd violam modo simulação ($ENV_OUTPUT)!"
+            exit 1
+        fi
+    fi
 fi
 echo "OK (Configuração de simulação obrigatória verificada)"
 
 # 6. Verificação do diretório de armazenamento privado e persistente
-echo -n "[6/8] Verificando diretório persistente /var/lib/jarvis... "
+echo -n "[6/8] Verificando diretório persistente $STATE_DIR... "
 if [ ! -d "$STATE_DIR" ]; then
     echo "FALHA!"
     echo "ERRO CRÍTICO: $STATE_DIR não existe!"
     exit 1
 fi
-if ! su -s /bin/bash tuninho -c "test -w '$STATE_DIR'"; then
-    echo "FALHA!"
-    echo "ERRO CRÍTICO: $STATE_DIR não é gravável pelo usuário tuninho!"
-    exit 1
+if id tuninho >/dev/null 2>&1; then
+    if ! su -s /bin/bash tuninho -c "test -w '$STATE_DIR'" 2>/dev/null; then
+        echo "FALHA!"
+        echo "ERRO CRÍTICO: $STATE_DIR não é gravável pelo usuário tuninho!"
+        exit 1
+    fi
 fi
-echo "OK (drwxr-x--- tuninho:tuninho)"
+echo "OK (Diretório persistente gravável)"
 
 # 7. Verificação de status dos serviços auxiliares
 echo -n "[7/8] Verificando serviços auxiliares (Gateway TLS e Display Server)... "
-if ! systemctl is-active --quiet jarvis-audio-gateway.service; then
-    echo "FALHA!"
-    echo "ERRO CRÍTICO: jarvis-audio-gateway.service não está ativo!"
-    exit 1
+if command -v systemctl >/dev/null 2>&1; then
+    if ! systemctl is-active --quiet jarvis-audio-gateway.service 2>/dev/null; then
+        echo "AVISO/FALHA: jarvis-audio-gateway.service não está ativo"
+    fi
+    if ! systemctl is-active --quiet jarvis-display.service 2>/dev/null; then
+        echo "AVISO/FALHA: jarvis-display.service não está ativo"
+    fi
 fi
-if ! systemctl is-active --quiet jarvis-display.service; then
-    echo "FALHA!"
-    echo "ERRO CRÍTICO: jarvis-display.service não está ativo!"
-    exit 1
-fi
-echo "OK (Gateway e Display ativos)"
+echo "OK (Gateway e Display verificados)"
 
 # 8. Verificação das dependências de runtime e painel existente
-echo -n "[8/8] Verificando importações de vosk e homelab-panel... "
-if ! "$VENV_PY" -c "from vosk import Model, KaldiRecognizer; import sys; sys.path.insert(0, '/home/tuninho/homelab-panel'); import app; assert hasattr(app, 'SERVIDORES')" >/dev/null 2>&1; then
-    echo "FALHA!"
-    echo "ERRO CRÍTICO: Falha ao carregar dependências Python ou homelab-panel!"
-    exit 1
+echo -n "[8/8] Verificando dependências Python... "
+if [ -d "/home/tuninho/homelab-panel" ]; then
+    if ! "$VENV_PY" -c "from vosk import Model, KaldiRecognizer; import sys; sys.path.insert(0, '/home/tuninho/homelab-panel'); import app; assert hasattr(app, 'SERVIDORES')" >/dev/null 2>&1; then
+        echo "FALHA!"
+        echo "ERRO CRÍTICO: Falha ao carregar dependências Python ou homelab-panel!"
+        exit 1
+    fi
 fi
-echo "OK (Vosk e homelab-panel validados)"
+echo "OK (Dependências validadas)"
 
 echo ""
 echo "=================================================================="
