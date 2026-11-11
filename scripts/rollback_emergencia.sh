@@ -18,13 +18,14 @@ if [ -f /etc/systemd/system/jarvis-voice.service.d/producao.conf ]; then
     mv /etc/systemd/system/jarvis-voice.service.d/producao.conf /etc/systemd/system/jarvis-voice.service.d/producao.conf.disabled
 fi
 mkdir -p /etc/systemd/system/jarvis-voice.service.d
-cat << 'EOF' > /etc/systemd/system/jarvis-voice.service.d/zz-simulacao-etapa1.conf
+cat << 'DROPIN' > /etc/systemd/system/jarvis-voice.service.d/zz-simulacao-etapa1.conf
 [Service]
 Environment=JARVIS_WOL_REAL=0
 Environment=JARVIS_SSH_REAL=0
-EOF
+Environment=JARVIS_REQUIRE_PERSISTENCE=1
+DROPIN
 systemctl daemon-reload
-echo "Systemd configurado estritamente em MODO SIMULACAO."
+echo "Systemd configurado estritamente em MODO SIMULACAO (WoL=0, SSH=0, REQUIRE_PERSISTENCE=1)."
 
 # 2. Restaurar arquivo original a partir do backup ou reversão do patch
 echo "[2/4] Restaurando código operacional original..."

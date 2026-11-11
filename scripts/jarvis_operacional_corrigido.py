@@ -103,7 +103,18 @@ def _salvar_estado_acoes():
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(dados, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp_path, caminho)
+        if pasta:
+            try:
+                dir_fd = os.open(pasta, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
         try:
             os.chmod(caminho, 0o600)
         except OSError:

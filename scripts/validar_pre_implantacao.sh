@@ -7,20 +7,33 @@ set -euo pipefail
 
 EXPECTED_SHA="c51d58e6d3a19003eac55a827212e5e084d583fea43389ec0ea5466080ee2d54"
 TARGET_FILE="/opt/jarvis-voice/jarvis-operacional.py"
+BACKUP_FILE="/opt/jarvis-voice/jarvis-operacional.py.backup_original"
 PATCH_FILE="/opt/jarvis-voice/patches/jarvis-operacional-dual.patch"
 STATE_DIR="/var/lib/jarvis"
 VENV_PY="/opt/jarvis-voice/venv/bin/python3"
 
 echo "=== INICIANDO VERIFICAÇÃO PRÉ-IMPLANTAÇÃO (SAFETY CHECK) ==="
 
-# 1. Verificação de integridade do arquivo original em produção
-echo -n "[1/8] Verificando SHA-256 do arquivo original... "
+# 1. Verificação de integridade do arquivo original em produção e do backup
+echo -n "[1/8] Verificando SHA-256 do arquivo original e do backup... "
 CURRENT_SHA=$(sha256sum "$TARGET_FILE" | awk '{print $1}')
 if [ "$CURRENT_SHA" != "$EXPECTED_SHA" ]; then
     echo "FALHA!"
     echo "ERRO CRÍTICO: SHA-256 de $TARGET_FILE divergente!"
     echo "  Esperado: $EXPECTED_SHA"
     echo "  Obtido:   $CURRENT_SHA"
+    exit 1
+fi
+if [ -f "$BACKUP_FILE" ]; then
+    BACKUP_SHA=$(sha256sum "$BACKUP_FILE" | awk '{print $1}')
+    if [ "$BACKUP_SHA" != "$EXPECTED_SHA" ]; then
+        echo "FALHA!"
+        echo "ERRO CRÍTICO: SHA-256 do backup $BACKUP_FILE divergente!"
+        exit 1
+    fi
+else
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: Arquivo de backup $BACKUP_FILE não encontrado!"
     exit 1
 fi
 echo "OK ($CURRENT_SHA)"
@@ -59,7 +72,7 @@ rm -f "$TEMP_TEST"
 echo "OK (Reversibilidade 100% garantida)"
 
 # 5. Verificação estrita das variáveis de ambiente systemd (Simulação Obrigatória)
-echo -n "[5/8] Verificando variáveis de ambiente systemd (WoL=0, SSH=0)... "
+echo -n "[5/8] Verificando variáveis de ambiente systemd (WoL=0, SSH=0, PERSISTENCE=1)... "
 ENV_OUTPUT=$(systemctl show -p Environment jarvis-voice.service)
 if ! echo "$ENV_OUTPUT" | grep -q "JARVIS_WOL_REAL=0"; then
     echo "FALHA!"
@@ -71,12 +84,17 @@ if ! echo "$ENV_OUTPUT" | grep -q "JARVIS_SSH_REAL=0"; then
     echo "ERRO CRÍTICO: JARVIS_SSH_REAL=0 não configurado no systemd ($ENV_OUTPUT)!"
     exit 1
 fi
+if ! echo "$ENV_OUTPUT" | grep -q "JARVIS_REQUIRE_PERSISTENCE=1"; then
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: JARVIS_REQUIRE_PERSISTENCE=1 não configurado no systemd ($ENV_OUTPUT)!"
+    exit 1
+fi
 if [ -f /etc/systemd/system/jarvis-voice.service.d/producao.conf ]; then
     echo "FALHA!"
     echo "ERRO CRÍTICO: producao.conf ativo em drop-in! Deve estar desabilitado para simulação."
     exit 1
 fi
-echo "OK (JARVIS_WOL_REAL=0, JARVIS_SSH_REAL=0 prevalecem)"
+echo "OK (JARVIS_WOL=0, JARVIS_SSH=0, JARVIS_REQUIRE_PERSISTENCE=1 prevalecem)"
 
 # 6. Verificação do diretório de armazenamento privado e persistente
 echo -n "[6/8] Verificando diretório persistente /var/lib/jarvis... "
