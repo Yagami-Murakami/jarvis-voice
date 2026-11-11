@@ -27,7 +27,7 @@ public class LgMicCapture {
     public static final int SAMPLE_RATE = 16000;
     public static final int CHUNK_SAMPLES = 640; // 40 ms @ 16kHz
     public static final int CHUNK_BYTES = CHUNK_SAMPLES * 2; // 1280 bytes
-    public static final String DEFAULT_TOKEN = "jarvis-dual-mic-2026";
+    public static final String DEFAULT_TOKEN = ""; // Sem segredo fixo no APK
     public static final int DEFAULT_GATEWAY_PORT = 8088;
 
     private static final byte[] MAGIC_HANDSHAKE = new byte[]{'J', 'M', 'I', 'C'};
@@ -76,6 +76,7 @@ public class LgMicCapture {
         this.soundManager = soundManager;
         this.prefs = context.getSharedPreferences("JarvisDisplayPrefs", Context.MODE_PRIVATE);
         this.micEnabled.set(prefs.getBoolean("lg_mic_enabled", true));
+        this.authToken = prefs.getString("lg_mic_token", "");
     }
 
     public synchronized void setGatewayConfig(String host, int port, String token) {
@@ -87,6 +88,7 @@ public class LgMicCapture {
         }
         if (token != null && !token.trim().isEmpty()) {
             this.authToken = token.trim();
+            prefs.edit().putString("lg_mic_token", this.authToken).apply();
         }
         Log.i(TAG, "Configuração do Gateway de Áudio atualizada: " + gatewayHost + ":" + gatewayPort);
     }
@@ -309,6 +311,12 @@ public class LgMicCapture {
         @Override
         public void run() {
             while (mic.isRunning.get() && !Thread.currentThread().isInterrupted()) {
+                // Fail-closed: nunca transmite áudio sem credencial pareada.
+                if (mic.authToken == null || mic.authToken.length() < 32) {
+                    mic.isConnected.set(false);
+                    SystemClock.sleep(3000);
+                    continue;
+                }
                 Socket socket = null;
                 DataOutputStream out = null;
 
