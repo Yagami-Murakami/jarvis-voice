@@ -17,7 +17,7 @@
  SetLogLevel(-1)
  
  MODELO = "/opt/jarvis-voice/vosk-model-small-pt-0.3"
-@@ -39,46 +42,391 @@
+@@ -39,46 +42,548 @@
      "[unk]"
  ]
  
@@ -54,6 +54,162 @@
 +registro_acoes = {}
 +
 +DEFAULT_STATE_FILE = "/var/lib/jarvis/acoes_recentes.json"
++
++# --- Proteção de Execução Única para SSH Real (One-Shot Token) ---
++DEFAULT_ONE_SHOT_TOKEN_FILE = "/var/lib/jarvis/one_shot_ssh_token.json"
++_ONE_SHOT_SSH_CONSUMED_IN_MEMORY = False
++_LOCK_ONE_SHOT_TOKEN = threading.Lock()
++
++
++def _obter_caminho_token_one_shot():
++    caminho = os.getenv("JARVIS_ONE_SHOT_TOKEN_FILE")
++    if caminho:
++        return caminho
++    return DEFAULT_ONE_SHOT_TOKEN_FILE
++
++
++def _resetar_estado_token_memoria():
++    """Auxiliar para testes e controle de ciclo de vida: reseta a trava em memória."""
++    global _ONE_SHOT_SSH_CONSUMED_IN_MEMORY
++    with _LOCK_ONE_SHOT_TOKEN:
++        _ONE_SHOT_SSH_CONSUMED_IN_MEMORY = False
++
++
++def token_one_shot_requerido():
++    """Verifica se o token de execução única é estritamente obrigatório.
++    Obrigatório sempre que JARVIS_REQUIRE_ONE_SHOT_TOKEN=1 ou o arquivo de token existir.
++    """
++    if os.getenv("JARVIS_REQUIRE_ONE_SHOT_TOKEN") == "1":
++        return True
++    caminho = _obter_caminho_token_one_shot()
++    if os.path.exists(caminho):
++        return True
++    return False
++
++
++def verificar_token_one_shot(alvo, acao="desligar"):
++    """Verifica se existe um token de execução única válido para o alvo e ação.
++    Retorna (valido: bool, detalhe_ou_motivo: dict | str).
++    """
++    global _ONE_SHOT_SSH_CONSUMED_IN_MEMORY
++    if _ONE_SHOT_SSH_CONSUMED_IN_MEMORY:
++        return False, "token_ja_consumido_na_memoria_deste_processo"
++
++    caminho = _obter_caminho_token_one_shot()
++    if not os.path.exists(caminho):
++        return False, "token_arquivo_inexistente"
++
++    try:
++        with open(caminho, "r", encoding="utf-8") as f:
++            dados = json.load(f)
++    except Exception as e:
++        return False, f"token_corrompido: {e}"
++
++    if not isinstance(dados, dict):
++        return False, "token_formato_invalido"
++
++    if dados.get("status") != "active":
++        return False, f"token_status_inativo: {dados.get('status')}"
++
++    if dados.get("consumed") is True:
++        return False, "token_ja_consumido"
++
++    alvo_token = str(dados.get("alvo", "")).strip().lower()
++    alvo_esperado = str(alvo).strip().lower()
++    if alvo_token != alvo_esperado:
++        return False, f"token_alvo_incompativel: {alvo_token} != {alvo_esperado}"
++
++    acao_token = str(dados.get("acao", "")).strip().lower()
++    acao_esperada = str(acao).strip().lower()
++    if acao_token != acao_esperada:
++        return False, f"token_acao_incompativel: {acao_token} != {acao_esperada}"
++
++    agora = time.time()
++    expires_at = dados.get("expires_at", 0.0)
++    if not isinstance(expires_at, (int, float)) or agora > expires_at:
++        return False, f"token_expirado: {agora} > {expires_at}"
++
++    bound_pid = dados.get("bound_service_pid")
++    if bound_pid is not None and int(bound_pid) != os.getpid():
++        return False, f"token_invalido_por_reinicio: bound_pid {bound_pid} != pid atual {os.getpid()}"
++
++    return True, dados
++
++
++def consumir_token_one_shot(alvo, acao="desligar", event_id=None):
++    """Consome atomicamente o token one-shot para permitir uma única tentativa SSH real.
++    Garante que o token seja consumido antes do despacho e nunca reutilizado.
++    """
++    global _ONE_SHOT_SSH_CONSUMED_IN_MEMORY
++    with _LOCK_ONE_SHOT_TOKEN:
++        valido, res = verificar_token_one_shot(alvo, acao)
++        if not valido:
++            return False, res
++
++        dados = res
++        caminho = _obter_caminho_token_one_shot()
++        agora = time.time()
++
++        dados["consumed"] = True
++        dados["consumed_at"] = agora
++        dados["consumed_by_event"] = event_id
++        dados["consumed_by_pid"] = os.getpid()
++        dados["status"] = "consumed"
+ 
++        try:
++            diretorio = os.path.dirname(os.path.abspath(caminho)) or "."
++            os.makedirs(diretorio, exist_ok=True)
++            fd, tmp_file = tempfile.mkstemp(prefix="one_shot_token_", dir=diretorio)
++            with os.fdopen(fd, "w", encoding="utf-8") as f:
++                json.dump(dados, f, indent=2, sort_keys=True)
++                f.flush()
++                os.fsync(f.fileno())
++            try:
++                os.chmod(tmp_file, 0o600)
++            except OSError:
++                pass
++            os.replace(tmp_file, caminho)
++        except Exception as e:
++            if "tmp_file" in locals() and os.path.exists(tmp_file):
++                try:
++                    os.unlink(tmp_file)
++                except OSError:
++                    pass
++            return False, f"falha_persistencia_token: {e}"
++
++        _ONE_SHOT_SSH_CONSUMED_IN_MEMORY = True
++        return True, dados
++
++
++def _reconciliar_token_one_shot_inicializacao():
++    """Invalida tokens one-shot pendentes na reinicialização do serviço (fail-closed)."""
++    caminho = _obter_caminho_token_one_shot()
++    if not os.path.exists(caminho):
++        return
++    try:
++        with open(caminho, "r", encoding="utf-8") as f:
++            dados = json.load(f)
++        if isinstance(dados, dict) and dados.get("status") == "active" and not dados.get("consumed"):
++            bound_pid = dados.get("bound_service_pid")
++            if bound_pid is not None and int(bound_pid) != os.getpid():
++                dados["status"] = "invalidated_by_restart"
++                dados["invalidated_at"] = time.time()
++                dados["invalidation_reason"] = f"service_restarted_pid_{os.getpid()}_replaces_{bound_pid}"
++                diretorio = os.path.dirname(os.path.abspath(caminho)) or "."
++                fd, tmp_file = tempfile.mkstemp(prefix="one_shot_token_", dir=diretorio)
++                with os.fdopen(fd, "w", encoding="utf-8") as f:
++                    json.dump(dados, f, indent=2, sort_keys=True)
++                try:
++                    os.chmod(tmp_file, 0o600)
++                except OSError:
++                    pass
++                os.replace(tmp_file, caminho)
++                print(
++                    f"RECUPERACAO: Token one-shot ({dados.get('token_id')}) invalidado devido a reinicializacao do servico.",
++                    flush=True,
++                )
++    except Exception as e:
++        print(f"Aviso ao reconciliar token one-shot na inicializacao: {e}", flush=True)
 +
 +
 +def _obter_caminho_estado():
@@ -114,8 +270,10 @@
 +            except OSError:
 +                pass
 +        return False, msg
-+
  
+-def processar(texto):
+-    global estado, limite, pendente
++
 +def _carregar_estado_acoes():
 +    """Carrega estado do disco na memória se existir."""
 +    global acoes_recentes, registro_acoes
@@ -168,6 +326,7 @@
 +                    acoes_recentes[f"{acao}:{alvo}"] = agora
 +        if houve_interrupcao:
 +            _salvar_estado_acoes()
++    _reconciliar_token_one_shot_inicializacao()
 +
 +
 +def registrar_inicio_acao(event_id, acao, alvo, status="aceito"):
@@ -291,9 +450,7 @@
 +        return False
 +    permitidos = [a.strip().strip('"\'').lower() for a in raw.split(",") if a.strip()]
 +    return str(alvo_nome).strip().strip('"\'').lower() in permitidos
- 
--def processar(texto):
--    global estado, limite, pendente
++
 +
 +_recuperar_estado_na_inicializacao()
 +
@@ -420,7 +577,7 @@
  
          # Correcao restrita ao teste de reconhecimento
          if texto == "dois ligar fusion":
-@@ -87,45 +435,165 @@
+@@ -87,45 +592,170 @@
  
          if texto not in COMANDOS:
              print("Comando ignorado.", flush=True)
@@ -594,7 +751,12 @@
 +        # Tratamento de acao == "desligar"
 +        t_ini_sond = time.monotonic()
 +        alvo_autorizado_ssh = alvo_real_permitido(alvo)
-+        modo_ssh_real = (os.getenv("JARVIS_SSH_REAL") == "1") and alvo_autorizado_ssh
++        req_token = token_one_shot_requerido()
++        if req_token:
++            token_valido_sond, _ = verificar_token_one_shot(alvo, "desligar")
++        else:
++            token_valido_sond = True
++        modo_ssh_real = (os.getenv("JARVIS_SSH_REAL") == "1") and alvo_autorizado_ssh and token_valido_sond
 +        if modo_ssh_real:
 +            acessivel = painel.host_ligado(srv)
 +        else:
@@ -605,7 +767,7 @@
  
          if not acessivel:
              print(
-@@ -133,25 +601,88 @@
+@@ -133,25 +763,93 @@
                  "computador nao acessivel.",
                  flush=True
              )
@@ -687,7 +849,12 @@
 +            status_acao = "falha"
 +            t_ini_sond = time.monotonic()
 +            alvo_autorizado_ssh = alvo_real_permitido(pendente)
-+            modo_ssh_real = (os.getenv("JARVIS_SSH_REAL") == "1") and alvo_autorizado_ssh
++            req_token = token_one_shot_requerido()
++            if req_token:
++                token_valido_conf, _ = verificar_token_one_shot(pendente, "desligar")
++            else:
++                token_valido_conf = True
++            modo_ssh_real = (os.getenv("JARVIS_SSH_REAL") == "1") and alvo_autorizado_ssh and token_valido_conf
 +            if modo_ssh_real:
 +                host_ativo = painel.host_ligado(srv)
 +            else:
@@ -701,7 +868,7 @@
                      if texto != "confirmar desligamento":
                          print(
                              "Confirmacao insuficiente. Pedido cancelado.",
-@@ -159,94 +690,559 @@
+@@ -159,94 +857,577 @@
                          )
                          estado = "espera"
                          pendente = None
@@ -793,7 +960,25 @@
 -                                flush=True
 +                        cmd = painel.montar_comando_ssh(conf) if hasattr(painel, "montar_comando_ssh") else None
 +                        alvo_worker_autorizado = alvo_real_permitido(alvo_nome)
-+                        modo_real_efetivo = (os.getenv("JARVIS_SSH_REAL") == "1") and alvo_worker_autorizado
++                        modo_ssh_env = (os.getenv("JARVIS_SSH_REAL") == "1")
++
++                        # Proteção de Execução Única (One-Shot Token)
++                        token_consumido = False
++                        dados_token = None
++                        if modo_ssh_env and alvo_worker_autorizado:
++                            req_token = token_one_shot_requerido()
++                            if req_token:
++                                token_ok, res_token = consumir_token_one_shot(alvo_nome, "desligar", ev_id)
++                                if token_ok:
++                                    token_consumido = True
++                                    dados_token = res_token
++                                    print(f"[ONE-SHOT] Token {dados_token.get('token_id')} consumido com sucesso para {alvo_nome} (event_id={ev_id}).", flush=True)
++                                else:
++                                    print(f"[ONE-SHOT-BLOQUEIO] SSH real bloqueado para {alvo_nome}: {res_token}. Executando em simulacao.", flush=True)
++                            else:
++                                token_consumido = True
++
++                        modo_real_efetivo = modo_ssh_env and alvo_worker_autorizado and token_consumido
 +                        if modo_real_efetivo:
 +                            resultado = subprocess.run(
 +                                cmd,
@@ -813,7 +998,7 @@
 +                                    "concluido",
 +                                    acao="desligar",
 +                                    alvo=alvo_nome,
-+                                    resultado={"codigo": 0}
++                                    resultado={"codigo": 0, "token_id": dados_token.get("token_id") if dados_token else None}
 +                                )
 +                            else:
 +                                print(f"Falha no SSH: codigo de retorno {resultado.returncode}.", flush=True)
@@ -825,7 +1010,7 @@
 +                                    acao="desligar",
 +                                    alvo=alvo_nome,
 +                                    erro=f"ssh_returncode_{resultado.returncode}",
-+                                    resultado={"codigo": resultado.returncode}
++                                    resultado={"codigo": resultado.returncode, "token_id": dados_token.get("token_id") if dados_token else None}
 +                                )
 +                        else:
 +                            codigo_simulado = getattr(painel, "simular_codigo_ssh", 0)
@@ -1319,7 +1504,7 @@
          if item is None:
              break
  
-@@ -260,11 +1256,79 @@
+@@ -260,11 +1441,85 @@
          if rec.AcceptWaveform(audio):
              texto = json.loads(rec.Result()).get("text", "").strip()
              if texto and texto != "[unk]":
@@ -1355,6 +1540,12 @@
 +    if wol_real or ssh_real:
 +        alvos_permitidos = [a.strip().lower() for a in os.getenv("JARVIS_ALLOWED_REAL_TARGETS", "").split(",") if a.strip()]
 +        print(f"ALVOS REAIS AUTORIZADOS: {','.join(alvos_permitidos) if alvos_permitidos else 'NENHUM (fail-closed)'}", flush=True)
++    if ssh_real:
++        tok_ok, tok_info = verificar_token_one_shot("fusion", "desligar")
++        if tok_ok:
++            print(f"TOKEN ONE-SHOT SSH: ATIVO (id={tok_info.get('token_id')}, expira em {int(tok_info.get('expires_at', 0) - time.time())}s)", flush=True)
++        else:
++            print(f"TOKEN ONE-SHOT SSH: INATIVO/AUSENTE ({tok_info}) - SSH REAL BLOQUEADO", flush=True)
 +    print("Fale 'assistente', pause, depois o comando.", flush=True)
 +
 +    loop_principal_ativo.set()
