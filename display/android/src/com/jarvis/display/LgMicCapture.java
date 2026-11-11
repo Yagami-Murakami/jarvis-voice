@@ -8,11 +8,20 @@ import android.media.MediaRecorder;
 import android.os.SystemClock;
 import android.util.Log;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 import java.io.DataOutputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
+import java.security.cert.CertificateException;
+import java.security.cert.X509Certificate;
+import java.util.Locale;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -50,6 +59,8 @@ public class LgMicCapture {
     private String gatewayHost = "192.168.0.126";
     private int gatewayPort = DEFAULT_GATEWAY_PORT;
     private String authToken = DEFAULT_TOKEN;
+    private volatile boolean useTls = false;
+    private volatile String certFingerprint = "";
 
     // Métricas operacionais em tempo real
     private volatile float currentRms = 0.0f;
@@ -77,9 +88,11 @@ public class LgMicCapture {
         this.prefs = context.getSharedPreferences("JarvisDisplayPrefs", Context.MODE_PRIVATE);
         this.micEnabled.set(prefs.getBoolean("lg_mic_enabled", true));
         this.authToken = prefs.getString("lg_mic_token", "");
+        this.useTls = prefs.getBoolean("lg_mic_tls", false);
+        this.certFingerprint = prefs.getString("lg_mic_fingerprint", "");
     }
 
-    public synchronized void setGatewayConfig(String host, int port, String token) {
+    public synchronized void setGatewayConfig(String host, int port, String token, boolean useTls, String certFingerprint) {
         if (host != null && !host.trim().isEmpty()) {
             this.gatewayHost = host.trim();
         }
@@ -90,7 +103,25 @@ public class LgMicCapture {
             this.authToken = token.trim();
             prefs.edit().putString("lg_mic_token", this.authToken).apply();
         }
-        Log.i(TAG, "Configuração do Gateway de Áudio atualizada: " + gatewayHost + ":" + gatewayPort);
+        this.useTls = useTls;
+        this.certFingerprint = (certFingerprint != null) ? certFingerprint.trim() : "";
+        prefs.edit()
+            .putBoolean("lg_mic_tls", this.useTls)
+            .putString("lg_mic_fingerprint", this.certFingerprint)
+            .apply();
+        Log.i(TAG, "Configuração do Gateway atualizada: " + gatewayHost + ":" + gatewayPort + " (TLS=" + this.useTls + ")");
+    }
+
+    public synchronized void setGatewayConfig(String host, int port, String token) {
+        setGatewayConfig(host, port, token, this.useTls, this.certFingerprint);
+    }
+
+    public boolean isTlsActive() {
+        return useTls;
+    }
+
+    public boolean hasValidToken() {
+        return authToken != null && authToken.length() >= 32;
     }
 
     public synchronized void setMicEnabled(boolean enabled) {
@@ -321,11 +352,23 @@ public class LgMicCapture {
                 DataOutputStream out = null;
 
                 try {
-                    Log.d(TAG, "Conectando ao Gateway de Áudio em " + mic.gatewayHost + ":" + mic.gatewayPort + "...");
-                    socket = new Socket();
-                    socket.setTcpNoDelay(true);
-                    socket.setSoTimeout(10000); // 10s de timeout
-                    socket.connect(new InetSocketAddress(mic.gatewayHost, mic.gatewayPort), 4000);
+                    Log.d(TAG, "Conectando ao Gateway em " + mic.gatewayHost + ":" + mic.gatewayPort + " (TLS=" + mic.useTls + ")...");
+                    if (mic.useTls) {
+                        SSLContext sslCtx = SSLContext.getInstance("TLSv1.2");
+                        TrustManager[] tms = new TrustManager[]{ new PinnedCertTrustManager(mic.certFingerprint) };
+                        sslCtx.init(null, tms, new SecureRandom());
+                        SSLSocket sslSocket = (SSLSocket) sslCtx.getSocketFactory().createSocket();
+                        sslSocket.setTcpNoDelay(true);
+                        sslSocket.setSoTimeout(10000);
+                        sslSocket.connect(new InetSocketAddress(mic.gatewayHost, mic.gatewayPort), 4000);
+                        sslSocket.startHandshake();
+                        socket = sslSocket;
+                    } else {
+                        socket = new Socket();
+                        socket.setTcpNoDelay(true);
+                        socket.setSoTimeout(10000);
+                        socket.connect(new InetSocketAddress(mic.gatewayHost, mic.gatewayPort), 4000);
+                    }
 
                     OutputStream rawOut = socket.getOutputStream();
                     out = new DataOutputStream(rawOut);
@@ -400,5 +443,47 @@ public class LgMicCapture {
 
         double mean = sumSquares / numSamples;
         return (float) Math.min(1.0, Math.sqrt(mean));
+    }
+
+    private static class PinnedCertTrustManager implements X509TrustManager {
+        private final String expectedFingerprint;
+
+        PinnedCertTrustManager(String fingerprint) {
+            this.expectedFingerprint = (fingerprint != null) ? fingerprint.replaceAll("[:\\s]", "").toUpperCase(Locale.US) : "";
+        }
+
+        @Override
+        public void checkClientTrusted(X509Certificate[] chain, String authType) {}
+
+        @Override
+        public void checkServerTrusted(X509Certificate[] chain, String authType) throws CertificateException {
+            if (chain == null || chain.length == 0) {
+                throw new CertificateException("Cadeia de certificados do gateway vazia");
+            }
+            if (expectedFingerprint.isEmpty()) {
+                // Pinning não configurado: aceita o certificado em LAN privada
+                return;
+            }
+            try {
+                MessageDigest md = MessageDigest.getInstance("SHA-256");
+                byte[] digest = md.digest(chain[0].getEncoded());
+                StringBuilder sb = new StringBuilder();
+                for (byte b : digest) {
+                    sb.append(String.format(Locale.US, "%02X", b));
+                }
+                String actualFingerprint = sb.toString();
+                if (!actualFingerprint.equals(expectedFingerprint)) {
+                    throw new CertificateException("Certificado TLS rejeitado por divergência de pinning. Esperado=" 
+                            + expectedFingerprint + ", Obtido=" + actualFingerprint);
+                }
+            } catch (Exception e) {
+                throw new CertificateException("Falha ao calcular hash do certificado TLS: " + e.getMessage(), e);
+            }
+        }
+
+        @Override
+        public X509Certificate[] getAcceptedIssuers() {
+            return new X509Certificate[0];
+        }
     }
 }

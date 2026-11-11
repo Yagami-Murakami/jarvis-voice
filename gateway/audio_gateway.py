@@ -67,9 +67,10 @@ GRAMATICA = [
 class SessionArbitrator:
     """Controla sessões unificadas entre os dois microfones com deduplicação rigorosa."""
 
-    def __init__(self, dedup_window_s: float = 2.0):
+    def __init__(self, dedup_window_s: float = 2.0, action_dedup_window_s: float = 3.5):
         self._lock = threading.Lock()
         self.dedup_window_s = dedup_window_s
+        self.action_dedup_window_s = action_dedup_window_s
 
         self.session_id: Optional[str] = None
         self.state: str = "espera"  # espera, comando, confirmacao
@@ -85,6 +86,7 @@ class SessionArbitrator:
         self.total_activations: int = 0
         self.deduplicated_count: int = 0
         self.history: List[Dict[str, Any]] = []
+        self._recent_actions: Dict[Tuple[str, str], float] = {}
 
     def report_wake(self, source: str) -> Tuple[bool, str]:
         """Reporta palavra de ativação 'assistente' detectada por uma fonte.
@@ -154,6 +156,26 @@ class SessionArbitrator:
             self.target_computer = alvo
 
             if acao == "ligar":
+                # Deduplicação na camada de ação (idempotência no acionamento)
+                delta_action = now - self._recent_actions.get((acao, alvo), 0.0)
+                if delta_action <= self.action_dedup_window_s:
+                    self.deduplicated_count += 1
+                    logger.info(
+                        "Deduplicação de ação: WoL para '%s' descartado (ação idêntica executada há %.2fs)",
+                        alvo,
+                        delta_action,
+                    )
+                    self.state = "espera"
+                    self.session_id = None
+                    self._registrar_evento("action_deduplicated", source, acao=acao, alvo=alvo, delta=delta_action)
+                    return {
+                        "valido": False,
+                        "motivo": f"Ação '{acao} {alvo}' recentemente executada (idempotência)",
+                        "session_id": self.session_id,
+                        "deduplicado": True,
+                    }
+                self._recent_actions[(acao, alvo)] = now
+
                 # Conclui sessão com sucesso simulado
                 sid = self.session_id
                 self.state = "espera"
@@ -209,6 +231,27 @@ class SessionArbitrator:
 
             sid = self.session_id
             alvo = self.target_computer
+
+            # Deduplicação na camada de ação (idempotência no desligamento)
+            delta_action = now - self._recent_actions.get(("desligar", alvo), 0.0)
+            if delta_action <= self.action_dedup_window_s:
+                self.deduplicated_count += 1
+                logger.info(
+                    "Deduplicação de ação: Desligamento de '%s' descartado (ação idêntica confirmada há %.2fs)",
+                    alvo,
+                    delta_action,
+                )
+                self.state = "espera"
+                self.session_id = None
+                self._registrar_evento("action_deduplicated", source, acao="desligar", alvo=alvo, delta=delta_action)
+                return {
+                    "valido": False,
+                    "motivo": f"Ação 'desligar {alvo}' recentemente confirmada (idempotência)",
+                    "session_id": sid,
+                    "deduplicado": True,
+                }
+            self._recent_actions[("desligar", alvo)] = now
+
             self.state = "espera"
             self.session_id = None
             self._registrar_evento("shutdown_confirmed_simulated", source, alvo=alvo, session_id=sid)
@@ -266,6 +309,8 @@ class LgMicServer(threading.Thread):
         auth_token: str,
         arbitrator: SessionArbitrator,
         model_path: Optional[str] = None,
+        tls_cert: Optional[str] = None,
+        tls_key: Optional[str] = None,
     ):
         super().__init__(name="LgMicServer", daemon=True)
         self.host = host
@@ -273,9 +318,20 @@ class LgMicServer(threading.Thread):
         self.auth_token = auth_token
         self.arbitrator = arbitrator
         self.model_path = model_path
+        self.tls_cert = tls_cert
+        self.tls_key = tls_key
 
         self._running = True
         self.server_socket: Optional[socket.socket] = None
+        self.ssl_context = None
+
+        if self.tls_cert and self.tls_key and Path(self.tls_cert).is_file() and Path(self.tls_key).is_file():
+            import ssl
+            self.ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            self.ssl_context.load_cert_chain(certfile=self.tls_cert, keyfile=self.tls_key)
+            if hasattr(ssl, "TLSVersion"):
+                self.ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+            logger.info("TLS 1.2+ ativado no Gateway com certificado: %s", self.tls_cert)
 
         # Métricas do microfone LG
         self.connected = False
@@ -312,7 +368,7 @@ class LgMicServer(threading.Thread):
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server_socket.bind((self.host, self.port))
         self.server_socket.listen(2)
-        logger.info("Servidor TCP LG Mic ouvindo em %s:%d", self.host, self.port)
+        logger.info("Servidor TCP LG Mic ouvindo em %s:%d (TLS=%s)", self.host, self.port, bool(self.ssl_context))
 
         while self._running:
             try:
@@ -325,6 +381,17 @@ class LgMicServer(threading.Thread):
 
     def _atender_cliente(self, sock: socket.socket, ip: str) -> None:
         sock.settimeout(12.0)
+        if self.ssl_context:
+            try:
+                sock = self.ssl_context.wrap_socket(sock, server_side=True)
+            except Exception as e:
+                logger.warning("Falha no handshake TLS com cliente %s: %s", ip, e)
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                return
+
         self.connected = True
         self.client_ip = ip
 
@@ -472,6 +539,7 @@ class LgMicServer(threading.Thread):
         is_active = self.connected and (now - self.last_packet_time < 3.0)
         return {
             "connected": is_active,
+            "tls_active": bool(self.ssl_context),
             "client_ip": self.client_ip if is_active else None,
             "current_rms": round(self.current_rms, 3) if is_active else 0.0,
             "packets_received": self.packets_received,
@@ -561,14 +629,28 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/api/mics":
+            lg_status = self.server.lg_mic_server.obter_status()
+            # Higienização de telemetria para a LAN: não expor dados sensíveis ou memória bruta
+            sanitized_lg = {
+                "connected": lg_status.get("connected", False),
+                "tls_active": lg_status.get("tls_active", False),
+                "packets_received": lg_status.get("packets_received", 0),
+                "packets_dropped": lg_status.get("packets_dropped", 0),
+                "current_rms": lg_status.get("current_rms", 0.0),
+                "echo_guard_active": lg_status.get("echo_guard_active", False),
+                "sample_rate": lg_status.get("sample_rate", 16000),
+            }
             data = {
                 "me6s": self.server.me6s_monitor.obter_status(),
-                "lg_mic": self.server.lg_mic_server.obter_status(),
+                "lg_mic": sanitized_lg,
                 "arbitrator": self.server.arbitrator.obter_status(),
                 "timestamp": time.time(),
             }
             self._responder_json(data)
         elif self.path == "/api/mics/history":
+            if self.client_address[0] not in ("127.0.0.1", "::1"):
+                self.send_error(HTTPStatus.FORBIDDEN, "Acesso ao histórico restrito ao host local")
+                return
             data = {
                 "history": self.server.arbitrator.history,
                 "timestamp": time.time(),
@@ -631,12 +713,16 @@ class AudioGatewayApp:
         bind_host: str = "0.0.0.0",
         auth_token: str = DEFAULT_TOKEN,
         model_path: Optional[str] = DEFAULT_MODEL,
+        tls_cert: Optional[str] = None,
+        tls_key: Optional[str] = None,
     ):
         self.tcp_port = tcp_port
         self.http_port = http_port
         self.bind_host = bind_host
         self.auth_token = auth_token
         self.model_path = model_path
+        self.tls_cert = tls_cert
+        self.tls_key = tls_key
 
         self.arbitrator = SessionArbitrator(dedup_window_s=2.0)
         self.lg_mic_server = LgMicServer(
@@ -645,6 +731,8 @@ class AudioGatewayApp:
             auth_token=auth_token,
             arbitrator=self.arbitrator,
             model_path=model_path,
+            tls_cert=tls_cert,
+            tls_key=tls_key,
         )
         self.me6s_monitor = Me6sJournalMonitor(arbitrator=self.arbitrator)
 
@@ -655,7 +743,7 @@ class AudioGatewayApp:
 
     def start(self) -> None:
         logger.info("=== INICIANDO JARVIS DUAL-MIC AUDIO GATEWAY ===")
-        logger.info("Porta TCP de streaming LG: %d", self.tcp_port)
+        logger.info("Porta TCP de streaming LG: %d (TLS=%s)", self.tcp_port, bool(self.lg_mic_server.ssl_context))
         logger.info("Porta HTTP de diagnóstico: %d", self.http_port)
         logger.info("Modo operacional: SIMULAÇÃO SEGURA (WoL e SSH desativados)")
 
@@ -679,8 +767,8 @@ def main() -> None:
     parser.add_argument("--tcp-port", type=int, default=8088, help="Porta TCP do áudio LG (padrão: 8088)")
     parser.add_argument("--http-port", type=int, default=8089, help="Porta HTTP da API de diagnóstico (padrão: 8089)")
     parser.add_argument("--host", default="0.0.0.0", help="Endereço de bind (padrão: 0.0.0.0)")
-    # Credenciais nunca devem constar na linha de comando (visível via ps).
-    # Transporte TLS e provisionamento Android serão implementados na etapa seguinte.
+    parser.add_argument("--tls-cert", default=os.environ.get("JARVIS_TLS_CERT", ""), help="Caminho do certificado TLS")
+    parser.add_argument("--tls-key", default=os.environ.get("JARVIS_TLS_KEY", ""), help="Caminho da chave privada TLS")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Caminho do modelo Vosk")
 
     args = parser.parse_args()
@@ -693,6 +781,8 @@ def main() -> None:
         bind_host=args.host,
         auth_token=token,
         model_path=args.model,
+        tls_cert=args.tls_cert if args.tls_cert else None,
+        tls_key=args.tls_key if args.tls_key else None,
     )
     app.start()
 
