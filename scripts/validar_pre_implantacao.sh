@@ -6,6 +6,8 @@
 set -euo pipefail
 
 EXPECTED_SHA="c51d58e6d3a19003eac55a827212e5e084d583fea43389ec0ea5466080ee2d54"
+EXPECTED_V1_SHA="f6c7273116aea4c4b34c0c6007d335b7925356ecb174e7066781716f2f604ed8"
+EXPECTED_NEW_SHA="810aca6e25897f6b95aaf297ca8fdff7d9659270bf079a8c398c4ee21df93b42"
 TARGET_FILE="/opt/jarvis-voice/jarvis-operacional.py"
 BACKUP_PRIMARY="/opt/jarvis-voice/jarvis-operacional.py.backup_original"
 BACKUP_EXTERNAL="/var/backups/jarvis/jarvis-operacional.py.backup_original"
@@ -16,13 +18,13 @@ VENV_PY="/opt/jarvis-voice/venv/bin/python3"
 
 echo "=== INICIANDO VERIFICAÇÃO PRÉ-IMPLANTAÇÃO (PRE-FLIGHT FAIL-CLOSED) ==="
 
-# 1. Verificação antecipada de existência e SHA-256 do arquivo original e de ambos os backups
-echo -n "[1/8] Verificando SHA-256 do arquivo original e backups (primário e externo)... "
+# 1. Verificação antecipada de existência e SHA-256 do arquivo operacional e backups (primário e externo)
+echo -n "[1/8] Verificando SHA-256 do arquivo operacional e backups (primário e externo)... "
 CURRENT_SHA=$(sha256sum "$TARGET_FILE" | awk '{print $1}')
-if [ "$CURRENT_SHA" != "$EXPECTED_SHA" ]; then
+if [ "$CURRENT_SHA" != "$EXPECTED_SHA" ] && [ "$CURRENT_SHA" != "$EXPECTED_V1_SHA" ]; then
     echo "FALHA!"
     echo "ERRO CRÍTICO: SHA-256 de $TARGET_FILE divergente!"
-    echo "  Esperado: $EXPECTED_SHA"
+    echo "  Esperado: $EXPECTED_SHA (Original) ou $EXPECTED_V1_SHA (Simulação v1)"
     echo "  Obtido:   $CURRENT_SHA"
     exit 1
 fi
@@ -50,7 +52,7 @@ if [ "$EXTERNAL_SHA" != "$EXPECTED_SHA" ]; then
     echo "ERRO CRÍTICO: SHA-256 do backup externo $BACKUP_EXTERNAL divergente ($EXTERNAL_SHA)!"
     exit 1
 fi
-echo "OK (Todos 100% íntegros: $CURRENT_SHA)"
+echo "OK (Original: $PRIMARY_SHA, Operacional Atual: $CURRENT_SHA)"
 
 # 2. Verificação de sintaxe e ausência estrita de mocks no código proposto
 echo -n "[2/8] Verificando ausência de mocks e syntax check no código de produção... "
@@ -62,25 +64,32 @@ fi
 "$VENV_PY" -m py_compile /opt/jarvis-voice/scripts/jarvis_operacional_corrigido.py
 echo "OK (Sintaxe limpa, 0 mocks)"
 
-# 3. Teste de aplicação do patch em modo dry-run e disponibilidade do arquivo
-echo -n "[3/8] Testando aplicação do patch (dry-run)... "
+# 3. Teste de geração da nova versão sobre o backup original (dry-run sem alterar produção)
+echo -n "[3/8] Testando geração da nova versão sobre backup original (dry-run)... "
 if [ ! -f "$PATCH_FILE" ] || [ ! -r "$PATCH_FILE" ]; then
     echo "FALHA!"
     echo "ERRO CRÍTICO: Arquivo de patch $PATCH_FILE inexistente ou inacessível!"
     exit 1
 fi
-if ! (cd /opt/jarvis-voice && patch --dry-run -p1 < "$PATCH_FILE" >/dev/null 2>&1); then
+TEMP_TEST="/tmp/preflight_test_$$.py"
+cp "$BACKUP_PRIMARY" "$TEMP_TEST"
+if ! patch "$TEMP_TEST" < "$PATCH_FILE" >/dev/null 2>&1; then
+    rm -f "$TEMP_TEST"
     echo "FALHA!"
-    echo "ERRO CRÍTICO: patch --dry-run falhou em aplicar $PATCH_FILE!"
+    echo "ERRO CRÍTICO: patch falhou ao ser aplicado sobre backup original!"
     exit 1
 fi
-echo "OK (Código de retorno: 0)"
+GENERATED_SHA=$(sha256sum "$TEMP_TEST" | awk '{print $1}')
+if [ "$GENERATED_SHA" != "$EXPECTED_NEW_SHA" ]; then
+    rm -f "$TEMP_TEST"
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: SHA-256 gerado divergente ($GENERATED_SHA vs $EXPECTED_NEW_SHA)!"
+    exit 1
+fi
+echo "OK (SHA: $GENERATED_SHA)"
 
 # 4. Teste de reversibilidade do patch (dry-run reverso)
 echo -n "[4/8] Testando reversibilidade do patch (dry-run reverso)... "
-TEMP_TEST="/tmp/preflight_test_$$.py"
-cp "$TARGET_FILE" "$TEMP_TEST"
-patch "$TEMP_TEST" < "$PATCH_FILE" >/dev/null 2>&1
 if ! patch -R --dry-run "$TEMP_TEST" < "$PATCH_FILE" >/dev/null 2>&1; then
     rm -f "$TEMP_TEST"
     echo "FALHA!"

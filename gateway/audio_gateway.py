@@ -370,6 +370,73 @@ class SessionArbitrator:
             }
 
 
+def _registrar_log_ack_gateway(
+    tipo_acao: str,
+    alvo: Optional[str],
+    fonte: str,
+    session_id: Optional[str],
+    ack: Any,
+    erro_fallback: str = "falha_controlador",
+) -> None:
+    """Registra log auditável do Gateway diferenciando com precisão:
+    - [COMANDO ACEITO]
+    - [EM PROCESSAMENTO]
+    - [CONCLUÍDO]
+    - [FALHA]
+    """
+    nome_acao = "WoL" if tipo_acao == "ligar" else ("Desligamento SSH" if tipo_acao in ("desligar", "confirmar") else tipo_acao)
+    alvo_str = alvo or "indeterminado"
+    sid_str = session_id or "sem_sessao"
+
+    if ack is None:
+        logger.error(
+            "[FALHA] %s para '%s' via %s falhou: timeout ou barramento IPC inacessível (sessão %s)",
+            nome_acao, alvo_str, fonte, sid_str
+        )
+        return
+
+    if isinstance(ack, dict):
+        if not ack.get("sucesso"):
+            motivo = ack.get("erro") or erro_fallback
+            logger.error(
+                "[FALHA] %s para '%s' via %s rejeitado pelo controlador: %s (sessão %s, status=falha)",
+                nome_acao, alvo_str, fonte, motivo, sid_str
+            )
+            return
+
+        st = ack.get("status", "concluido")
+        if st == "aceito":
+            logger.info(
+                "[COMANDO ACEITO] [SIMULAÇÃO] %s para '%s' via %s aceito pelo controlador (sessão %s, status=aceito)",
+                nome_acao, alvo_str, fonte, sid_str
+            )
+        elif st == "em_processamento":
+            logger.info(
+                "[EM PROCESSAMENTO] [SIMULAÇÃO] %s para '%s' via %s em andamento no controlador (sessão %s, status=em_processamento)",
+                nome_acao, alvo_str, fonte, sid_str
+            )
+        elif st == "concluido":
+            logger.info(
+                "[CONCLUÍDO] [SIMULAÇÃO] %s confirmado pelo controlador para '%s' via %s (sessão %s, status=concluido)",
+                nome_acao, alvo_str, fonte, sid_str
+            )
+        elif st == "falha":
+            logger.error(
+                "[FALHA] %s para '%s' via %s falhou durante execução: %s (sessão %s, status=falha)",
+                nome_acao, alvo_str, fonte, ack.get("erro", "falha_execucao"), sid_str
+            )
+        else:
+            logger.info(
+                "[STATUS=%s] [SIMULAÇÃO] %s para '%s' via %s (sessão %s)",
+                st, nome_acao, alvo_str, fonte, sid_str
+            )
+    else:
+        logger.error(
+            "[FALHA] %s para '%s' via %s recebeu ACK em formato inválido: %s (sessão %s)",
+            nome_acao, alvo_str, fonte, type(ack).__name__, sid_str
+        )
+
+
 class LgMicServer(threading.Thread):
     """Servidor TCP de recepção de áudio bruto PCM do smartphone LG-X230DSV."""
 
@@ -627,17 +694,13 @@ class LgMicServer(threading.Thread):
                 )
                 if isinstance(ack, dict) and ack.get("active_session_id"):
                     self.arbitrator.sync_session_id(ack["active_session_id"])
-                # Confirmação do gateway refletindo o resultado real do controlador (Requisito 3)
-                if isinstance(ack, dict) and ack.get("sucesso"):
-                    if res.get("acao") == "ligar":
-                        logger.info(
-                            "[SIMULAÇÃO] WoL confirmado pelo controlador para '%s' via lg_mic (sessão %s, status=%s)",
-                            res.get("alvo"),
-                            res.get("session_id"),
-                            ack.get("status"),
-                        )
-                else:
-                    logger.error("Falha ao confirmar comando pelo controlador: ack=%s", ack)
+                _registrar_log_ack_gateway(
+                    tipo_acao=res.get("acao", "comando"),
+                    alvo=res.get("alvo"),
+                    fonte="lg_mic",
+                    session_id=res.get("session_id"),
+                    ack=ack,
+                )
         elif self.arbitrator.state == "confirmacao":
             if "confirmar" in texto:
                 res = self.arbitrator.report_confirmation("lg_mic")
@@ -655,16 +718,13 @@ class LgMicServer(threading.Thread):
                     )
                     if isinstance(ack, dict) and ack.get("active_session_id"):
                         self.arbitrator.sync_session_id(ack["active_session_id"])
-                    # Confirmação do gateway refletindo o resultado real do controlador (Requisito 3)
-                    if isinstance(ack, dict) and ack.get("sucesso"):
-                        logger.info(
-                            "[SIMULAÇÃO] Desligamento SSH confirmado pelo controlador para '%s' via lg_mic (sessão %s, status=%s)",
-                            res.get("alvo"),
-                            res.get("session_id"),
-                            ack.get("status"),
-                        )
-                    else:
-                        logger.error("Falha ao confirmar desligamento pelo controlador: ack=%s", ack)
+                    _registrar_log_ack_gateway(
+                        tipo_acao="confirmar",
+                        alvo=res.get("alvo"),
+                        fonte="lg_mic",
+                        session_id=res.get("session_id"),
+                        ack=ack,
+                    )
 
     def _calcular_rms(self, pcm_bytes: bytes) -> float:
         if len(pcm_bytes) < 2:
@@ -898,14 +958,14 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
                         elif isinstance(ack, dict) and not ack.get("sucesso"):
                             resultado["sucesso"] = False
                             resultado["erro"] = ack.get("erro", "falha_controlador")
-                        elif isinstance(ack, dict) and ack.get("sucesso"):
-                            if res.get("acao") == "ligar":
-                                logger.info(
-                                    "[SIMULAÇÃO] WoL confirmado pelo controlador para '%s' via %s (sessão %s)",
-                                    res.get("alvo"),
-                                    fonte,
-                                    res.get("session_id"),
-                                )
+                        _registrar_log_ack_gateway(
+                            tipo_acao=res.get("acao", "comando"),
+                            alvo=res.get("alvo"),
+                            fonte=fonte,
+                            session_id=res.get("session_id"),
+                            ack=ack,
+                            erro_fallback=resultado.get("erro", "falha_controlador"),
+                        )
             elif evento == "confirm":
                 res = self.server.arbitrator.report_confirmation(fonte)
                 resultado = {"sucesso": True, "resultado": res}
@@ -921,13 +981,14 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
                         elif isinstance(ack, dict) and not ack.get("sucesso"):
                             resultado["sucesso"] = False
                             resultado["erro"] = ack.get("erro", "falha_controlador")
-                        elif isinstance(ack, dict) and ack.get("sucesso"):
-                            logger.info(
-                                "[SIMULAÇÃO] Desligamento SSH confirmado pelo controlador para '%s' via %s (sessão %s)",
-                                res.get("alvo"),
-                                fonte,
-                                res.get("session_id"),
-                            )
+                        _registrar_log_ack_gateway(
+                            tipo_acao="confirmar",
+                            alvo=res.get("alvo"),
+                            fonte=fonte,
+                            session_id=res.get("session_id"),
+                            ack=ack,
+                            erro_fallback=resultado.get("erro", "falha_controlador"),
+                        )
 
             self._responder_json(resultado)
         else:

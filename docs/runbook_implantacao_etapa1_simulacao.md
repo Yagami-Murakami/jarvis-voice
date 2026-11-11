@@ -49,17 +49,28 @@ Antes de qualquer alteração, o script automatizado `scripts/validar_pre_implan
 ```
 *Se qualquer verificação falhar, abortar imediatamente e reportar ao operador.*
 
-### Passo 3.2: Aplicação do Patch Operacional
+### Passo 3.2: Geração e Aplicação da Nova Versão (Upgrade Seguro a partir do Backup Original)
+> **Aviso de Segurança Crítico:** **NUNCA** aplique o arquivo de patch diretamente sobre um arquivo já modificado em produção. A nova versão deve ser gerada estritamente a partir do backup original imutável verificado (`c51d58e6...`) para evitar corrupção ou rejeição de hunks.
+
 ```bash
-cd /opt/jarvis-voice
-patch -p1 < patches/jarvis-operacional-dual.patch
-/opt/jarvis-voice/venv/bin/python3 -m py_compile /opt/jarvis-voice/jarvis-operacional.py
+# 1. Executar validação e geração em modo dry-run (sem alterar produção):
+/opt/jarvis-voice/scripts/upgrade_etapa1_simulacao.sh
+
+# 2. Quando houver autorização explícita do operador, aplicar efetivamente:
+/opt/jarvis-voice/scripts/upgrade_etapa1_simulacao.sh --apply
 ```
 
-### Passo 3.3: Reinício Controlado dos Serviços
+*O que o script de upgrade executa compulsoriamente:*
+1. Preserva o backup original e valida os hashes do backup primário e externo (`c51d58e6d3a19003eac55a827212e5e084d583fea43389ec0ea5466080ee2d54`).
+2. Cria backup adicional da versão em execução (`jarvis-operacional.py.backup_simulacao_v1`, hash `f6c7273116aea4c4b34c0c6007d335b7925356ecb174e7066781716f2f604ed8`).
+3. Gera a nova versão operacional a partir do backup original aplicando o patch atualizado em arquivo temporário.
+4. Valida se o hash gerado corresponde exatamente a `810aca6e25897f6b95aaf297ca8fdff7d9659270bf079a8c398c4ee21df93b42`.
+5. Valida a sintaxe Python 3.11 limpa e testa a reversibilidade do patch.
+6. Instala atomicamente o arquivo e reinicia os serviços sob as variáveis de simulação obrigatória (`JARVIS_WOL_REAL=0`, `JARVIS_SSH_REAL=0`, `JARVIS_REQUIRE_PERSISTENCE=1`).
+
+### Passo 3.3: Reinício Controlado e Auditoria dos Serviços
 ```bash
-systemctl restart jarvis-voice.service
-systemctl restart jarvis-audio-gateway.service
+/opt/jarvis-voice/scripts/validar_pos_inicializacao.sh
 ```
 
 ### Passo 3.4: Auditoria em Runtime do Processo Ativo
@@ -112,17 +123,31 @@ Consulte o checklist oficial em: [`docs/checklist_validacao_fisica_etapa1.md`](c
 
 ## 5. Procedimento de Rollback de Emergência Seguro
 
-Caso ocorra qualquer comportamento anômalo durante a Etapa 1:
+Caso ocorra qualquer comportamento anômalo durante a Etapa 1, estão disponíveis dois procedimentos de reversão segura:
 
+### Opção 1: Rollback para a Versão Anterior em Simulação (v1, pre-latência)
+Reverte para a versão simulada anterior (commit anterior), preservando a integração dual-mic com os parâmetros conhecidos:
 ```bash
+/opt/jarvis-voice/scripts/rollback_etapa1_simulacao.sh v1
+```
+*Hash validado:* `f6c7273116aea4c4b34c0c6007d335b7925356ecb174e7066781716f2f604ed8`.
+
+### Opção 2: Rollback Total para a Versão Original de Fábrica (Pristine Original)
+Reverte para o código antes de qualquer alteração de microfone duplo:
+```bash
+/opt/jarvis-voice/scripts/rollback_etapa1_simulacao.sh original
+# ou diretamente:
 /opt/jarvis-voice/scripts/rollback_emergencia.sh
 ```
+*Hash validado:* `c51d58e6d3a19003eac55a827212e5e084d583fea43389ec0ea5466080ee2d54`.
 
-### O que o script de rollback executa compulsoriamente:
-1. **Validação prévia do hash SHA-256 do backup ANTES de copiar:** Se o hash do backup em `/opt/jarvis-voice/` ou `/var/backups/jarvis/` divergir de `c51d58e6d3a19003eac55a827212e5e084d583fea43389ec0ea5466080ee2d54`, o rollback aborta imediatamente (fail-closed) sem tocar no arquivo operacional.
+### O que o procedimento de rollback executa compulsoriamente:
+1. **Validação prévia do hash SHA-256 do backup ANTES de copiar:** Se o hash do backup divergir do esperado, o rollback aborta imediatamente (fail-closed) sem tocar no arquivo operacional.
 2. **Garante simulação ativa no systemd:** Mantém `JARVIS_WOL_REAL=0`, `JARVIS_SSH_REAL=0` e `JARVIS_REQUIRE_PERSISTENCE=1` no drop-in `zz-simulacao-etapa1.conf`. Se `producao.conf` existir, é renomeado para `.disabled`.
-3. **Restauração a partir do backup verificado:** Copia o backup sobre o arquivo de produção e valida o SHA-256 novamente.
+3. **Restauração atômica a partir do backup verificado:** Copia o backup com permissões `0755` para `tuninho:tuninho` e valida o SHA-256 novamente.
 4. **Reinício seguro:** Executa `systemctl daemon-reload` e reinicia `jarvis-voice.service`.
 5. **Auditoria em memória:** Inspeciona `/proc/$PID/environ` do novo processo e confirma que as flags de simulação estão presentes na memória física do processo restaurado.
+
+**Garantia de Segurança:** O rollback NUNCA reativa hardware real de forma automática.
 
 **Garantia de Segurança:** O rollback NUNCA reativa hardware real de forma automática.
