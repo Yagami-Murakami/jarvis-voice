@@ -1,5 +1,5 @@
---- jarvis-voice/scripts/jarvis_operacional_original.py	2026-11-10 22:53:39.181809835 -0300
-+++ jarvis-voice/scripts/jarvis_operacional_proposta.py	2026-11-10 22:53:32.857751065 -0300
+--- /tmp/jarvis_orig.py	2026-11-10 23:04:18.264564622 -0300
++++ jarvis-voice/scripts/jarvis_operacional_corrigido.py	2026-11-10 23:07:24.526713920 -0300
 @@ -10,8 +10,11 @@
  
  # Carregar funcoes do painel existente
@@ -12,7 +12,7 @@
  SetLogLevel(-1)
  
  MODELO = "/opt/jarvis-voice/vosk-model-small-pt-0.3"
-@@ -46,12 +49,31 @@
+@@ -46,12 +49,32 @@
  )
  
  estado = "espera"
@@ -21,6 +21,7 @@
  pendente = None
 +ultima_ativacao = 0.0
 +fonte_ativa = None
++sessao_ativa_id = None
 +
 +# Fila unificada de intenções para ambos os microfones (ME6S + LG)
 +fila_intencoes = queue.Queue(maxsize=32)
@@ -29,37 +30,41 @@
 +acoes_recentes = {}
 +lock_acoes = threading.Lock()
 +
- 
++
 +def registrar_acao(acao, alvo):
 +    with lock_acoes:
 +        acoes_recentes[(acao, alvo)] = time.monotonic()
  
+ 
 -def processar(texto):
 -    global estado, limite, pendente
-+
 +def ja_executado_recentemente(acao, alvo, janela=3.5):
 +    with lock_acoes:
 +        return (time.monotonic() - acoes_recentes.get((acao, alvo), 0.0)) <= janela
 +
 +
-+def processar(texto, fonte="me6s"):
-+    global estado, limite, pendente, ultima_ativacao, fonte_ativa
++def processar(texto, fonte="me6s", session_id=None):
++    global estado, limite, pendente, ultima_ativacao, fonte_ativa, sessao_ativa_id
  
      agora = time.monotonic()
  
-@@ -59,25 +81,35 @@
+@@ -59,19 +82,35 @@
          print("Tempo esgotado.", flush=True)
          estado = "espera"
          pendente = None
 +        fonte_ativa = None
++        sessao_ativa_id = None
  
--    print("Ouvi:", texto, flush=True)
-+    print(f"Ouvi [{fonte}]:", texto, flush=True)
++    # Preservação estrita do formato de log contratual para display/server.py e Me6sJournalMonitor
+     print("Ouvi:", texto, flush=True)
++    if fonte != "me6s":
++        print(f"[Origem: {fonte}]", flush=True)
  
      if texto == "cancelar":
          estado = "espera"
          pendente = None
 +        fonte_ativa = None
++        sessao_ativa_id = None
 +        ultima_ativacao = 0.0
          print("Cancelado.", flush=True)
          return
@@ -73,20 +78,13 @@
 +
              estado = "comando"
              limite = agora + 12
--            print("ATIVADO! Aguardando comando.", flush=True)
 +            ultima_ativacao = agora
 +            fonte_ativa = fonte
-+            print(f"ATIVADO via {fonte}! Aguardando comando.", flush=True)
++            sessao_ativa_id = session_id or f"sess-{int(agora)}"
+             print("ATIVADO! Aguardando comando.", flush=True)
          return
  
-     if estado == "comando":
-         if texto == "assistente":
--            print("Ja ativado. Aguardando comando.", flush=True)
-+            print(f"Ja ativado via {fonte_ativa}. Aguardando comando.", flush=True)
-             return
- 
-         # Correcao restrita ao teste de reconhecimento
-@@ -99,6 +131,14 @@
+@@ -99,6 +138,15 @@
              if acessivel:
                  print("Computador ja esta acessivel.", flush=True)
              else:
@@ -95,97 +93,133 @@
 +                    print(f"WoL para {alvo} descartado por idempotencia.", flush=True)
 +                    estado = "espera"
 +                    fonte_ativa = None
++                    sessao_ativa_id = None
 +                    return
 +
 +                registrar_acao("ligar", alvo)
                  if os.getenv("JARVIS_WOL_REAL") == "1":
                      try:
                          if not srv.get("mac"):
-@@ -123,8 +163,9 @@
-                     except Exception as erro:
-                         print("Falha no Wake-on-LAN:", erro, flush=True)
+@@ -125,6 +173,8 @@
                  else:
--                    print("SIMULACAO: Wake-on-LAN.", flush=True)
-+                    print(f"SIMULACAO: Wake-on-LAN para {alvo} via {fonte}.", flush=True)
+                     print("SIMULACAO: Wake-on-LAN.", flush=True)
              estado = "espera"
 +            fonte_ativa = None
++            sessao_ativa_id = None
              return
  
          if not acessivel:
-@@ -134,6 +175,7 @@
+@@ -134,6 +184,8 @@
                  flush=True
              )
              estado = "espera"
 +            fonte_ativa = None
++            sessao_ativa_id = None
              return
  
          estado = "confirmacao"
-@@ -151,6 +193,15 @@
-         if texto in ("confirmar", "confirmar desligar", "confirmar desligamento"):
-             srv = painel.SERVIDORES[pendente]
-             if painel.host_ligado(srv):
-+                # Deduplicação de ação (idempotência de desligamento)
-+                if ja_executado_recentemente("desligar", pendente):
-+                    print(f"Desligamento de {pendente} descartado por idempotencia.", flush=True)
-+                    estado = "espera"
-+                    pendente = None
-+                    fonte_ativa = None
-+                    return
-+
-+                registrar_acao("desligar", pendente)
-                 if os.getenv("JARVIS_SSH_REAL") == "1":
-                     if texto != "confirmar desligamento":
-                         print(
-@@ -159,6 +210,7 @@
+@@ -159,8 +211,20 @@
                          )
                          estado = "espera"
                          pendente = None
 +                        fonte_ativa = None
++                        sessao_ativa_id = None
++                        return
++
++                    # Idempotência verificada estritamente após confirmação válida
++                    if ja_executado_recentemente("desligar", pendente):
++                        print(f"Desligamento de {pendente} descartado por idempotencia.", flush=True)
++                        estado = "espera"
++                        pendente = None
++                        fonte_ativa = None
++                        sessao_ativa_id = None
                          return
  
++                    registrar_acao("desligar", pendente)
                      configuracao = dict(srv)
-@@ -193,8 +245,7 @@
+ 
+                     if pendente == "ananuke":
+@@ -192,6 +256,16 @@
+                     except Exception as erro:
                          print("Erro no SSH:", erro, flush=True)
                  else:
++                    # Modo Simulação: idempotência registrada apenas após validação
++                    if ja_executado_recentemente("desligar", pendente):
++                        print(f"Desligamento de {pendente} descartado por idempotencia.", flush=True)
++                        estado = "espera"
++                        pendente = None
++                        fonte_ativa = None
++                        sessao_ativa_id = None
++                        return
++
++                    registrar_acao("desligar", pendente)
                      print(
--                        "SIMULACAO SSH para",
--                        srv["nome"],
-+                        f"SIMULACAO SSH para {srv['nome']} via {fonte}.",
-                         flush=True
-                     )
-             else:
-@@ -202,8 +253,30 @@
+                         "SIMULACAO SSH para",
+                         srv["nome"],
+@@ -202,20 +276,54 @@
  
              estado = "espera"
              pendente = None
 +            fonte_ativa = None
-+
-+
-+# --- Barramento IPC Local por UNIX Domain Socket ---
++            sessao_ativa_id = None
+ 
+ 
+-microfone = subprocess.Popen([
+-    "arecord", "-q",
+-    "-D", "plughw:CARD=ME6S,DEV=0",
+-    "-f", "S16_LE",
+-    "-r", "16000",
+-    "-c", "1",
+-    "-t", "raw"
+-], stdout=subprocess.PIPE)
++# --- Barramento IPC Local por UNIX Domain Socket com Validação Semântica ---
 +def on_ipc_event(evento):
-+    fonte = evento.get("fonte", "lg_mic")
-+    texto = evento.get("texto", "").strip()
-+    if texto:
-+        try:
-+            fila_intencoes.put_nowait((fonte, texto))
-+        except queue.Full:
-+            print("Fila de intencoes cheia. Descartando.", flush=True)
++    if not isinstance(evento, dict):
++        return
++    if evento.get("versao") != 1:
++        return
+ 
++    fonte = evento.get("fonte")
++    if fonte not in ("lg_mic", "me6s"):
++        return
+ 
++    tipo = evento.get("evento")
++    if tipo not in ("wake", "comando", "confirmar", "cancelar"):
++        return
++
++    texto = evento.get("texto")
++    if not isinstance(texto, str) or len(texto) > 128:
++        return
++    texto = texto.strip()
++    if not texto:
++        return
++
++    # Validação semântica estrita do texto conforme o tipo de evento
++    if tipo == "wake" and texto != "assistente":
++        return
++    if tipo == "cancelar" and texto != "cancelar":
++        return
++    if tipo == "confirmar" and texto not in ("confirmar", "confirmar desligar", "confirmar desligamento"):
++        return
++    if tipo == "comando" and texto not in COMANDOS and texto != "dois ligar fusion":
++        return
++
++    sid = evento.get("session_id")
++    try:
++        fila_intencoes.put_nowait((fonte, texto, sid))
++    except queue.Full:
++        print("Fila de intencoes cheia. Descartando evento IPC.", flush=True)
 +
 +
-+ipc_listener = IpcEventListener(
-+    socket_path=os.getenv("JARVIS_IPC_SOCKET", DEFAULT_IPC_SOCKET),
-+    on_event=on_ipc_event,
-+    allowed_uid=0,
-+    verify_peer_cred=True,
-+)
-+ipc_listener.start()
++ipc_listener = None
++microfone = None
+ fila_audio = queue.Queue(maxsize=64)
  
- 
-+# --- Captura de Áudio ALSA (ME6S USB) ---
- microfone = subprocess.Popen([
-     "arecord", "-q",
-     "-D", "plughw:CARD=ME6S,DEV=0",
-@@ -226,7 +299,6 @@
++
+ def capturar_audio():
+     while True:
+         dados = microfone.stdout.read(4000)
+@@ -226,7 +334,6 @@
          try:
              fila_audio.put_nowait((time.monotonic(), dados))
          except queue.Full:
@@ -193,10 +227,15 @@
              try:
                  fila_audio.get_nowait()
              except queue.Empty:
-@@ -240,11 +312,8 @@
-     daemon=True
- ).start()
+@@ -235,16 +342,8 @@
  
+     fila_audio.put(None)
+ 
+-threading.Thread(
+-    target=capturar_audio,
+-    daemon=True
+-).start()
+-
 -print("=== JARVIS + LIGAR.CASA ===", flush=True)
 -print("MODO SIMULACAO - SEM ACOES REAIS", flush=True)
 -print("Fale 'assistente', pause, depois o comando.", flush=True)
@@ -206,42 +245,69 @@
      while True:
          item = fila_audio.get()
          if item is None:
-@@ -260,11 +329,37 @@
+@@ -260,11 +359,59 @@
          if rec.AcceptWaveform(audio):
              texto = json.loads(rec.Result()).get("text", "").strip()
              if texto and texto != "[unk]":
 -                processar(texto)
-+                fila_intencoes.put(("me6s", texto))
-+
-+threading.Thread(
-+    target=reconhecedor_me6s,
-+    daemon=True
-+).start()
++                fila_intencoes.put(("me6s", texto, None))
 +
 +
-+print("=== JARVIS + LIGAR.CASA (DUAL-MIC) ===", flush=True)
-+if os.getenv("JARVIS_WOL_REAL") != "1" or os.getenv("JARVIS_SSH_REAL") != "1":
++def iniciar_servicos():
++    global ipc_listener, microfone
++
++    ipc_listener = IpcEventListener(
++        socket_path=os.getenv("JARVIS_IPC_SOCKET", DEFAULT_IPC_SOCKET),
++        on_event=on_ipc_event,
++        allowed_uid=0,
++        verify_peer_cred=True,
++    )
++    ipc_listener.start()
++
++    # Captura de Áudio ALSA (ME6S USB)
++    microfone = subprocess.Popen([
++        "arecord", "-q",
++        "-D", "plughw:CARD=ME6S,DEV=0",
++        "-f", "S16_LE",
++        "-r", "16000",
++        "-c", "1",
++        "-t", "raw"
++    ], stdout=subprocess.PIPE)
++
++    threading.Thread(target=capturar_audio, daemon=True).start()
++    threading.Thread(target=reconhecedor_me6s, daemon=True).start()
++
++    print("=== JARVIS + LIGAR.CASA ===", flush=True)
 +    print("MODO SIMULACAO - SEM ACOES REAIS", flush=True)
-+print("Fontes ativas: ME6S (USB) + LG-X230 (IPC)", flush=True)
-+print("Fale 'assistente', pause, depois o comando.", flush=True)
++    print("Fale 'assistente', pause, depois o comando.", flush=True)
 +
-+try:
-+    while True:
-+        try:
-+            fonte, texto = fila_intencoes.get(timeout=0.2)
-+            processar(texto, fonte=fonte)
-+        except queue.Empty:
-+            agora = time.monotonic()
-+            if estado != "espera" and agora > limite:
-+                print("Tempo esgotado.", flush=True)
-+                estado = "espera"
-+                pendente = None
-+                fonte_ativa = None
++    try:
++        while True:
++            try:
++                fonte, texto, sid = fila_intencoes.get(timeout=0.2)
++                processar(texto, fonte=fonte, session_id=sid)
++            except queue.Empty:
++                agora = time.monotonic()
++                if estado != "espera" and agora > limite:
++                    print("Tempo esgotado.", flush=True)
++                    estado = "espera"
++                    pendente = None
++                    fonte_ativa = None
++                    sessao_ativa_id = None
++    except KeyboardInterrupt:
++        print("\nTeste encerrado.")
++    finally:
++        if ipc_listener:
++            ipc_listener.stop()
++        if microfone:
++            microfone.terminate()
++            microfone.wait()
  
- except KeyboardInterrupt:
-     print("\nTeste encerrado.")
+-except KeyboardInterrupt:
+-    print("\nTeste encerrado.")
  
- finally:
-+    ipc_listener.stop()
-     microfone.terminate()
-     microfone.wait()
+-finally:
+-    microfone.terminate()
+-    microfone.wait()
++if __name__ == "__main__":
++    iniciar_servicos()
