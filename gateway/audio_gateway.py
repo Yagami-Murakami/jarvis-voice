@@ -607,6 +607,8 @@ class Me6sJournalMonitor(threading.Thread):
         self.last_event_time: float = 0.0
         self.last_line: str = ""
         self.service_active: bool = False
+        self.current_origin: str = "me6s"
+        self.last_origin_time: float = 0.0
 
     def run(self) -> None:
         import subprocess
@@ -641,8 +643,35 @@ class Me6sJournalMonitor(threading.Thread):
                     time.sleep(4)
 
     def _processar_linha(self, linha: str) -> None:
-        self.last_event_time = time.time()
+        agora = time.time()
+        self.last_event_time = agora
         self.last_line = linha
+
+        # Identifica declaração de origem explícita emitida pelo controlador
+        if linha.startswith("[Origem:"):
+            origem = linha.replace("[Origem:", "").replace("]", "").strip()
+            self.current_origin = origem
+            self.last_origin_time = agora
+            return
+
+        # Reseta origem por expiração se passou da janela temporal
+        if self.current_origin != "me6s" and (agora - self.last_origin_time) > 2.0:
+            self.current_origin = "me6s"
+
+        # Se a origem atual for declarada como não sendo me6s (ex: lg_mic),
+        # ignora os eventos espelhados pelo jarvis-operacional.py
+        if self.current_origin != "me6s":
+            if "ATIVADO!" in linha:
+                logger.debug("[Me6sJournalMonitor] Ignorando ativação espelhada da fonte '%s'", self.current_origin)
+                self.current_origin = "me6s"
+                return
+            if linha.startswith("Ouvi:"):
+                texto = linha.replace("Ouvi:", "").strip()
+                logger.debug("[Me6sJournalMonitor] Ignorando evento espelhado '%s' da fonte '%s'", texto, self.current_origin)
+                if texto != "assistente":
+                    self.current_origin = "me6s"
+                return
+            return
 
         if "ATIVADO! Aguardando comando." in linha:
             is_new, sid = self.arbitrator.report_wake("me6s")

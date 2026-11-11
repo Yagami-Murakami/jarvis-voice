@@ -86,9 +86,9 @@ def processar(texto, fonte="me6s", session_id=None):
         sessao_ativa_id = None
 
     # Preservação estrita do formato de log contratual para display/server.py e Me6sJournalMonitor
-    print("Ouvi:", texto, flush=True)
     if fonte != "me6s":
         print(f"[Origem: {fonte}]", flush=True)
+    print("Ouvi:", texto, flush=True)
 
     if texto == "cancelar":
         estado = "espera"
@@ -117,6 +117,11 @@ def processar(texto, fonte="me6s", session_id=None):
     if estado == "comando":
         if texto == "assistente":
             print("Ja ativado. Aguardando comando.", flush=True)
+            return
+
+        # Se for comando recebido com session_id, valida correspondência com a sessão ativa
+        if session_id and sessao_ativa_id and session_id != sessao_ativa_id:
+            print("Comando descartado: session_id incompativel com a sessao ativa.", flush=True)
             return
 
         # Correcao restrita ao teste de reconhecimento
@@ -200,6 +205,15 @@ def processar(texto, fonte="me6s", session_id=None):
         return
 
     if estado == "confirmacao":
+        if texto == "assistente":
+            print("Aguardando confirmacao de desligamento.", flush=True)
+            return
+
+        # Se for confirmação recebida com session_id, valida correspondência com a sessão ativa
+        if session_id and sessao_ativa_id and session_id != sessao_ativa_id:
+            print("Confirmacao descartada: session_id incompativel com a sessao ativa.", flush=True)
+            return
+
         if texto in ("confirmar", "confirmar desligar", "confirmar desligamento"):
             srv = painel.SERVIDORES[pendente]
             if painel.host_ligado(srv):
@@ -282,6 +296,7 @@ def processar(texto, fonte="me6s", session_id=None):
 
 # --- Barramento IPC Local por UNIX Domain Socket com Validação Semântica ---
 def on_ipc_event(evento):
+    global estado, sessao_ativa_id, pendente
     if not isinstance(evento, dict):
         return
     if evento.get("versao") != 1:
@@ -313,6 +328,31 @@ def on_ipc_event(evento):
         return
 
     sid = evento.get("session_id")
+
+    # Validação rigorosa de session_id, origem e estado antes de aceitar comandos e confirmações
+    if tipo == "comando":
+        if estado != "comando":
+            print(f"IPC descartado: comando recebido fora do estado 'comando' (estado atual: {estado}).", flush=True)
+            return
+        if not sid or (sessao_ativa_id and sid != sessao_ativa_id):
+            print(f"IPC descartado: session_id invalido para comando (recebido: {sid}, ativo: {sessao_ativa_id}).", flush=True)
+            return
+
+    if tipo == "confirmar":
+        if estado != "confirmacao" or pendente is None:
+            print(f"IPC descartado: confirmacao recebida fora do estado 'confirmacao' (estado atual: {estado}).", flush=True)
+            return
+        if not sid or (sessao_ativa_id and sid != sessao_ativa_id):
+            print(f"IPC descartado: session_id invalido para confirmacao (recebido: {sid}, ativo: {sessao_ativa_id}).", flush=True)
+            return
+
+    if tipo == "cancelar":
+        if estado == "espera":
+            return
+        if sid and sessao_ativa_id and sid != sessao_ativa_id:
+            print(f"IPC descartado: session_id divergente para cancelamento (recebido: {sid}, ativo: {sessao_ativa_id}).", flush=True)
+            return
+
     try:
         fila_intencoes.put_nowait((fonte, texto, sid))
     except queue.Full:
@@ -322,14 +362,52 @@ def on_ipc_event(evento):
 ipc_listener = None
 microfone = None
 fila_audio = queue.Queue(maxsize=64)
+captura_ativa = threading.Event()
+captura_ativa.set()
+
+
+def spawn_arecord():
+    dispositivo = os.getenv("JARVIS_ME6S_DEVICE", "plughw:CARD=ME6S,DEV=0")
+    try:
+        return subprocess.Popen([
+            "arecord", "-q",
+            "-D", dispositivo,
+            "-f", "S16_LE",
+            "-r", "16000",
+            "-c", "1",
+            "-t", "raw"
+        ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except Exception as erro:
+        print(f"[ME6S] Falha ao iniciar arecord ({dispositivo}): {erro}", flush=True)
+        return None
 
 
 def capturar_audio():
-    while True:
-        dados = microfone.stdout.read(4000)
+    global microfone
+    while captura_ativa.is_set():
+        if microfone is None or microfone.poll() is not None:
+            microfone = spawn_arecord()
+            if microfone is None or microfone.poll() is not None:
+                time.sleep(1.0)
+                continue
+            print("[ME6S] Microfone conectado e captura de audio iniciada.", flush=True)
+
+        try:
+            dados = microfone.stdout.read(4000)
+        except Exception:
+            dados = b""
 
         if not dados:
-            break
+            if captura_ativa.is_set():
+                print("[ME6S] Captura interrompida (dispositivo desconectado ou arecord terminou). Tentando reconectar...", flush=True)
+                try:
+                    microfone.terminate()
+                    microfone.wait(timeout=1.0)
+                except Exception:
+                    pass
+                microfone = None
+                time.sleep(1.0)
+            continue
 
         try:
             fila_audio.put_nowait((time.monotonic(), dados))
@@ -340,12 +418,14 @@ def capturar_audio():
                 pass
             fila_audio.put_nowait((time.monotonic(), dados))
 
-    fila_audio.put(None)
-
 
 def reconhecedor_me6s():
-    while True:
-        item = fila_audio.get()
+    while captura_ativa.is_set():
+        try:
+            item = fila_audio.get(timeout=0.5)
+        except queue.Empty:
+            continue
+
         if item is None:
             break
 
@@ -362,9 +442,11 @@ def reconhecedor_me6s():
                 fila_intencoes.put(("me6s", texto, None))
 
 
-def iniciar_servicos():
-    global ipc_listener, microfone
+def iniciar_servicos(max_iteracoes=None):
+    global ipc_listener, microfone, captura_ativa
+    global estado, limite, pendente, fonte_ativa, sessao_ativa_id
 
+    captura_ativa.set()
     ipc_listener = IpcEventListener(
         socket_path=os.getenv("JARVIS_IPC_SOCKET", DEFAULT_IPC_SOCKET),
         on_event=on_ipc_event,
@@ -373,25 +455,26 @@ def iniciar_servicos():
     )
     ipc_listener.start()
 
-    # Captura de Áudio ALSA (ME6S USB)
-    microfone = subprocess.Popen([
-        "arecord", "-q",
-        "-D", "plughw:CARD=ME6S,DEV=0",
-        "-f", "S16_LE",
-        "-r", "16000",
-        "-c", "1",
-        "-t", "raw"
-    ], stdout=subprocess.PIPE)
-
     threading.Thread(target=capturar_audio, daemon=True).start()
     threading.Thread(target=reconhecedor_me6s, daemon=True).start()
 
     print("=== JARVIS + LIGAR.CASA ===", flush=True)
-    print("MODO SIMULACAO - SEM ACOES REAIS", flush=True)
+    wol_real = os.getenv("JARVIS_WOL_REAL") == "1"
+    ssh_real = os.getenv("JARVIS_SSH_REAL") == "1"
+    if wol_real and ssh_real:
+        print("MODO OPERACIONAL REAL (WoL=ATIVO, SSH=ATIVO)", flush=True)
+    elif wol_real or ssh_real:
+        print(f"MODO MISTO (WoL={'ATIVO' if wol_real else 'SIMULADO'}, SSH={'ATIVO' if ssh_real else 'SIMULADO'})", flush=True)
+    else:
+        print("MODO SIMULACAO - SEM ACOES REAIS", flush=True)
     print("Fale 'assistente', pause, depois o comando.", flush=True)
 
+    iteracoes = 0
     try:
         while True:
+            if max_iteracoes is not None and iteracoes >= max_iteracoes:
+                break
+            iteracoes += 1
             try:
                 fonte, texto, sid = fila_intencoes.get(timeout=0.2)
                 processar(texto, fonte=fonte, session_id=sid)
@@ -406,11 +489,15 @@ def iniciar_servicos():
     except KeyboardInterrupt:
         print("\nTeste encerrado.")
     finally:
+        captura_ativa.clear()
         if ipc_listener:
             ipc_listener.stop()
         if microfone:
-            microfone.terminate()
-            microfone.wait()
+            try:
+                microfone.terminate()
+                microfone.wait(timeout=1.0)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
