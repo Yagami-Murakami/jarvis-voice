@@ -154,25 +154,45 @@ if [ "$RESTORED_PERMS" != "755" ] || [ "$RESTORED_OWNER" != "${TARGET_USER}:${TA
 fi
 echo "OK (Restaurado: SHA $RESTORED_SHA, 0755, $RESTORED_OWNER)"
 
-# 4. Reiniciar serviços operacionais
-echo -n "[4/5] Reiniciando jarvis-voice.service... "
-if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet jarvis-voice.service 2>/dev/null; then
-    systemctl restart jarvis-voice.service
-    if [ "$TARGET_VERSION" = "v1" ] && systemctl is-active --quiet jarvis-audio-gateway.service 2>/dev/null; then
-        systemctl restart jarvis-audio-gateway.service
-    fi
-    sleep 2
-
-    if ! systemctl is-active --quiet jarvis-voice.service; then
+# 4. Reiniciar serviços operacionais — SEM depender de 'is-active' prévio
+# Um restart que falhou no upgrade pode deixar a unidade INATIVA.
+# O rollback deve SEMPRE tentar reiniciar a versão restaurada.
+echo -n "[4/5] Reiniciando jarvis-voice.service após rollback... "
+if ! command -v systemctl >/dev/null 2>&1; then
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: systemctl indisponível; não é possível validar rollback operacional!"
+    exit 1
+fi
+if ! systemctl daemon-reload; then
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: systemctl daemon-reload falhou durante rollback!"
+    exit 1
+fi
+if ! systemctl restart jarvis-voice.service; then
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: jarvis-voice.service não pôde ser reiniciado após restauração!"
+    exit 1
+fi
+if [ "$TARGET_VERSION" = "v1" ]; then
+    if ! systemctl restart jarvis-audio-gateway.service; then
         echo "FALHA!"
-        echo "ERRO CRÍTICO: jarvis-voice.service falhou ao reiniciar após rollback!"
-        systemctl status jarvis-voice.service --no-pager | head -n 20
+        echo "ERRO CRÍTICO: jarvis-audio-gateway.service não pôde ser reiniciado após rollback!"
         exit 1
     fi
-    echo "OK (Serviço ativo)"
-else
-    echo "OK (Reinício não aplicável neste ambiente)"
 fi
+sleep 2
+
+if ! systemctl is-active --quiet jarvis-voice.service; then
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: jarvis-voice.service inativo mesmo após tentativa de restart!"
+    exit 1
+fi
+if [ "$TARGET_VERSION" = "v1" ] && ! systemctl is-active --quiet jarvis-audio-gateway.service; then
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: jarvis-audio-gateway.service inativo após rollback!"
+    exit 1
+fi
+echo "OK (Serviços reiniciados e ativos)"
 
 # 5. Auditoria de memória do processo
 echo -n "[5/5] Auditando memória física do PID ativo... "
