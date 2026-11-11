@@ -478,6 +478,188 @@ class TestPatchedOperationalScript(unittest.TestCase):
         self.assertIn("Tempo esgotado.", output.getvalue())
         self.assertEqual(self.mod.estado, "espera")
 
+    def test_15_concurrency_scenario1_me6s_first_then_lg_wake(self):
+        """Cenário 1A: ME6S ativa no controlador primeiro -> LG ativa quase simultaneamente -> autoridade única mantida."""
+        # 1. ME6S ativa no controlador
+        out1 = io.StringIO()
+        with patch("sys.stdout", out1):
+            self.mod.processar("assistente", fonte="me6s")
+        self.assertEqual(self.mod.estado, "comando")
+        me6s_sid = self.mod.sessao_ativa_id
+        self.assertIsNotNone(me6s_sid)
+
+        # 2. LG gera candidato no Gateway quase ao mesmo tempo
+        arbitrator = SessionArbitrator()
+        _, lg_candidate_sid = arbitrator.report_wake("lg_mic")
+
+        # 3. LG envia wake via IPC ao controlador
+        ack = self.mod.on_ipc_event({
+            "versao": 1,
+            "fonte": "lg_mic",
+            "evento": "wake",
+            "texto": "assistente",
+            "session_id": lg_candidate_sid,
+        })
+
+        # 4. Controlador deve responder ACK com active_session_id do ME6S e deduplicado=True
+        self.assertTrue(ack.get("sucesso"))
+        self.assertEqual(ack.get("active_session_id"), me6s_sid)
+        self.assertTrue(ack.get("deduplicado"))
+
+        # 5. Gateway reconcilia com a resposta oficial
+        arbitrator.sync_session_id(ack["active_session_id"])
+        self.assertEqual(arbitrator.session_id, me6s_sid)
+
+        # 6. LG fala comando "ligar fusion" usando o ID sincronizado
+        ack_cmd = self.mod.on_ipc_event({
+            "versao": 1,
+            "fonte": "lg_mic",
+            "evento": "comando",
+            "texto": "ligar fusion",
+            "session_id": me6s_sid,
+        })
+        self.assertTrue(ack_cmd.get("sucesso"))
+
+        # 7. Controlador processa o comando com sucesso
+        while not self.mod.fila_intencoes.empty():
+            fonte, texto, sid = self.mod.fila_intencoes.get_nowait()
+            if texto != "assistente":
+                out_cmd = io.StringIO()
+                with patch("sys.stdout", out_cmd):
+                    self.mod.processar(texto, fonte=fonte, session_id=sid)
+                self.assertIn("SIMULACAO: Wake-on-LAN.", out_cmd.getvalue())
+        self.assertEqual(self.mod.estado, "espera")
+
+    def test_16_concurrency_scenario1_lg_first_then_me6s_wake(self):
+        """Cenário 1B: LG ativa primeiro via IPC -> ME6S ativa logo em seguida -> ID único adotado por ambos."""
+        # 1. LG ativa no Gateway
+        arbitrator = SessionArbitrator()
+        _, lg_sid = arbitrator.report_wake("lg_mic")
+
+        # 2. Gateway envia wake via IPC; Controlador estava em espera
+        ack = self.mod.on_ipc_event({
+            "versao": 1,
+            "fonte": "lg_mic",
+            "evento": "wake",
+            "texto": "assistente",
+            "session_id": lg_sid,
+        })
+        self.assertTrue(ack.get("sucesso"))
+        self.assertEqual(ack.get("active_session_id"), lg_sid)
+        self.assertFalse(ack.get("deduplicado"))
+
+        # Esvazia fila e processa a ativação
+        fonte, texto, sid = self.mod.fila_intencoes.get_nowait()
+        out_wake = io.StringIO()
+        with patch("sys.stdout", out_wake):
+            self.mod.processar(texto, fonte=fonte, session_id=sid)
+        self.assertEqual(self.mod.estado, "comando")
+        self.assertEqual(self.mod.sessao_ativa_id, lg_sid)
+
+        # 3. 5ms depois, ME6S ouve "assistente" localmente
+        out_me6s = io.StringIO()
+        with patch("sys.stdout", out_me6s):
+            self.mod.processar("assistente", fonte="me6s")
+        self.assertIn("Ja ativado. Aguardando comando.", out_me6s.getvalue())
+        self.assertEqual(self.mod.sessao_ativa_id, lg_sid)
+
+        # 4. Monitor passivo do journal processa linha e sincroniza arbitrator
+        monitor = Me6sJournalMonitor(arbitrator=arbitrator)
+        for linha in out_wake.getvalue().strip().split("\n"):
+            monitor._processar_linha(linha.strip())
+        self.assertEqual(arbitrator.session_id, lg_sid)
+
+        # 5. ME6S fala comando local
+        out_cmd = io.StringIO()
+        with patch("sys.stdout", out_cmd):
+            self.mod.processar("ligar fusion", fonte="me6s")
+        self.assertIn("SIMULACAO: Wake-on-LAN.", out_cmd.getvalue())
+        self.assertEqual(self.mod.estado, "espera")
+
+    def test_17_concurrency_scenario2_second_wake_during_active_session(self):
+        """Cenário 2: Segunda ativação pelo LG durante sessão já aberta NUNCA substitui o ID."""
+        # 1. Abre sessão via ME6S
+        out = io.StringIO()
+        with patch("sys.stdout", out):
+            self.mod.processar("assistente", fonte="me6s")
+        initial_sid = self.mod.sessao_ativa_id
+        self.assertEqual(self.mod.estado, "comando")
+
+        arbitrator = SessionArbitrator()
+        arbitrator.report_wake("me6s", session_id=initial_sid)
+        self.assertEqual(arbitrator.session_id, initial_sid)
+
+        # 2. Usuário repete 'assistente' pelo microfone LG
+        is_new, current_sid = arbitrator.report_wake("lg_mic")
+        self.assertFalse(is_new)
+        self.assertEqual(current_sid, initial_sid)
+        self.assertEqual(arbitrator.session_id, initial_sid)
+
+        # 3. Envia wake ao controlador via IPC
+        ack = self.mod.on_ipc_event({
+            "versao": 1,
+            "fonte": "lg_mic",
+            "evento": "wake",
+            "texto": "assistente",
+            "session_id": current_sid,
+        })
+        self.assertTrue(ack.get("sucesso"))
+        self.assertEqual(ack.get("active_session_id"), initial_sid)
+        self.assertTrue(ack.get("deduplicado"))
+        self.assertEqual(self.mod.sessao_ativa_id, initial_sid)
+
+        # 4. Usuário agora fala comando pelo LG
+        ack_cmd = self.mod.on_ipc_event({
+            "versao": 1,
+            "fonte": "lg_mic",
+            "evento": "comando",
+            "texto": "ligar fusion",
+            "session_id": initial_sid,
+        })
+        self.assertTrue(ack_cmd.get("sucesso"))
+
+        # Esvazia fila e processa comando
+        while not self.mod.fila_intencoes.empty():
+            f, t, s = self.mod.fila_intencoes.get_nowait()
+            if t == "ligar fusion":
+                out_cmd = io.StringIO()
+                with patch("sys.stdout", out_cmd):
+                    self.mod.processar(t, fonte=f, session_id=s)
+                self.assertIn("SIMULACAO: Wake-on-LAN.", out_cmd.getvalue())
+        self.assertEqual(self.mod.estado, "espera")
+
+    def test_18_gateway_restart_during_active_session(self):
+        """Cenário de Tolerância: Gateway reinicia durante sessão ativa e recupera autoridade única pelo ACK."""
+        # 1. Controlador está ativo na sessão
+        self.mod.estado = "comando"
+        self.mod.sessao_ativa_id = "sess-authoritative-prior-42"
+        self.mod.limite = time.monotonic() + 12.0
+
+        # 2. Gateway novo reiniciado (estado inicial: espera, session_id: None)
+        restarted_arbitrator = SessionArbitrator()
+        self.assertEqual(restarted_arbitrator.state, "espera")
+        self.assertIsNone(restarted_arbitrator.session_id)
+
+        # 3. Usuário fala "assistente" no LG conectado ao Gateway reiniciado
+        is_new, temp_sid = restarted_arbitrator.report_wake("lg_mic")
+        self.assertTrue(is_new)
+
+        # 4. Gateway emite wake ao controlador e recebe ACK com o session_id oficial ativo
+        ack = self.mod.on_ipc_event({
+            "versao": 1,
+            "fonte": "lg_mic",
+            "evento": "wake",
+            "texto": "assistente",
+            "session_id": temp_sid,
+        })
+        self.assertTrue(ack.get("sucesso"))
+        self.assertEqual(ack.get("active_session_id"), "sess-authoritative-prior-42")
+        self.assertTrue(ack.get("deduplicado"))
+
+        # 5. Gateway sincroniza com o ACK recebido
+        restarted_arbitrator.sync_session_id(ack["active_session_id"])
+        self.assertEqual(restarted_arbitrator.session_id, "sess-authoritative-prior-42")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

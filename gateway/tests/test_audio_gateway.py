@@ -50,6 +50,35 @@ class TestSessionArbitrator(unittest.TestCase):
         self.assertEqual(self.arbitrator.deduplicated_count, 1)
         self.assertEqual(self.arbitrator.total_activations, 1)
 
+    def test_second_wake_during_active_session_preserves_session_id(self):
+        """Cenário 2: Uma segunda ativação pelo LG durante sessão já aberta NUNCA substitui o ID."""
+        # 1. Sessão inicial aberta pelo LG
+        is_new1, sid1 = self.arbitrator.report_wake("lg_mic")
+        self.assertTrue(is_new1)
+        self.assertEqual(self.arbitrator.state, "comando")
+
+        # 2. Usuário repete 'assistente' pelo mesmo microfone LG dentro da sessão ativa
+        time.sleep(0.05)
+        is_new2, sid2 = self.arbitrator.report_wake("lg_mic")
+        self.assertFalse(is_new2)
+        self.assertEqual(sid2, sid1)
+        self.assertEqual(self.arbitrator.session_id, sid1)
+
+        # 3. Microfone ME6S também repete 'assistente'
+        is_new3, sid3 = self.arbitrator.report_wake("me6s")
+        self.assertFalse(is_new3)
+        self.assertEqual(sid3, sid1)
+        self.assertEqual(self.arbitrator.session_id, sid1)
+
+    def test_sync_session_id_with_controller(self):
+        """Valida que o Gateway adota a autoridade única do controlador em caso de divergência."""
+        is_new, sid1 = self.arbitrator.report_wake("lg_mic")
+        self.assertTrue(is_new)
+
+        controller_authoritative_id = "sess-controller-official-999"
+        self.arbitrator.sync_session_id(controller_authoritative_id)
+        self.assertEqual(self.arbitrator.session_id, controller_authoritative_id)
+
     def test_command_wol_simulation(self):
         self.arbitrator.report_wake("me6s")
         res = self.arbitrator.report_command("lg_mic", "ligar fusion")

@@ -71,10 +71,16 @@ class IpcEventBroadcaster:
         try:
             sock.connect(self.socket_path)
             sock.sendall(dados)
-            return True
+            try:
+                resp = sock.recv(1024)
+                if resp:
+                    return json.loads(resp.decode("utf-8").strip())
+            except Exception:
+                pass
+            return {"sucesso": True}
         except (socket.error, OSError) as e:
             logger.debug("Falha ao emitir evento IPC em %s: %s", self.socket_path, e)
-            return False
+            return None
         finally:
             try:
                 sock.close()
@@ -223,9 +229,19 @@ class IpcEventListener:
                 return
             self._seen_nonces[nonce] = now
 
-        # 4. Despacho do evento para callback
+        # 4. Despacho do evento para callback com suporte a resposta / confirmação
+        resposta = {"sucesso": True, "active_session_id": None}
         if self.on_event:
             try:
-                self.on_event(evento)
+                res = self.on_event(evento)
+                if isinstance(res, dict):
+                    resposta.update(res)
             except Exception as e:
                 logger.error("Erro no callback do evento IPC: %s", e)
+                resposta = {"sucesso": False, "erro": str(e)}
+
+        try:
+            dados_resposta = (json.dumps(resposta, ensure_ascii=False) + "\n").encode("utf-8")
+            client_sock.sendall(dados_resposta)
+        except Exception:
+            pass

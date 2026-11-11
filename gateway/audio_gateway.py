@@ -100,20 +100,28 @@ class SessionArbitrator:
         """
         now = time.monotonic()
         with self._lock:
-            # 1. Verifica deduplicação se já estiver em sessão recente
+            # 1. Se já estiver em sessão ativa (comando ou confirmacao) e não expirada
             if self.state in ("comando", "confirmacao"):
-                delta = now - self.last_trigger_time
-                if delta <= self.dedup_window_s and source != self.last_trigger_source:
+                if now <= self.expires_at:
+                    delta = now - self.last_trigger_time
                     self.deduplicated_count += 1
                     logger.info(
-                        "Deduplicação: ativação da fonte '%s' descartada (sessão %s já aberta por '%s' há %.2fs)",
-                        source,
+                        "Ativação recebida durante sessão ativa (ID: %s, estado: %s, fonte: %s, última: %s há %.2fs). Mantendo sessão existente.",
                         self.session_id,
+                        self.state,
+                        source,
                         self.last_trigger_source,
                         delta,
                     )
-                    self._registrar_evento("wake_deduplicated", source, delta=delta)
+                    self.last_trigger_time = now
+                    # Se vier com session_id explícito (ex: autoridade do controlador), sincroniza
+                    if session_id and session_id != self.session_id:
+                        self.session_id = session_id
+                    self._registrar_evento("wake_deduplicated", source, delta=delta, session_id=self.session_id)
                     return False, self.session_id or ""
+                else:
+                    self.state = "espera"
+                    self.session_id = None
 
             # 2. Abre nova sessão
             self.total_activations += 1
@@ -133,6 +141,20 @@ class SessionArbitrator:
             logger.info("Nova sessão de comando iniciada: ID=%s (Fonte: %s)", self.session_id, source)
             self._registrar_evento("wake_accepted", source, session_id=self.session_id)
             return True, self.session_id
+
+    def sync_session_id(self, official_session_id: Optional[str]) -> None:
+        """Sincroniza o session_id local com a autoridade única (controlador)."""
+        if not official_session_id:
+            return
+        with self._lock:
+            if self.session_id != official_session_id:
+                logger.info(
+                    "Sincronização de session_id com autoridade central: %s -> %s",
+                    self.session_id,
+                    official_session_id,
+                )
+                self.session_id = official_session_id
+                self._registrar_evento("session_id_synced", "controller", session_id=official_session_id)
 
     def report_command(self, source: str, raw_text: str) -> Dict[str, Any]:
         """Processa comando de voz recebido de uma das fontes."""
@@ -505,14 +527,23 @@ class LgMicServer(threading.Thread):
             is_new, sid = self.arbitrator.report_wake("lg_mic")
             if not is_new:
                 logger.info("[Vosk-LG] Palavra 'assistente' deduplicada na sessão %s", sid)
-            else:
-                if self.ipc_broadcaster:
-                    self.ipc_broadcaster.emit_event(
-                        source="lg_mic",
-                        event_type="wake",
-                        text="assistente",
-                        session_id=sid,
-                    )
+            # Emite wake ao barramento IPC e reconcilia session_id com a resposta oficial do controlador
+            if self.ipc_broadcaster:
+                ack = self.ipc_broadcaster.emit_event(
+                    source="lg_mic",
+                    event_type="wake",
+                    text="assistente",
+                    session_id=sid,
+                )
+                if isinstance(ack, dict) and ack.get("active_session_id"):
+                    official_sid = ack["active_session_id"]
+                    if official_sid != self.arbitrator.session_id:
+                        logger.info(
+                            "[Vosk-LG] Sincronizando session_id com autoridade central: %s -> %s",
+                            self.arbitrator.session_id,
+                            official_sid,
+                        )
+                        self.arbitrator.sync_session_id(official_sid)
             return
 
         if texto == "cancelar":
@@ -535,25 +566,29 @@ class LgMicServer(threading.Thread):
             res = self.arbitrator.report_command("lg_mic", texto)
             logger.info("[Vosk-LG] Resultado do comando: %s", res)
             if res.get("valido") and self.ipc_broadcaster:
-                self.ipc_broadcaster.emit_event(
+                ack = self.ipc_broadcaster.emit_event(
                     source="lg_mic",
                     event_type="comando",
                     text=texto,
                     session_id=res.get("session_id"),
                     extra=res,
                 )
+                if isinstance(ack, dict) and ack.get("active_session_id"):
+                    self.arbitrator.sync_session_id(ack["active_session_id"])
         elif self.arbitrator.state == "confirmacao":
             if "confirmar" in texto:
                 res = self.arbitrator.report_confirmation("lg_mic")
                 logger.info("[Vosk-LG] Resultado da confirmação: %s", res)
                 if res.get("valido") and self.ipc_broadcaster:
-                    self.ipc_broadcaster.emit_event(
+                    ack = self.ipc_broadcaster.emit_event(
                         source="lg_mic",
                         event_type="confirmar",
                         text=texto,
                         session_id=res.get("session_id"),
                         extra=res,
                     )
+                    if isinstance(ack, dict) and ack.get("active_session_id"):
+                        self.arbitrator.sync_session_id(ack["active_session_id"])
 
     def _calcular_rms(self, pcm_bytes: bytes) -> float:
         if len(pcm_bytes) < 2:

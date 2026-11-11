@@ -120,7 +120,7 @@ def processar(texto, fonte="me6s", session_id=None):
             limite = agora + 12
             ultima_ativacao = agora
             fonte_ativa = fonte
-            sessao_ativa_id = session_id or gerar_session_id(fonte=fonte)
+            sessao_ativa_id = session_id or sessao_ativa_id or gerar_session_id(fonte=fonte)
             print(f"[Sessao: {sessao_ativa_id}]", flush=True)
             print("ATIVADO! Aguardando comando.", flush=True)
         return
@@ -128,6 +128,7 @@ def processar(texto, fonte="me6s", session_id=None):
     if estado == "comando":
         if texto == "assistente":
             print("Ja ativado. Aguardando comando.", flush=True)
+            limite = agora + 12
             return
 
         # Se for comando recebido com session_id, valida correspondência com a sessão ativa
@@ -305,69 +306,114 @@ def processar(texto, fonte="me6s", session_id=None):
             sessao_ativa_id = None
 
 
-# --- Barramento IPC Local por UNIX Domain Socket com Validação Semântica ---
+# --- Barramento IPC Local por UNIX Domain Socket com Validação Semântica e Confirmação Síncrona ---
 def on_ipc_event(evento):
-    global estado, sessao_ativa_id, pendente
+    global estado, sessao_ativa_id, pendente, limite, ultima_ativacao, fonte_ativa
     if not isinstance(evento, dict):
-        return
+        return {"sucesso": False, "motivo": "Payload inválido"}
     if evento.get("versao") != 1:
-        return
+        return {"sucesso": False, "motivo": "Versão incompatível"}
 
     fonte = evento.get("fonte")
     if fonte not in ("lg_mic", "me6s"):
-        return
+        return {"sucesso": False, "motivo": "Fonte desconhecida"}
 
     tipo = evento.get("evento")
     if tipo not in ("wake", "comando", "confirmar", "cancelar"):
-        return
+        return {"sucesso": False, "motivo": "Tipo de evento desconhecido"}
 
     texto = evento.get("texto")
     if not isinstance(texto, str) or len(texto) > 128:
-        return
+        return {"sucesso": False, "motivo": "Texto inválido"}
     texto = texto.strip()
     if not texto:
-        return
+        return {"sucesso": False, "motivo": "Texto vazio"}
 
     # Validação semântica estrita do texto conforme o tipo de evento
     if tipo == "wake" and texto != "assistente":
-        return
+        return {"sucesso": False, "motivo": "Wake deve ser 'assistente'"}
     if tipo == "cancelar" and texto != "cancelar":
-        return
+        return {"sucesso": False, "motivo": "Cancelar deve ser 'cancelar'"}
     if tipo == "confirmar" and texto not in ("confirmar", "confirmar desligar", "confirmar desligamento"):
-        return
+        return {"sucesso": False, "motivo": "Texto de confirmação inválido"}
     if tipo == "comando" and texto not in COMANDOS and texto != "dois ligar fusion":
-        return
+        return {"sucesso": False, "motivo": "Comando desconhecido"}
 
     sid = evento.get("session_id")
+
+    # Autoridade Única do Session ID:
+    # 1. Wake: se já estiver em sessão ativa (comando ou confirmacao), preserva rigorosamente sessao_ativa_id.
+    #    Se estiver em espera, adota sid fornecido ou gera novo ID oficial e inicia a sessão.
+    if tipo == "wake":
+        if estado in ("comando", "confirmacao"):
+            # Já ativado: não sobrescreve sessão e estende limite se em comando
+            if estado == "comando":
+                limite = time.monotonic() + 12
+            try:
+                fila_intencoes.put_nowait((fonte, texto, sessao_ativa_id))
+            except queue.Full:
+                pass
+            return {
+                "sucesso": True,
+                "active_session_id": sessao_ativa_id,
+                "estado": estado,
+                "deduplicado": True,
+            }
+        else:
+            # Estado espera: estabelece a autoridade central da sessão
+            sessao_ativa_id = sid or gerar_session_id(fonte=fonte)
+            try:
+                fila_intencoes.put_nowait((fonte, texto, sessao_ativa_id))
+            except queue.Full:
+                pass
+            return {
+                "sucesso": True,
+                "active_session_id": sessao_ativa_id,
+                "estado": "comando",
+                "deduplicado": False,
+            }
 
     # Validação rigorosa de session_id, origem e estado antes de aceitar comandos e confirmações
     if tipo == "comando":
         if estado != "comando":
             print(f"IPC descartado: comando recebido fora do estado 'comando' (estado atual: {estado}).", flush=True)
-            return
+            return {"sucesso": False, "motivo": f"Estado atual não aceita comandos ({estado})", "active_session_id": sessao_ativa_id, "estado": estado}
         if not sid or (sessao_ativa_id and sid != sessao_ativa_id):
             print(f"IPC descartado: session_id invalido para comando (recebido: {sid}, ativo: {sessao_ativa_id}).", flush=True)
-            return
+            return {"sucesso": False, "motivo": "session_id divergente", "active_session_id": sessao_ativa_id, "estado": estado}
+        try:
+            fila_intencoes.put_nowait((fonte, texto, sid))
+            return {"sucesso": True, "active_session_id": sessao_ativa_id, "estado": estado}
+        except queue.Full:
+            print("Fila de intencoes cheia. Descartando evento IPC.", flush=True)
+            return {"sucesso": False, "motivo": "Fila cheia", "active_session_id": sessao_ativa_id, "estado": estado}
 
     if tipo == "confirmar":
         if estado != "confirmacao" or pendente is None:
             print(f"IPC descartado: confirmacao recebida fora do estado 'confirmacao' (estado atual: {estado}).", flush=True)
-            return
+            return {"sucesso": False, "motivo": f"Estado atual não aceita confirmação ({estado})", "active_session_id": sessao_ativa_id, "estado": estado}
         if not sid or (sessao_ativa_id and sid != sessao_ativa_id):
             print(f"IPC descartado: session_id invalido para confirmacao (recebido: {sid}, ativo: {sessao_ativa_id}).", flush=True)
-            return
+            return {"sucesso": False, "motivo": "session_id divergente", "active_session_id": sessao_ativa_id, "estado": estado}
+        try:
+            fila_intencoes.put_nowait((fonte, texto, sid))
+            return {"sucesso": True, "active_session_id": sessao_ativa_id, "estado": estado}
+        except queue.Full:
+            print("Fila de intencoes cheia. Descartando evento IPC.", flush=True)
+            return {"sucesso": False, "motivo": "Fila cheia", "active_session_id": sessao_ativa_id, "estado": estado}
 
     if tipo == "cancelar":
         if estado == "espera":
-            return
+            return {"sucesso": True, "active_session_id": None, "estado": "espera"}
         if sid and sessao_ativa_id and sid != sessao_ativa_id:
             print(f"IPC descartado: session_id divergente para cancelamento (recebido: {sid}, ativo: {sessao_ativa_id}).", flush=True)
-            return
-
-    try:
-        fila_intencoes.put_nowait((fonte, texto, sid))
-    except queue.Full:
-        print("Fila de intencoes cheia. Descartando evento IPC.", flush=True)
+            return {"sucesso": False, "motivo": "session_id divergente", "active_session_id": sessao_ativa_id, "estado": estado}
+        try:
+            fila_intencoes.put_nowait((fonte, texto, sid))
+            return {"sucesso": True, "active_session_id": None, "estado": "espera"}
+        except queue.Full:
+            print("Fila de intencoes cheia. Descartando evento IPC.", flush=True)
+            return {"sucesso": False, "motivo": "Fila cheia", "active_session_id": sessao_ativa_id, "estado": estado}
 
 
 ipc_listener = None
