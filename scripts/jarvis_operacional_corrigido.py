@@ -82,6 +82,71 @@ loop_principal_ativo = threading.Event()
 acoes_recentes = {}
 lock_acoes = threading.Lock()
 
+# Registro do ciclo de vida de ações: 'aceito' -> 'em_processamento' -> 'concluido' / 'falha'
+registro_acoes = {}
+lock_registro_acoes = threading.Lock()
+
+
+def registrar_inicio_acao(event_id, acao, alvo, status="aceito"):
+    ev_key = event_id or f"ev-{int(time.time() * 1000)}"
+    with lock_registro_acoes:
+        registro_acoes[ev_key] = {
+            "event_id": ev_key,
+            "acao": acao,
+            "alvo": alvo,
+            "status": status,
+            "timestamp_inicio": time.monotonic(),
+            "timestamp_conclusao": None,
+            "resultado": None,
+            "erro": None,
+        }
+    return ev_key
+
+
+def atualizar_status_acao(event_id, status, acao=None, alvo=None, resultado=None, erro=None):
+    if not event_id:
+        return
+    with lock_registro_acoes:
+        if event_id not in registro_acoes:
+            registro_acoes[event_id] = {
+                "event_id": event_id,
+                "acao": acao,
+                "alvo": alvo,
+                "status": status,
+                "timestamp_inicio": time.monotonic(),
+                "timestamp_conclusao": None,
+                "resultado": resultado,
+                "erro": erro,
+            }
+        else:
+            reg = registro_acoes[event_id]
+            reg["status"] = status
+            if acao:
+                reg["acao"] = acao
+            if alvo:
+                reg["alvo"] = alvo
+            if resultado is not None:
+                reg["resultado"] = resultado
+            if erro is not None:
+                reg["erro"] = erro
+            if status in ("concluido", "falha"):
+                reg["timestamp_conclusao"] = time.monotonic()
+
+
+def obter_status_acao(event_id=None, acao=None, alvo=None):
+    with lock_registro_acoes:
+        if event_id and event_id in registro_acoes:
+            return dict(registro_acoes[event_id])
+        if acao and alvo:
+            candidatos = [
+                r for r in registro_acoes.values()
+                if r.get("acao") == acao and r.get("alvo") == alvo
+            ]
+            if candidatos:
+                candidatos.sort(key=lambda x: x.get("timestamp_inicio", 0), reverse=True)
+                return dict(candidatos[0])
+        return None
+
 contador_sessao = 0
 lock_sessao = threading.Lock()
 
@@ -100,6 +165,11 @@ def registrar_acao(acao, alvo):
 
 def ja_executado_recentemente(acao, alvo, janela=3.5):
     with lock_acoes:
+        with lock_registro_acoes:
+            # Se uma ação idêntica estiver atualmente 'em_processamento', bloqueia imediatamente
+            for reg in registro_acoes.values():
+                if reg.get("acao") == acao and reg.get("alvo") == alvo and reg.get("status") == "em_processamento":
+                    return True
         return (time.monotonic() - acoes_recentes.get((acao, alvo), 0.0)) <= janela
 
 
@@ -139,7 +209,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
     if estado == "espera":
         if texto == "assistente":
             # Deduplicação de ativação simultânea entre os dois microfones
-            if (agora - ultima_ativacao) <= 2.0:
+            if (agora - ultima_ativacao) <= 2.0 and sessao_ativa_id:
                 print(f"Ativacao deduplicada via {fonte} (ja ativo ha {agora - ultima_ativacao:.2f}s).", flush=True)
                 return {
                     "sucesso": True,
@@ -243,6 +313,8 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                     }
 
                 registrar_acao("ligar", alvo)
+                ev_wol = event_id or f"ev-wol-{int(time.time() * 1000)}"
+                registrar_inicio_acao(ev_wol, "ligar", alvo)
                 if os.getenv("JARVIS_WOL_REAL") == "1":
                     try:
                         if not srv.get("mac"):
@@ -263,14 +335,18 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                             )
 
                         print("Wake-on-LAN enviado.", flush=True)
+                        atualizar_status_acao(ev_wol, "concluido", resultado={"wol": True})
 
                     except Exception as erro:
                         print("Falha no Wake-on-LAN:", erro, flush=True)
+                        atualizar_status_acao(ev_wol, "falha", erro=str(erro))
                 else:
                     print("SIMULACAO: Wake-on-LAN.", flush=True)
+                    atualizar_status_acao(ev_wol, "concluido", resultado={"simulacao": True})
             estado = "espera"
             fonte_ativa = None
             sessao_ativa_id = None
+            ultima_ativacao = 0.0
             return {
                 "sucesso": True,
                 "event_id": event_id,
@@ -278,6 +354,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                 "alvo": alvo,
                 "active_session_id": None,
                 "estado": "espera",
+                "status": "concluido",
                 "processado": True,
             }
 
@@ -344,6 +421,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
 
         if texto in ("confirmar", "confirmar desligar", "confirmar desligamento"):
             srv = painel.SERVIDORES[pendente]
+            status_acao = "falha"
             if painel.host_ligado(srv):
                 if os.getenv("JARVIS_SSH_REAL") == "1":
                     if texto != "confirmar desligamento":
@@ -361,98 +439,94 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                             "event_id": event_id,
                             "active_session_id": None,
                             "estado": "espera",
+                            "status": "falha",
                             "processado": True,
                         }
 
-                    # Idempotência verificada estritamente após confirmação válida
-                    if ja_executado_recentemente("desligar", pendente):
-                        print(f"Desligamento de {pendente} descartado por idempotencia.", flush=True)
-                        estado = "espera"
-                        pendente = None
-                        fonte_ativa = None
-                        sessao_ativa_id = None
-                        return {
-                            "sucesso": True,
-                            "event_id": event_id,
-                            "acao": "desligar",
-                            "alvo": pendente,
-                            "deduplicado": True,
-                            "active_session_id": None,
-                            "estado": "espera",
-                            "processado": True,
-                        }
+                # Idempotência verificada estritamente após confirmação válida
+                if ja_executado_recentemente("desligar", pendente):
+                    print(f"Desligamento de {pendente} descartado por idempotencia.", flush=True)
+                    alvo_confirmado = pendente
+                    estado = "espera"
+                    pendente = None
+                    fonte_ativa = None
+                    sessao_ativa_id = None
+                    return {
+                        "sucesso": True,
+                        "event_id": event_id,
+                        "acao": "desligar",
+                        "alvo": alvo_confirmado,
+                        "deduplicado": True,
+                        "active_session_id": None,
+                        "estado": "espera",
+                        "status": "concluido",
+                        "processado": True,
+                    }
 
-                    registrar_acao("desligar", pendente)
-                    configuracao = dict(srv)
+                alvo_confirmado = pendente
+                registrar_acao("desligar", alvo_confirmado)
+                ev_key = event_id or f"ev-desligar-{int(time.time() * 1000)}"
+                registrar_inicio_acao(ev_key, "desligar", alvo_confirmado, status="em_processamento")
 
-                    if pendente == "ananuke":
-                        configuracao["cmd"] = (
-                            "sudo -n /usr/sbin/poweroff"
-                        )
+                configuracao = dict(srv)
+                if alvo_confirmado == "ananuke":
+                    configuracao["cmd"] = "sudo -n /usr/sbin/poweroff"
 
+                # Disparo da ação SSH em thread dedicada para não bloquear o IPC nem o loop principal
+                def _executar_ssh_worker(srv_info, conf, ev_id, alvo_nome):
                     try:
-                        resultado = subprocess.run(
-                            painel.montar_comando_ssh(configuracao),
-                            capture_output=True,
-                            text=True,
-                            timeout=25
-                        )
-                        print(
-                            "SSH enviado. Codigo:",
-                            resultado.returncode,
-                            flush=True
-                        )
-                        if resultado.stderr:
-                            print(
-                                "SSH:", resultado.stderr.strip(),
-                                flush=True
+                        cmd = painel.montar_comando_ssh(conf) if hasattr(painel, "montar_comando_ssh") else None
+                        if os.getenv("JARVIS_SSH_REAL") == "1":
+                            resultado = subprocess.run(
+                                cmd,
+                                capture_output=True,
+                                text=True,
+                                timeout=25
                             )
-                        print(
-                            "Verifique se o computador desligou.",
-                            flush=True
-                        )
+                            print("SSH enviado. Codigo:", resultado.returncode, flush=True)
+                            if resultado.stderr:
+                                print("SSH:", resultado.stderr.strip(), flush=True)
+                            print("Verifique se o computador desligou.", flush=True)
+                            atualizar_status_acao(ev_id, "concluido", acao="desligar", alvo=alvo_nome, resultado={"codigo": resultado.returncode})
+                        else:
+                            atraso = getattr(painel, "simular_atraso_ssh_s", 0.0)
+                            if isinstance(atraso, (int, float)) and atraso > 0:
+                                time.sleep(atraso)
+                            print("SIMULACAO SSH para", srv_info["nome"], flush=True)
+                            atualizar_status_acao(ev_id, "concluido", acao="desligar", alvo=alvo_nome, resultado={"codigo": 0})
                     except Exception as erro:
                         print("Erro no SSH:", erro, flush=True)
-                else:
-                    # Modo Simulação: idempotência registrada apenas após validação
-                    if ja_executado_recentemente("desligar", pendente):
-                        print(f"Desligamento de {pendente} descartado por idempotencia.", flush=True)
-                        estado = "espera"
-                        pendente = None
-                        fonte_ativa = None
-                        sessao_ativa_id = None
-                        return {
-                            "sucesso": True,
-                            "event_id": event_id,
-                            "acao": "desligar",
-                            "alvo": pendente,
-                            "deduplicado": True,
-                            "active_session_id": None,
-                            "estado": "espera",
-                            "processado": True,
-                        }
+                        atualizar_status_acao(ev_id, "falha", acao="desligar", alvo=alvo_nome, erro=str(erro))
 
-                    registrar_acao("desligar", pendente)
-                    print(
-                        "SIMULACAO SSH para",
-                        srv["nome"],
-                        flush=True
-                    )
+                th_ssh = threading.Thread(
+                    target=_executar_ssh_worker,
+                    args=(srv, configuracao, ev_key, alvo_confirmado),
+                    daemon=True
+                )
+                th_ssh.start()
+                # Aguarda até 50ms: em modo simulação sem atraso ou conclusão rápida, sincroniza imediatamente
+                th_ssh.join(timeout=0.05)
+                reg_status = obter_status_acao(ev_key)
+                status_acao = reg_status.get("status", "em_processamento") if reg_status else "em_processamento"
             else:
                 print("Cancelado: computador inacessivel.", flush=True)
+                status_acao = "falha"
 
             estado = "espera"
             alvo_confirmado = pendente
             pendente = None
             fonte_ativa = None
             sessao_ativa_id = None
+            ultima_ativacao = 0.0
             return {
-                "sucesso": True,
+                "sucesso": True if status_acao != "falha" else False,
+                "erro": "computador_inacessivel" if status_acao == "falha" else None,
                 "event_id": event_id,
                 "acao": "confirmar_desligar",
                 "alvo": alvo_confirmado,
                 "active_session_id": None,
                 "estado": "espera",
+                "status": status_acao,
                 "processado": True,
             }
 
@@ -470,6 +544,30 @@ def on_ipc_event(evento):
         return {"sucesso": False, "erro": "fonte_desconhecida", "processado": False}
 
     tipo = evento.get("evento")
+    if tipo in ("status", "consultar_acao"):
+        event_id = evento.get("event_id") or evento.get("nonce")
+        target_id = evento.get("target_event_id") or event_id
+        reg = obter_status_acao(event_id=target_id)
+        if reg:
+            return {
+                "sucesso": True,
+                "event_id": event_id,
+                "target_event_id": target_id,
+                "status": reg.get("status", "desconhecido"),
+                "acao": reg.get("acao"),
+                "alvo": reg.get("alvo"),
+                "estado": estado,
+                "processado": True,
+            }
+        return {
+            "sucesso": False,
+            "erro": "acao_nao_encontrada",
+            "event_id": event_id,
+            "target_event_id": target_id,
+            "estado": estado,
+            "processado": True,
+        }
+
     if tipo not in ("wake", "comando", "confirmar", "cancelar"):
         return {"sucesso": False, "erro": "tipo_desconhecido", "processado": False}
 
@@ -609,6 +707,7 @@ def on_ipc_event(evento):
         comp_q = queue.Queue(maxsize=1)
         try:
             fila_intencoes.put_nowait((fonte, texto, sid, event_id, comp_q))
+            registrar_inicio_acao(event_id, tipo, texto, status="aceito")
         except queue.Full:
             print("Fila de intencoes cheia. Descartando evento IPC.", flush=True)
             return {
@@ -617,11 +716,19 @@ def on_ipc_event(evento):
                 "event_id": event_id,
                 "active_session_id": sessao_ativa_id,
                 "estado": estado,
+                "status": "falha",
                 "processado": False,
             }
 
         try:
             resultado = comp_q.get(timeout=2.0)
+            if isinstance(resultado, dict):
+                if "event_id" not in resultado:
+                    resultado["event_id"] = event_id
+                if "estado" not in resultado:
+                    resultado["estado"] = estado
+                if "status" not in resultado:
+                    resultado["status"] = "concluido" if resultado.get("sucesso") else "falha"
             return resultado
         except queue.Empty:
             print("Timeout aguardando processamento do evento IPC pelo controlador.", flush=True)
@@ -631,12 +738,14 @@ def on_ipc_event(evento):
                 "event_id": event_id,
                 "active_session_id": sessao_ativa_id,
                 "estado": estado,
+                "status": "falha",
                 "processado": False,
             }
     else:
         # Modo isolado/unitário fora do loop principal: enfileira se couber
         try:
             fila_intencoes.put_nowait((fonte, texto, sid))
+            registrar_inicio_acao(event_id, tipo, texto, status="aceito")
         except queue.Full:
             return {
                 "sucesso": False,
@@ -644,6 +753,7 @@ def on_ipc_event(evento):
                 "event_id": event_id,
                 "active_session_id": sessao_ativa_id,
                 "estado": estado,
+                "status": "falha",
                 "processado": False,
             }
         return {
@@ -651,6 +761,7 @@ def on_ipc_event(evento):
             "event_id": event_id,
             "active_session_id": sid if tipo == "wake" else sessao_ativa_id,
             "estado": estado,
+            "status": "aceito",
             "processado": False,
         }
 

@@ -118,12 +118,18 @@ class IpcEventBroadcaster:
                 self.last_ack = None
                 return None
 
-            # Validação do event_id para garantir associação inequívoca
-            expected_event_id = ev_id
+            # 1. Validação obrigatória de correspondência do event_id
             ack_event_id = ack.get("event_id") or ack.get("nonce")
-            if ack_event_id and ack_event_id != expected_event_id:
+            if not ack_event_id or not isinstance(ack_event_id, str):
+                logger.warning("Falha IPC: ACK rejeitado - event_id ausente ou vazio")
+                self.last_error = "event_id_ausente"
+                self.last_ack = ack
+                return None
+
+            expected_event_id = ev_id
+            if ack_event_id != expected_event_id:
                 logger.warning(
-                    "Falha IPC: event_id divergente no ACK (esperado=%s, recebido=%s)",
+                    "Falha IPC: ACK rejeitado - event_id divergente (esperado=%s, recebido=%s)",
                     expected_event_id,
                     ack_event_id,
                 )
@@ -131,12 +137,43 @@ class IpcEventBroadcaster:
                 self.last_ack = ack
                 return None
 
-            self.last_ack = ack
-            if not ack.get("sucesso"):
-                self.last_error = str(ack.get("erro") or ack.get("motivo") or "rejeitado")
-                logger.warning("Falha IPC: Listener rejeitou o evento: %s", self.last_error)
+            # 2. Validação obrigatória do campo 'sucesso' (deve ser estritamente True)
+            if "sucesso" not in ack:
+                logger.warning("Falha IPC: ACK rejeitado - campo 'sucesso' ausente")
+                self.last_error = "sucesso_ausente"
+                self.last_ack = ack
                 return None
 
+            if ack.get("sucesso") is not True:
+                self.last_error = str(ack.get("erro") or ack.get("motivo") or "rejeitado")
+                logger.warning("Falha IPC: Listener rejeitou o evento: %s", self.last_error)
+                self.last_ack = ack
+                return None
+
+            # 3. Validação obrigatória do campo 'estado'
+            estado_ack = ack.get("estado")
+            if not estado_ack or estado_ack not in ("espera", "comando", "confirmacao"):
+                logger.warning("Falha IPC: ACK rejeitado - campo 'estado' ausente ou inválido (%s)", estado_ack)
+                self.last_error = "estado_invalido"
+                self.last_ack = ack
+                return None
+
+            # 4. Validação obrigatória de confirmação real do processamento
+            # Exige 'processado': True OU status válido ('aceito', 'em_processamento', 'concluido')
+            processado = ack.get("processado")
+            status_ack = ack.get("status")
+            confirmacao_valida = (processado is True) or (status_ack in ("aceito", "em_processamento", "concluido"))
+            if not confirmacao_valida:
+                logger.warning(
+                    "Falha IPC: ACK rejeitado - confirmação real do processamento ausente (processado=%s, status=%s)",
+                    processado,
+                    status_ack,
+                )
+                self.last_error = "confirmacao_processamento_ausente"
+                self.last_ack = ack
+                return None
+
+            self.last_ack = ack
             self.last_error = None
             return ack
         except (socket.timeout, TimeoutError):
@@ -344,20 +381,33 @@ class IpcEventListener:
                 self._seen_nonces[event_id] = now
 
         # 4. Despacho do evento para callback com suporte a resposta / confirmação
-        resposta = {"sucesso": True, "active_session_id": None, "event_id": event_id, "processado": True}
+        resposta = {
+            "sucesso": True,
+            "active_session_id": None,
+            "event_id": event_id,
+            "estado": "espera",
+            "status": "concluido",
+            "processado": True,
+        }
         if self.on_event:
             try:
                 res = self.on_event(evento)
                 if isinstance(res, dict):
                     resposta = res
                 elif res is not None:
-                    resposta = {"sucesso": bool(res), "processado": bool(res)}
+                    resposta = {"sucesso": bool(res), "processado": bool(res), "estado": "espera", "status": "concluido"}
             except Exception as e:
                 logger.error("Erro no callback do evento IPC: %s", e)
-                resposta = {"sucesso": False, "erro": str(e), "processado": False}
+                resposta = {"sucesso": False, "erro": str(e), "processado": False, "estado": "espera", "status": "falha"}
 
         if "event_id" not in resposta:
             resposta["event_id"] = event_id
+        if "estado" not in resposta:
+            resposta["estado"] = "espera"
+        if "processado" not in resposta:
+            resposta["processado"] = True
+        if "status" not in resposta:
+            resposta["status"] = "concluido" if resposta.get("sucesso") else "falha"
 
         # Cacheia a resposta para tolerar retransmissões do mesmo evento sem duplicar ações
         with self._lock:

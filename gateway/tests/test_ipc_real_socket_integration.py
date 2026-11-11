@@ -10,6 +10,7 @@ Valida:
 - Proteção contra comandos duplicados em falhas e retransmissões
 """
 import importlib.util
+import io
 import json
 import os
 import queue
@@ -51,6 +52,10 @@ class TestIpcRealSocketIntegration(unittest.TestCase):
         self.mod.ultima_ativacao = 0.0
         with self.mod.lock_acoes:
             self.mod.acoes_recentes.clear()
+        with self.mod.lock_registro_acoes:
+            self.mod.registro_acoes.clear()
+        if hasattr(self.mod.painel, "simular_atraso_ssh_s"):
+            delattr(self.mod.painel, "simular_atraso_ssh_s")
         while not self.mod.fila_intencoes.empty():
             try:
                 self.mod.fila_intencoes.get_nowait()
@@ -64,6 +69,8 @@ class TestIpcRealSocketIntegration(unittest.TestCase):
             self.patch_host_ligado.stop()
         except Exception:
             pass
+        if hasattr(self.mod.painel, "simular_atraso_ssh_s"):
+            delattr(self.mod.painel, "simular_atraso_ssh_s")
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_01_timeout_waiting_for_ack_returns_failure(self):
@@ -430,6 +437,430 @@ class TestIpcRealSocketIntegration(unittest.TestCase):
             # Garante que o comando foi executado estritamente UMA ÚNICA VEZ
             self.assertEqual(len(comandos_executados), 1)
         finally:
+            worker_running.clear()
+            self.mod.loop_principal_ativo.clear()
+            worker_th.join(timeout=1.0)
+            listener.stop()
+
+    def test_09_slow_ssh_execution_does_not_timeout_or_block_ipc(self):
+        """9. Execução demorada de SSH (3-10s) não provoca timeout do IPC nem bloqueia novas mensagens."""
+        listener = IpcEventListener(
+            socket_path=self.sock_path,
+            on_event=self.mod.on_ipc_event,
+            allowed_uid=os.getuid(),
+            verify_peer_cred=True,
+        )
+        listener.start()
+
+        worker_running = threading.Event()
+        worker_running.set()
+        self.mod.loop_principal_ativo.set()
+
+        def worker_loop():
+            while worker_running.is_set():
+                try:
+                    item = self.mod.fila_intencoes.get(timeout=0.05)
+                    fonte, texto, sid, ev_id, comp_q = item
+                    res = self.mod.processar(texto, fonte=fonte, session_id=sid, event_id=ev_id)
+                    if comp_q is not None:
+                        comp_q.put(res)
+                except queue.Empty:
+                    pass
+
+        worker_th = threading.Thread(target=worker_loop, daemon=True)
+        worker_th.start()
+
+        # Simula SSH demorando 4.0 segundos
+        self.mod.painel.simular_atraso_ssh_s = 4.0
+
+        try:
+            broadcaster = IpcEventBroadcaster(socket_path=self.sock_path, timeout=2.0)
+
+            # 1. Ativação via LG
+            wake_ack = broadcaster.emit_event(
+                source="lg_mic",
+                event_type="wake",
+                text="assistente",
+                session_id="sess-slow-ssh-1",
+            )
+            self.assertIsNotNone(wake_ack)
+            self.assertTrue(wake_ack.get("sucesso"))
+
+            # 2. Comando para desligar fusion (com host ligado simulado)
+            with patch.object(self.mod.painel, "host_ligado", return_value=True):
+                cmd_ack = broadcaster.emit_event(
+                    source="lg_mic",
+                    event_type="comando",
+                    text="desligar fusion",
+                    session_id="sess-slow-ssh-1",
+                )
+            self.assertIsNotNone(cmd_ack)
+            self.assertTrue(cmd_ack.get("sucesso"))
+            self.assertEqual(cmd_ack.get("estado"), "confirmacao")
+
+            # 3. Confirmação do desligamento: SSH demora 4.0s, mas IPC tem timeout de 2.0s
+            t_inicio = time.monotonic()
+            with patch.object(self.mod.painel, "host_ligado", return_value=True):
+                conf_ack = broadcaster.emit_event(
+                    source="lg_mic",
+                    event_type="confirmar",
+                    text="confirmar desligamento",
+                    session_id="sess-slow-ssh-1",
+                    event_id="ev-slow-ssh-conf",
+                )
+            t_duracao = time.monotonic() - t_inicio
+
+            # O ACK deve ser retornado em menos de 1.0s (sem estourar timeout de 2.0s)
+            self.assertLess(t_duracao, 1.0)
+            self.assertIsNotNone(conf_ack)
+            self.assertTrue(conf_ack.get("sucesso"))
+            self.assertEqual(conf_ack.get("event_id"), "ev-slow-ssh-conf")
+            self.assertEqual(conf_ack.get("estado"), "espera")
+            self.assertTrue(conf_ack.get("processado"))
+            self.assertIn(conf_ack.get("status"), ("em_processamento", "concluido"))
+
+            # 4. Verifica que a ação está registrada no controlador
+            status_reg = self.mod.obter_status_acao("ev-slow-ssh-conf")
+            self.assertIsNotNone(status_reg)
+            self.assertIn(status_reg.get("status"), ("em_processamento", "concluido"))
+
+            # 5. Enquanto o SSH de 4s roda em background, novos eventos IPC são aceitos sem bloqueio
+            wake_ack2 = broadcaster.emit_event(
+                source="lg_mic",
+                event_type="wake",
+                text="assistente",
+                session_id="sess-slow-ssh-2",
+            )
+            self.assertIsNotNone(wake_ack2)
+            self.assertTrue(wake_ack2.get("sucesso"))
+            self.assertEqual(wake_ack2.get("estado"), "comando")
+
+            # Aguarda a conclusão do worker SSH (4.0s)
+            time.sleep(4.2)
+            status_final = self.mod.obter_status_acao("ev-slow-ssh-conf")
+            self.assertEqual(status_final.get("status"), "concluido")
+        finally:
+            self.mod.painel.simular_atraso_ssh_s = 0.0
+            worker_running.clear()
+            self.mod.loop_principal_ativo.clear()
+            worker_th.join(timeout=1.0)
+            listener.stop()
+
+    def test_10_client_disconnect_during_processing_safe(self):
+        """10. Desconexão do cliente durante processamento de ação demorada não trava o controlador."""
+        listener = IpcEventListener(
+            socket_path=self.sock_path,
+            on_event=self.mod.on_ipc_event,
+            allowed_uid=os.getuid(),
+            verify_peer_cred=True,
+        )
+        listener.start()
+
+        worker_running = threading.Event()
+        worker_running.set()
+        self.mod.loop_principal_ativo.set()
+
+        def worker_loop():
+            while worker_running.is_set():
+                try:
+                    item = self.mod.fila_intencoes.get(timeout=0.05)
+                    fonte, texto, sid, ev_id, comp_q = item
+                    res = self.mod.processar(texto, fonte=fonte, session_id=sid, event_id=ev_id)
+                    if comp_q is not None:
+                        comp_q.put(res)
+                except queue.Empty:
+                    pass
+
+        worker_th = threading.Thread(target=worker_loop, daemon=True)
+        worker_th.start()
+
+        self.mod.painel.simular_atraso_ssh_s = 1.0
+
+        try:
+            # Prepara o estado em 'confirmacao'
+            self.mod.estado = "confirmacao"
+            self.mod.pendente = "fusion"
+            self.mod.sessao_ativa_id = "sess-disc-1"
+            self.mod.limite = time.monotonic() + 12.0
+
+            # Conecta cliente raw e envia evento, fechando o socket imediatamente
+            raw_client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            raw_client.connect(self.sock_path)
+            ev_id = "ev-disconnect-early-1"
+            payload = {
+                "versao": 1,
+                "event_id": ev_id,
+                "fonte": "lg_mic",
+                "evento": "confirmar",
+                "texto": "confirmar desligamento",
+                "session_id": "sess-disc-1",
+                "timestamp": round(time.time(), 4),
+                "nonce": f"nonce_{ev_id}",
+            }
+            with patch.object(self.mod.painel, "host_ligado", return_value=True):
+                raw_client.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+                # Fecha imediatamente antes de ler a resposta (provoca BrokenPipe/desconexão no listener)
+                raw_client.close()
+
+                # Aguarda a ação em background concluir
+                time.sleep(1.3)
+                status_reg = self.mod.obter_status_acao(ev_id)
+                self.assertIsNotNone(status_reg)
+                self.assertEqual(status_reg.get("status"), "concluido")
+
+                # Garante que nenhum lock permaneceu preso e o controlador continua operando
+                self.assertFalse(self.mod.lock_acoes.locked())
+                self.assertEqual(self.mod.estado, "espera")
+        finally:
+            self.mod.painel.simular_atraso_ssh_s = 0.0
+            worker_running.clear()
+            self.mod.loop_principal_ativo.clear()
+            worker_th.join(timeout=1.0)
+            listener.stop()
+
+    def test_11_incomplete_acks_strictly_rejected(self):
+        """11. Broadcaster exige correspondência de event_id, sucesso, estado e confirmação real."""
+        server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server_sock.bind(self.sock_path)
+        server_sock.listen(5)
+
+        cenarios = [
+            (b'{}\n', "event_id_ausente"),
+            (b'{"sucesso": true, "estado": "espera", "processado": true}\n', "event_id_ausente"),
+            (b'{"event_id": "divergente-id", "sucesso": true, "estado": "espera", "processado": true}\n', "event_id_divergente"),
+            (b'{"event_id": "TARGET_ID", "estado": "espera", "processado": true}\n', "sucesso_ausente"),
+            (b'{"event_id": "TARGET_ID", "sucesso": false, "erro": "recusado_pelo_servidor", "estado": "espera", "processado": true}\n', "recusado_pelo_servidor"),
+            (b'{"event_id": "TARGET_ID", "sucesso": true, "processado": true}\n', "estado_invalido"),
+            (b'{"event_id": "TARGET_ID", "sucesso": true, "estado": "desconhecido", "processado": true}\n', "estado_invalido"),
+            (b'{"event_id": "TARGET_ID", "sucesso": true, "estado": "espera"}\n', "confirmacao_processamento_ausente"),
+        ]
+
+        broadcaster = IpcEventBroadcaster(socket_path=self.sock_path, timeout=1.0)
+
+        import secrets
+        for idx, (resposta_bytes, erro_esperado) in enumerate(cenarios):
+            ev_id = f"ev-strict-{secrets.token_hex(4)}-{idx}"
+            if b"TARGET_ID" in resposta_bytes:
+                real_resp = resposta_bytes.replace(b"TARGET_ID", ev_id.encode("utf-8"))
+            else:
+                real_resp = resposta_bytes
+
+            def _responder(r=real_resp):
+                try:
+                    c, _ = server_sock.accept()
+                    c.recv(1024)
+                    c.sendall(r)
+                    c.close()
+                except Exception:
+                    pass
+
+            th = threading.Thread(target=_responder, daemon=True)
+            th.start()
+
+            res = broadcaster.emit_event(source="lg_mic", event_type="wake", text="assistente", event_id=ev_id)
+            th.join(timeout=0.5)
+
+            self.assertIsNone(res, f"Esperava rejeição para: {real_resp.decode('utf-8')}")
+            self.assertEqual(broadcaster.last_error, erro_esperado)
+
+        server_sock.close()
+
+    def test_12_retransmission_after_timeout_never_duplicates_action(self):
+        """12. Retransmissão após timeout nunca executa uma segunda vez o comando."""
+        listener = IpcEventListener(
+            socket_path=self.sock_path,
+            on_event=self.mod.on_ipc_event,
+            allowed_uid=os.getuid(),
+            verify_peer_cred=True,
+        )
+        listener.start()
+
+        worker_running = threading.Event()
+        worker_running.set()
+        self.mod.loop_principal_ativo.set()
+
+        ssh_execucoes = []
+
+        def worker_loop():
+            while worker_running.is_set():
+                try:
+                    item = self.mod.fila_intencoes.get(timeout=0.05)
+                    fonte, texto, sid, ev_id, comp_q = item
+                    if texto == "confirmar desligamento":
+                        ssh_execucoes.append((fonte, texto, sid, ev_id))
+                    res = self.mod.processar(texto, fonte=fonte, session_id=sid, event_id=ev_id)
+                    if comp_q is not None:
+                        comp_q.put(res)
+                except queue.Empty:
+                    pass
+
+        worker_th = threading.Thread(target=worker_loop, daemon=True)
+        worker_th.start()
+
+        self.mod.estado = "confirmacao"
+        self.mod.pendente = "fusion"
+        self.mod.sessao_ativa_id = "sess-retrans-timeout-1"
+        self.mod.limite = time.monotonic() + 12.0
+
+        ev_id_fixo = "ev-confirm-retrans-test-12"
+
+        try:
+            broadcaster = IpcEventBroadcaster(socket_path=self.sock_path, timeout=2.0)
+            with patch.object(self.mod.painel, "host_ligado", return_value=True):
+                # 1. Primeira emissão
+                ack1 = broadcaster.emit_event(
+                    source="lg_mic",
+                    event_type="confirmar",
+                    text="confirmar desligamento",
+                    session_id="sess-retrans-timeout-1",
+                    event_id=ev_id_fixo,
+                )
+                self.assertIsNotNone(ack1)
+                self.assertTrue(ack1.get("sucesso"))
+                self.assertEqual(len(ssh_execucoes), 1)
+
+                # 2. Retransmissão com MESMO event_id (como ocorreria após timeout na rede)
+                ack2 = broadcaster.emit_event(
+                    source="lg_mic",
+                    event_type="confirmar",
+                    text="confirmar desligamento",
+                    session_id="sess-retrans-timeout-1",
+                    event_id=ev_id_fixo,
+                )
+                self.assertIsNotNone(ack2)
+                self.assertTrue(ack2.get("sucesso"))
+                self.assertTrue(ack2.get("retransmissao"))
+
+                # 3. Reinicialização do Broadcaster (simula cliente reiniciando)
+                broadcaster_novo = IpcEventBroadcaster(socket_path=self.sock_path, timeout=2.0)
+                ack3 = broadcaster_novo.emit_event(
+                    source="lg_mic",
+                    event_type="confirmar",
+                    text="confirmar desligamento",
+                    session_id="sess-retrans-timeout-1",
+                    event_id=ev_id_fixo,
+                )
+                self.assertIsNotNone(ack3)
+                self.assertTrue(ack3.get("sucesso"))
+
+                # Estritamente 1 única execução de SSH foi disparada
+                self.assertEqual(len(ssh_execucoes), 1)
+        finally:
+            worker_running.clear()
+            self.mod.loop_principal_ativo.clear()
+            worker_th.join(timeout=1.0)
+            listener.stop()
+
+    def test_13_action_failure_never_causes_duplicate_execution(self):
+        """13. Falha na execução da ação registra status 'falha' e impede execuções duplicadas."""
+        self.mod.estado = "confirmacao"
+        self.mod.pendente = "fusion"
+        self.mod.sessao_ativa_id = "sess-fail-test-1"
+        self.mod.limite = time.monotonic() + 12.0
+
+        ev_id = "ev-action-fail-test-13"
+
+        def _ssh_falho(cfg):
+            raise RuntimeError("Falha simulada de rede SSH")
+
+        with patch.object(self.mod.painel, "host_ligado", return_value=True), \
+             patch.object(self.mod.painel, "montar_comando_ssh", side_effect=_ssh_falho):
+            res1 = self.mod.processar("confirmar desligamento", fonte="lg_mic", session_id="sess-fail-test-1", event_id=ev_id)
+            time.sleep(0.05)
+
+            # O status da ação deve ser registrado como 'falha'
+            status_reg = self.mod.obter_status_acao(ev_id)
+            self.assertIsNotNone(status_reg)
+            self.assertEqual(status_reg.get("status"), "falha")
+            self.assertIn("Falha simulada de rede SSH", status_reg.get("erro", ""))
+
+            # Tentativa de executar novamente imediatamente é bloqueada por idempotência
+            self.mod.estado = "confirmacao"
+            self.mod.pendente = "fusion"
+            out_retry = io.StringIO()
+            with patch("sys.stdout", out_retry):
+                res2 = self.mod.processar("confirmar desligamento", fonte="me6s", session_id="sess-fail-test-2")
+            self.assertIn("Desligamento de fusion descartado por idempotencia.", out_retry.getvalue())
+            self.assertTrue(res2.get("deduplicado"))
+
+    def test_14_lg_and_me6s_operate_simultaneously_during_slow_action(self):
+        """14. LG e ME6S continuam operando e despertando simultaneamente durante ação SSH em background."""
+        listener = IpcEventListener(
+            socket_path=self.sock_path,
+            on_event=self.mod.on_ipc_event,
+            allowed_uid=os.getuid(),
+            verify_peer_cred=True,
+        )
+        listener.start()
+
+        worker_running = threading.Event()
+        worker_running.set()
+        self.mod.loop_principal_ativo.set()
+
+        def worker_loop():
+            while worker_running.is_set():
+                try:
+                    item = self.mod.fila_intencoes.get(timeout=0.05)
+                    fonte, texto, sid, ev_id, comp_q = item
+                    res = self.mod.processar(texto, fonte=fonte, session_id=sid, event_id=ev_id)
+                    if comp_q is not None:
+                        comp_q.put(res)
+                except queue.Empty:
+                    pass
+
+        worker_th = threading.Thread(target=worker_loop, daemon=True)
+        worker_th.start()
+
+        # Simula SSH demorando 3.5 segundos em background
+        self.mod.painel.simular_atraso_ssh_s = 3.5
+
+        try:
+            broadcaster = IpcEventBroadcaster(socket_path=self.sock_path, timeout=2.0)
+
+            # 1. Prepara e confirma desligamento de fusion
+            self.mod.estado = "confirmacao"
+            self.mod.pendente = "fusion"
+            self.mod.sessao_ativa_id = "sess-bg-active"
+            self.mod.limite = time.monotonic() + 12.0
+
+            with patch.object(self.mod.painel, "host_ligado", return_value=True):
+                conf_ack = broadcaster.emit_event(
+                    source="lg_mic",
+                    event_type="confirmar",
+                    text="confirmar desligamento",
+                    session_id="sess-bg-active",
+                    event_id="ev-bg-ssh-action",
+                )
+            self.assertIsNotNone(conf_ack)
+            self.assertTrue(conf_ack.get("sucesso"))
+            self.assertEqual(conf_ack.get("estado"), "espera")
+
+            # 2. Enquanto o SSH está rodando em background (3.5s), o ME6S ativa fisicamente
+            out_me6s = io.StringIO()
+            with patch("sys.stdout", out_me6s):
+                res_me6s = self.mod.processar("assistente", fonte="me6s")
+            self.assertTrue(res_me6s.get("sucesso"))
+            self.assertEqual(self.mod.estado, "comando")
+            self.assertIn("ATIVADO! Aguardando comando.", out_me6s.getvalue())
+
+            # 3. LG envia comando de ligar ananuke enquanto o SSH de fusion continua rodando
+            cmd_ack = broadcaster.emit_event(
+                source="lg_mic",
+                event_type="comando",
+                text="ligar computador dois",
+                session_id=res_me6s.get("active_session_id"),
+            )
+            self.assertIsNotNone(cmd_ack)
+            self.assertTrue(cmd_ack.get("sucesso"))
+            self.assertEqual(cmd_ack.get("acao"), "ligar")
+            self.assertEqual(cmd_ack.get("alvo"), "ananuke")
+
+            # 4. Aguarda a conclusão final da thread de desligamento
+            time.sleep(3.6)
+            status_reg = self.mod.obter_status_acao("ev-bg-ssh-action")
+            self.assertEqual(status_reg.get("status"), "concluido")
+        finally:
+            self.mod.painel.simular_atraso_ssh_s = 0.0
             worker_running.clear()
             self.mod.loop_principal_ativo.clear()
             worker_th.join(timeout=1.0)
