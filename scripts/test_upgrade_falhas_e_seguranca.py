@@ -69,8 +69,20 @@ if [ "${MOCK_SYSTEMCTL_FAIL_RESTART:-0}" = "1" ] && [ "$cmd" = "restart" ]; then
     exit 1
 fi
 
+# Marca reinícios reais solicitados pelo rollback, mesmo se antes a unidade
+# estava inativa. O arquivo de marcação existe apenas no sandbox de testes.
+if [ "$cmd" = "restart" ] && [ -n "${MOCK_SYSTEMCTL_RESTART_MARKER:-}" ]; then
+    printf '%s\\n' "$*" >> "$MOCK_SYSTEMCTL_RESTART_MARKER"
+fi
+
 case "$cmd" in
-    daemon-reload|restart|is-active)
+    daemon-reload|restart)
+        exit 0
+        ;;
+    is-active)
+        if [ "${MOCK_SYSTEMCTL_INACTIVE_UNTIL_RESTART:-0}" = "1" ] && [ -n "${MOCK_SYSTEMCTL_RESTART_MARKER:-}" ] && [ ! -f "$MOCK_SYSTEMCTL_RESTART_MARKER" ]; then
+            exit 3
+        fi
         exit 0
         ;;
     show)
@@ -287,6 +299,27 @@ esac
         cmd_target_sha = f"sha256sum {self.target_file}"
         curr_target_sha = subprocess.run(cmd_target_sha, shell=True, stdout=subprocess.PIPE, text=True).stdout.split()[0]
         self.assertEqual(curr_target_sha, EXPECTED_V1_SHA, "Rollback automático para v1 deveria ter restaurado o SHA de v1")
+
+    def test_12_rollback_reinicia_servico_mesmo_inativo(self):
+        """A versão restaurada deve ser iniciada mesmo se o restart anterior falhou."""
+        marker = os.path.join(self.tmpdir, "restarts_observados.log")
+        env = self.env.copy()
+        env["MOCK_SYSTEMCTL_INACTIVE_UNTIL_RESTART"] = "1"
+        env["MOCK_SYSTEMCTL_RESTART_MARKER"] = marker
+
+        # Representa uma v2 instalada antes de o serviço falhar.
+        shutil.copy2(CORRIGIDO_PY, self.target_file)
+        res = subprocess.run([ROLLBACK_SCRIPT, "v1"], env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(res.returncode, 0, f"Rollback falhou: {res.stdout}\\n{res.stderr}")
+        self.assertTrue(os.path.isfile(marker), "Rollback não tentou reiniciar um serviço inativo")
+        with open(marker) as mf:
+            chamados = mf.read()
+        self.assertIn("jarvis-voice.service", chamados)
+        self.assertIn("jarvis-audio-gateway.service", chamados)
+        sha_atual = subprocess.run(["sha256sum", self.target_file],
+                                  capture_output=True, text=True, check=True).stdout.split()[0]
+        self.assertEqual(sha_atual, EXPECTED_V1_SHA)
 
     def test_11_rollback_granular_v1_e_original(self):
         """11. Rollback granular restaura v1 e original com validação rigorosa de SHA, permissão 0755 e simulação."""
