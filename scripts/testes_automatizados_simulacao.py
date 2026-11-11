@@ -74,6 +74,7 @@ class IsolatedTestRunner:
         self.cert_file = os.path.join(self.tmp_dir, "test_cert.crt")
         self.key_file = os.path.join(self.tmp_dir, "test_cert.key")
         self.log_file = os.path.join(self.tmp_dir, "test_evidence.log")
+        self.evidence_file = None  # Arquivo definitivo, fora do diretório temporário
 
         self.tcp_port = 18088
         self.gateway_http_port = 18089
@@ -283,10 +284,18 @@ class IsolatedTestRunner:
             except Exception:
                 pass
         self.log("Teardown concluído.")
+        # Preserva só o log do teste em diretório privado; remove certificados,
+        # chave TLS e demais artefatos temporários separadamente.
         try:
+            evidence_dir = Path.home() / ".local" / "state" / "jarvis-dual-mic" / "testes"
+            evidence_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(evidence_dir, 0o700)
+            target = evidence_dir / f"classe-a-{time.strftime('%Y%m%d_%H%M%S')}-{os.getpid()}.log"
+            shutil.copyfile(self.log_file, target)
+            os.chmod(target, 0o600)
+            self.evidence_file = str(target)
+        finally:
             shutil.rmtree(self.tmp_dir, ignore_errors=True)
-        except Exception:
-            pass
 
     # --------------------------------------------------------------------------
     # CENÁRIOS DE TESTE AUTOMATIZADOS
@@ -580,7 +589,9 @@ class IsolatedTestRunner:
 
         url_inject = f"http://127.0.0.1:{self.gateway_http_port}/api/test/inject"
 
-        # Envia confirmação novamente com estado já concluído
+        # Registra o número de ações antes do replay. A contagem não pode
+        # aumentar, mesmo se o gateway retornar um envelope HTTP 200.
+        antes = len(self.controller_state["acoes_executadas"])
         req_dup = urllib.request.Request(
             url_inject,
             data=json.dumps({"fonte": "lg_mic", "evento": "confirm", "texto": "confirmar desligamento"}).encode("utf-8"),
@@ -588,10 +599,15 @@ class IsolatedTestRunner:
         )
         with urllib.request.urlopen(req_dup, timeout=2) as resp:
             res_dup = json.loads(resp.read().decode("utf-8"))
-            # O árbitro deve rejeitar ou o controlador deve indicar sem_confirmacao_pendente
+            # Validação estrita: rejeição explícita pelo árbitro, não apenas
+            # controlador no estado 'espera' (o que já era verdade antes).
             res_resultado = res_dup.get("resultado", {})
-            assert res_resultado.get("valido") is False or self.controller_state["estado"] == "espera", "Duplicidade deveria ter sido bloqueada"
-            self.log("  [OK] Retransmissão de confirmação sem pendência bloqueada com sucesso")
+            assert res_resultado.get("valido") is False, f"Replay não rejeitado explicitamente: {res_dup}"
+            time.sleep(0.1)
+            depois = len(self.controller_state["acoes_executadas"])
+            assert depois == antes, f"Replay duplicou ação: antes={antes}, depois={depois}"
+            assert self.controller_state["estado"] == "espera", "Replay alterou o estado"
+            self.log("  [OK] Replay rejeitado explicitamente; nenhuma ação duplicada")
 
         self.tests_passed += 1
         self.log(f"{GREEN}[PASS]{RESET} Teste 6 concluído com sucesso.")
@@ -626,7 +642,7 @@ class IsolatedTestRunner:
 
         print("=" * 70)
         print(f"RESULTADO: {self.tests_passed}/{self.tests_run} PASSADOS | {self.tests_failed} FALHAS")
-        print(f"Log de evidências gerado em: {self.log_file}")
+        print(f"Log de evidências preservado em: {self.evidence_file}")
         print("=" * 70)
 
         if self.tests_failed > 0:
