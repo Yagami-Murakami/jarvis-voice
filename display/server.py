@@ -438,6 +438,8 @@ class JarvisDisplayHandler(BaseHTTPRequestHandler):
             self._servir_json(self.server.display_state.obter_estado())
         elif caminho == "/api/weather":
             self._servir_json(self.server.weather_service.obter_clima())
+        elif caminho == "/api/mics":
+            self._servir_mics()
         elif caminho == "/api/events":
             self._servir_sse()
         elif caminho.startswith("/static/"):
@@ -568,6 +570,25 @@ class JarvisDisplayHandler(BaseHTTPRequestHandler):
                 mensagem="Aguardando palavra de ativação...",
                 detalhe="",
             )
+
+    def _servir_mics(self) -> None:
+        try:
+            req = urllib.request.Request("http://127.0.0.1:8089/api/mics")
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
+                conteudo = resp.read()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(conteudo)))
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(conteudo)
+        except Exception as e:
+            self._servir_json({
+                "me6s": {"active": True, "error": str(e)},
+                "lg_mic": {"connected": False, "error": str(e)},
+                "gateway_online": False,
+            })
 
     def _servir_sse(self) -> None:
         self.send_response(HTTPStatus.OK)

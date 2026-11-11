@@ -33,10 +33,12 @@ public class MainActivity extends Activity implements
     private static final String KEY_SERVER_URL = "server_url";
     private static final String DEFAULT_SERVER_URL = "http://192.168.0.131:8080";
     public static final String ACTION_PLAY_SOUND = "com.jarvis.display.ACTION_PLAY_SOUND";
+    private static final int REQUEST_RECORD_AUDIO = 200;
 
     private WebView webView;
     private SharedPreferences prefs;
     private SoundManager soundManager;
+    private LgMicCapture micCapture;
     private final Handler handler = new Handler();
     private boolean isErrorState = false;
     private EditText configInput;
@@ -51,6 +53,8 @@ public class MainActivity extends Activity implements
 
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         soundManager = new SoundManager(this);
+        micCapture = new LgMicCapture(this, soundManager);
+        atualizarGatewayHost();
 
         FrameLayout layout = new FrameLayout(this);
         layout.setBackgroundColor(Color.parseColor("#050b14"));
@@ -64,6 +68,7 @@ public class MainActivity extends Activity implements
         configurarWebView();
         registrarReceiver();
 
+        solicitarPermissaoMic();
         carregarPagina();
     }
 
@@ -82,6 +87,9 @@ public class MainActivity extends Activity implements
                 unregisterReceiver(soundReceiver);
             } catch (Exception ignored) {
             }
+        }
+        if (micCapture != null) {
+            micCapture.stop();
         }
     }
 
@@ -118,7 +126,7 @@ public class MainActivity extends Activity implements
 
         webView.setWebChromeClient(new WebChromeClient());
         webView.setWebViewClient(new CustomWebViewClient(this));
-        webView.addJavascriptInterface(new WebAppInterface(this, soundManager), "AndroidHost");
+        webView.addJavascriptInterface(new WebAppInterface(this, soundManager, micCapture), "AndroidHost");
         webView.setOnLongClickListener(this);
     }
 
@@ -190,13 +198,67 @@ public class MainActivity extends Activity implements
                         novaUrl = "http://" + novaUrl;
                     }
                     prefs.edit().putString(KEY_SERVER_URL, novaUrl).apply();
+                    atualizarGatewayHost();
                     carregarPagina();
                 }
             }
         } else if (which == DialogInterface.BUTTON_NEUTRAL) {
-            new WebAppInterface(this, soundManager).openAndroidSettings();
+            new WebAppInterface(this, soundManager, micCapture).openAndroidSettings();
         }
     }
+
+    public void atualizarGatewayHost() {
+        if (micCapture == null) return;
+        String url = prefs.getString(KEY_SERVER_URL, DEFAULT_SERVER_URL);
+        try {
+            java.net.URI uri = new java.net.URI(url);
+            String host = uri.getHost();
+            if (host != null && !host.isEmpty()) {
+                micCapture.setGatewayConfig(host, LgMicCapture.DEFAULT_GATEWAY_PORT, LgMicCapture.DEFAULT_TOKEN);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Falha ao extrair host de " + url + ": " + e.getMessage());
+        }
+    }
+
+    public boolean hasMicPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            return checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        }
+        return true;
+    }
+
+    public void solicitarPermissaoMic() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (!hasMicPermission()) {
+                Log.i(TAG, "Solicitando permissão RECORD_AUDIO em tempo de execução...");
+                requestPermissions(new String[]{android.Manifest.permission.RECORD_AUDIO}, REQUEST_RECORD_AUDIO);
+                return;
+            }
+        }
+        iniciarMicSePermitido();
+    }
+
+    private void iniciarMicSePermitido() {
+        if (hasMicPermission() && micCapture != null) {
+            micCapture.start();
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_RECORD_AUDIO) {
+            if (grantResults.length > 0 && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                Log.i(TAG, "Permissão RECORD_AUDIO concedida pelo usuário.");
+                iniciarMicSePermitido();
+            } else {
+                Log.w(TAG, "Permissão RECORD_AUDIO negada pelo usuário.");
+            }
+        }
+    }
+
+
 
     @Override
     public void onBackPressed() {

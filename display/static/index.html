@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>JARVIS VOICE DISPLAY</title>
-  <link rel="stylesheet" href="style.css?v=20261110-visual3">
+  <link rel="stylesheet" href="style.css?v=20261110-dualmic">
 </head>
 <body class="theme-dark">
   <div id="app" class="app-container">
@@ -137,15 +137,23 @@
 
     </main>
 
-    <!-- RODAPÉ INFORMATIVO -->
+    <!-- RODAPÉ INFORMATIVO (INDICADORES DE MICROFONE DUPLO) -->
     <footer class="bottom-bar">
       <div class="footer-item">
         <span class="footer-label">Terminal:</span>
         <span class="footer-val">LG-X230</span>
       </div>
-      <div class="footer-item">
-        <span class="footer-label">Voz:</span>
-        <span class="footer-val">ME6S USB</span>
+      <div class="footer-mics">
+        <div id="mic-me6s-badge" class="mic-status-badge mic-active" title="Microfone USB ME6S (Proxmox)">
+          <span class="mic-dot"></span>
+          <span class="mic-name">ME6S:</span>
+          <span id="mic-me6s-status" class="mic-val">Ativo</span>
+        </div>
+        <div id="mic-lg-badge" class="mic-status-badge mic-active" title="Microfone Interno LG-X230 (Toque para silenciar/ativar)">
+          <span class="mic-dot"></span>
+          <span class="mic-name">Mic LG:</span>
+          <span id="mic-lg-status" class="mic-val">Ativo</span>
+        </div>
       </div>
     </footer>
 
@@ -188,6 +196,6 @@
     </aside>
   </div>
 
-  <script src="app.js?v=20261110-visual2"></script>
+  <script src="app.js?v=20261110-dualmic"></script>
 </body>
 </html>

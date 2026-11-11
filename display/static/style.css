@@ -585,6 +585,93 @@ html, body {
   font-weight: 500;
 }
 
+.footer-mics {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mic-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 0.65rem;
+  transition: all 0.25s ease;
+  user-select: none;
+}
+
+.mic-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #64748b;
+  transition: all 0.25s ease;
+}
+
+.mic-status-badge.mic-active .mic-dot {
+  background: #10b981;
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.7);
+}
+
+.mic-status-badge.mic-active {
+  border-color: rgba(16, 185, 129, 0.3);
+}
+
+.mic-status-badge.mic-active .mic-val {
+  color: #10b981;
+  font-weight: 600;
+}
+
+.mic-status-badge.mic-muted .mic-dot {
+  background: #ffd166;
+  box-shadow: 0 0 6px rgba(255, 209, 102, 0.7);
+}
+
+.mic-status-badge.mic-muted {
+  border-color: rgba(255, 209, 102, 0.3);
+}
+
+.mic-status-badge.mic-muted .mic-val {
+  color: #ffd166;
+  font-weight: 600;
+}
+
+.mic-status-badge.mic-offline .mic-dot {
+  background: #ef4444;
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.7);
+}
+
+.mic-status-badge.mic-offline {
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.mic-status-badge.mic-offline .mic-val {
+  color: #ef4444;
+  font-weight: 600;
+}
+
+.mic-name {
+  color: var(--text-muted);
+}
+
+.mic-val {
+  color: var(--text-main);
+  transition: color 0.2s;
+}
+
+#mic-lg-badge {
+  cursor: pointer;
+}
+
+#mic-lg-badge:active {
+  transform: scale(0.96);
+  background: rgba(255, 255, 255, 0.05);
+}
+
 /* ==========================================================================
    GAVETA DEMO / SIMULADOR
    ========================================================================== */

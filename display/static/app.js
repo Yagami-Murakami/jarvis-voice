@@ -63,6 +63,12 @@
     activeDetail: document.getElementById("active-detail"),
     targetCard: document.getElementById("target-computer-card"),
     targetName: document.getElementById("target-computer-name"),
+
+    // Microfones Duplos
+    micMe6sBadge: document.getElementById("mic-me6s-badge"),
+    micMe6sStatus: document.getElementById("mic-me6s-status"),
+    micLgBadge: document.getElementById("mic-lg-badge"),
+    micLgStatus: document.getElementById("mic-lg-status"),
   };
 
   // =========================================================================
@@ -445,8 +451,95 @@
     });
   }
 
+  // =========================================================================
+  // GESTÃO DE ESTADO DOS MICROFONES DUPLOS (ME6S + LG)
+  // =========================================================================
+  function atualizarMicrofoneLgUI(ativo, texto, estadoClasse) {
+    if (!dom.micLgBadge || !dom.micLgStatus) return;
+    dom.micLgBadge.classList.remove("mic-active", "mic-muted", "mic-offline");
+    dom.micLgBadge.classList.add(estadoClasse);
+    dom.micLgStatus.textContent = texto;
+  }
+
+  function atualizarMicrofoneMe6sUI(ativo, texto) {
+    if (!dom.micMe6sBadge || !dom.micMe6sStatus) return;
+    dom.micMe6sBadge.classList.remove("mic-active", "mic-muted", "mic-offline");
+    if (ativo) {
+      dom.micMe6sBadge.classList.add("mic-active");
+      dom.micMe6sStatus.textContent = texto || "Ativo";
+    } else {
+      dom.micMe6sBadge.classList.add("mic-offline");
+      dom.micMe6sStatus.textContent = texto || "Offline";
+    }
+  }
+
+  function atualizarStatusMicrofones() {
+    // 1. Atualiza estado do Mic LG a partir da ponte AndroidHost (se disponível)
+    if (window.AndroidHost && window.AndroidHost.getMicDiagnostics) {
+      try {
+        var diagRaw = window.AndroidHost.getMicDiagnostics();
+        var diag = JSON.parse(diagRaw);
+        var perm = (diag.permission !== undefined) ? diag.permission : diag.permissao;
+        var hab = (diag.enabled !== undefined) ? diag.enabled : diag.habilitado;
+        var conn = (diag.connected !== undefined) ? diag.connected : diag.conectado;
+        if (!perm) {
+          atualizarMicrofoneLgUI(false, "Sem Permissão", "mic-offline");
+        } else if (!hab) {
+          atualizarMicrofoneLgUI(false, "Mudo", "mic-muted");
+        } else if (conn) {
+          atualizarMicrofoneLgUI(true, "Ativo", "mic-active");
+        } else {
+          atualizarMicrofoneLgUI(false, "Conectando...", "mic-offline");
+        }
+      } catch (err) {
+        console.warn("Falha ao ler diagnósticos locais do microfone:", err);
+      }
+    }
+
+    // 2. Consulta a API /api/mics do Gateway de Áudio (local ou servidor)
+    fetch("/api/mics", { cache: "no-store" })
+      .then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        if (data && data.me6s) {
+          atualizarMicrofoneMe6sUI(data.me6s.active !== false, data.me6s.active ? "Ativo" : "Offline");
+        }
+        // Se não estamos no AndroidHost, usa os dados do servidor para o Mic LG
+        if (!window.AndroidHost && data && data.lg_mic) {
+          if (data.lg_mic.connected) {
+            atualizarMicrofoneLgUI(true, "Ativo", "mic-active");
+          } else {
+            atualizarMicrofoneLgUI(false, "Offline", "mic-offline");
+          }
+        }
+      })
+      .catch(function (err) {
+        if (state.lastStatus !== "offline") {
+          atualizarMicrofoneMe6sUI(true, "Ativo");
+        }
+      });
+  }
+
+  function alternarMudoMicLg() {
+    if (window.AndroidHost && window.AndroidHost.isMicEnabled && window.AndroidHost.setMicEnabled) {
+      var ativo = window.AndroidHost.isMicEnabled();
+      var novoEstado = !ativo;
+      window.AndroidHost.setMicEnabled(novoEstado);
+      if (window.AndroidHost.showToast) {
+        window.AndroidHost.showToast(novoEstado ? "Microfone LG ativado" : "Microfone LG silenciado");
+      }
+      atualizarStatusMicrofones();
+    }
+  }
+
   function configurarEventos() {
     dom.btnSound.addEventListener("click", alternarSom);
+
+    if (dom.micLgBadge) {
+      dom.micLgBadge.addEventListener("click", alternarMudoMicLg);
+    }
 
     dom.btnDemoToggle.addEventListener("click", function () {
       dom.demoDrawer.classList.toggle("open");
@@ -487,6 +580,9 @@
 
     configurarEventos();
     iniciarSSE();
+
+    atualizarStatusMicrofones();
+    setInterval(atualizarStatusMicrofones, 3000);
 
     state.shiftTimer = setInterval(aplicarPixelShift, 60 * 1000); // 1 min
   }

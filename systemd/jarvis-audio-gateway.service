@@ -1,0 +1,16 @@
+[Unit]
+Description=Jarvis Dual-Mic Audio Gateway & Session Arbitrator
+After=network.target jarvis-voice.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/jarvis-voice/gateway
+ExecStart=/opt/jarvis-voice/venv/bin/python /opt/jarvis-voice/gateway/audio_gateway.py --tcp-port 8088 --http-port 8089 --host 0.0.0.0 --model /opt/jarvis-voice/vosk-model-small-pt-0.3
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

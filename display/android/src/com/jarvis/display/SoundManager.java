@@ -20,6 +20,7 @@ public class SoundManager {
     private float currentVolume = 0.85f;
     private boolean isMuted = false;
     private long lastWakeTime = 0;
+    private volatile long echoGuardUntilMs = 0;
 
     // Buffers PCM sintetizados em memória
     private byte[] pcmWake;
@@ -93,11 +94,23 @@ public class SoundManager {
         return this.isMuted;
     }
 
+    public boolean isEchoGuardActive() {
+        return System.currentTimeMillis() < echoGuardUntilMs;
+    }
+
+    public long getEchoGuardUntilMs() {
+        return echoGuardUntilMs;
+    }
+
     private void tocarPcm(final byte[] pcmData, final String nomeSom) {
         if (isMuted || pcmData == null || pcmData.length == 0) {
             Log.d(TAG, "Som " + nomeSom + " não reproduzido (silenciado ou dados nulos).");
             return;
         }
+
+        // Ativa Echo Guard pelo tempo de reprodução mais 450ms de margem de eco
+        int duracaoMs = (pcmData.length * 1000) / (SAMPLE_RATE * 2);
+        echoGuardUntilMs = System.currentTimeMillis() + duracaoMs + 450;
 
         // Executa em thread separada para não causar atraso na UI
         new Thread(new SoundPlaybackRunnable(pcmData, currentVolume, nomeSom)).start();

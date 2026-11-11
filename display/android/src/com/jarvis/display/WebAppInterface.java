@@ -12,11 +12,13 @@ import android.widget.Toast;
 public class WebAppInterface {
     private final MainActivity activity;
     private final SoundManager soundManager;
+    private final LgMicCapture micCapture;
     private final Handler mainHandler;
 
-    public WebAppInterface(MainActivity activity, SoundManager soundManager) {
+    public WebAppInterface(MainActivity activity, SoundManager soundManager, LgMicCapture micCapture) {
         this.activity = activity;
         this.soundManager = soundManager;
+        this.micCapture = micCapture;
         this.mainHandler = new Handler(Looper.getMainLooper());
     }
 
@@ -96,6 +98,55 @@ public class WebAppInterface {
     @JavascriptInterface
     public String getDeviceInfo() {
         return "Model=" + Build.MODEL + ";SDK=" + Build.VERSION.SDK_INT;
+    }
+
+    @JavascriptInterface
+    public boolean hasMicPermission() {
+        return activity.hasMicPermission();
+    }
+
+    @JavascriptInterface
+    public void requestMicPermission() {
+        activity.solicitarPermissaoMic();
+    }
+
+    @JavascriptInterface
+    public boolean isMicEnabled() {
+        return micCapture != null && micCapture.isMicEnabled();
+    }
+
+    @JavascriptInterface
+    public void setMicEnabled(boolean enabled) {
+        if (micCapture != null) {
+            micCapture.setMicEnabled(enabled);
+        }
+    }
+
+    @JavascriptInterface
+    public boolean isMicConnected() {
+        return micCapture != null && micCapture.isConnected();
+    }
+
+    @JavascriptInterface
+    public float getMicRms() {
+        return micCapture != null ? micCapture.getCurrentRms() : 0.0f;
+    }
+
+    @JavascriptInterface
+    public String getMicDiagnostics() {
+        boolean enabled = micCapture != null && micCapture.isMicEnabled();
+        boolean connected = micCapture != null && micCapture.isConnected();
+        boolean permission = activity.hasMicPermission();
+        float rms = micCapture != null ? micCapture.getCurrentRms() : 0.0f;
+        long sent = micCapture != null ? micCapture.getTotalPacketsSent() : 0;
+        long dropped = micCapture != null ? micCapture.getTotalPacketsDropped() : 0;
+
+        return "{\"enabled\":" + enabled +
+                ",\"connected\":" + connected +
+                ",\"permission\":" + permission +
+                ",\"rms\":" + String.format(java.util.Locale.US, "%.3f", rms) +
+                ",\"sent\":" + sent +
+                ",\"dropped\":" + dropped + "}";
     }
 
     private static class BrightnessRunnable implements Runnable {

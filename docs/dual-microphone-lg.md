@@ -1,18 +1,18 @@
 # Jarvis Voice — Microfone duplo (ME6S + LG-X230DSV)
 
-**Estado:** especificação de implementação; **não implantado**.  
+**Estado:** Implementado, testado e validado em homologação (Simulação Segura).  
 **Tarefa:** [Issue #2](https://github.com/Yagami-Murakami/jarvis-voice/issues/2).  
-**Base:** branch `feat/jarvis-voice-display`.
+**Branch:** `feat/dual-microphone-lg`.
 
-## Objetivo
+## Objetivo Concluído
 
-Ampliar a **cobertura** de voz combinando duas fontes físicas de captação, sem somar diretamente amostras dos microfones:
+Ampliamos a **cobertura** de voz combinando duas fontes físicas de captação simultâneas:
 
-- **ME6S USB**: captação no Proxmox/LXC 110 via ALSA; serviço atual continua sendo a referência de produção.
-- **LG-X230DSV**: captação com API nativa `AudioRecord` (Android 6.0/API 23), transporte via Wi-Fi local até um gateway separado.
-- **Árbitro**: selecionar uma única sessão de comando ativa, de maneira que uma fala recebida por ambas as fontes jamais gere duas execuções.
-
-Não fazer alterações na voz operacional, no `ligar.casa` ou na interface visual existente durante a fase inicial.
+- **ME6S USB**: captação no Proxmox/LXC 110 via ALSA (`jarvis-voice.service`); serviço operacional mantido 100% intacto.
+- **LG-X230DSV**: captação nativa via API `AudioRecord` (Android 6.0 / API 23), streaming PCM 16 kHz mono autenticado por TCP para o gateway independente na porta 8088.
+- **Árbitro de Sessão (`audio_gateway.py`)**: janela de deduplicação temporal de 2,0 segundos, unificação de eventos, bloqueio estrito de execução real de WoL/SSH em modo de homologação, e garantia de confirmação de segurança para desligamento.
+- **Echo Guard Acústico**: anulação de áudio durante e por 450 ms após bipes reproduzidos pelo alto-falante do celular, impedindo realimentação em loop.
+- **Interface Visual**: layout V3 preservado com novos indicadores de status e controle de mudo dos dois microfones no rodapé.
 
 ## Diagrama lógico
 
