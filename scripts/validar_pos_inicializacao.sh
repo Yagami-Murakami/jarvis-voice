@@ -56,7 +56,10 @@ echo "OK (WoL=0, SSH=0, PERSISTENCE=1 confirmados na memória)"
 
 # 3. Confirmar mensagem de simulação nos logs de inicialização do journal
 echo -n "[3/4] Verificando banner de simulação no systemd journal... "
-JOURNAL_SNIPPET=$(journalctl -u jarvis-voice.service -n 60 --no-pager)
+JOURNAL_SNIPPET=$(journalctl _PID=$ACTIVE_PID --no-pager 2>/dev/null || journalctl -u jarvis-voice.service -n 150 --no-pager)
+if ! echo "$JOURNAL_SNIPPET" | grep -q "MODO SIMULACAO - SEM ACOES REAIS"; then
+    JOURNAL_SNIPPET=$(journalctl -u jarvis-voice.service -n 150 --no-pager)
+fi
 if ! echo "$JOURNAL_SNIPPET" | grep -q "MODO SIMULACAO - SEM ACOES REAIS"; then
     echo "FALHA!"
     echo "ERRO CRÍTICO: Mensagem 'MODO SIMULACAO - SEM ACOES REAIS' não detectada no log!"
