@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # SCRIPT DE UPGRADE SEGURO — JARVIS VOICE DUAL-MIC (ETAPA 1: SIMULAÇÃO)
+# Homologado exclusivamente para a transição: SIMULAÇÃO v1 -> SIMULAÇÃO v2
 # Gera a nova versão a partir do backup original verificado (c51d58e6...)
 # NUNCA aplica o patch diretamente sobre arquivo já modificado.
-# Executa pre-flight obrigatório, substituição atômica e auditoria pós-inicialização.
+# Executa pre-flight obrigatório, validação estrita de backups, substituição
+# verdadeiramente atômica, verificação de permissões/owner e auditoria pós-reinício.
 # ==============================================================================
 set -euo pipefail
 
@@ -34,6 +36,7 @@ fi
 
 echo "========================================================================"
 echo "JARVIS VOICE — PROCEDIMENTO DE UPGRADE SEGURO DA ETAPA 1 (SIMULAÇÃO)"
+echo "Escopo: Upgrade v1 (f6c72731...) -> v2 (810aca6e...)"
 echo "Modo: $( [ "$APPLY" -eq 1 ] && echo "APLICAÇÃO EFETIVA (--apply)" || echo "VERIFICAÇÃO / DRY-RUN" )"
 echo "========================================================================"
 
@@ -58,11 +61,11 @@ echo ">>> FASE 1: Pre-flight concluído com sucesso."
 echo ""
 
 # ==============================================================================
-# FASE 2: AUDITORIA DE VERSÕES CONHECIDAS E INTEGRIDADE DE BACKUPS
+# FASE 2: VALIDAÇÃO RESTRITA DA VERSÃO V1 E INTEGRIDADE PRÉVIA DE BACKUPS
 # ==============================================================================
 echo ">>> FASE 2: Validando versão instalada e integridade dos backups..."
 
-# 1. Auditoria do arquivo operacional instalado — REJEITA HASH DESCONHECIDO
+# 1. Auditoria do arquivo operacional instalado — RESTRITO EXCLUSIVAMENTE A V1
 echo -n "[1/7] Inspecionando hash do arquivo operacional instalado... "
 if [ ! -f "$TARGET_FILE" ]; then
     echo "FALHA!"
@@ -71,25 +74,30 @@ if [ ! -f "$TARGET_FILE" ]; then
 fi
 CURRENT_SHA=$(sha256sum "$TARGET_FILE" | awk '{print $1}')
 
-if [ "$CURRENT_SHA" != "$EXPECTED_ORIGINAL_SHA" ] && [ "$CURRENT_SHA" != "$EXPECTED_V1_SHA" ]; then
+if [ "$CURRENT_SHA" = "$EXPECTED_ORIGINAL_SHA" ]; then
     echo "FALHA!"
-    echo "ERRO CRÍTICO: SHA-256 do arquivo operacional atual ($CURRENT_SHA) é DESCONHECIDO!"
-    echo "  Versões conhecidas e homologadas para upgrade:"
-    echo "    - Original de fábrica: $EXPECTED_ORIGINAL_SHA"
-    echo "    - Simulação v1:        $EXPECTED_V1_SHA"
-    echo "Procedimento abortado imediatamente para impedir corrupção (fail-closed)."
+    echo "ERRO CRÍTICO: O arquivo operacional atual está na versão original de fábrica ($CURRENT_SHA)!"
+    echo "  Este script é homologado exclusivamente para o upgrade v1 -> v2."
+    echo "  Não é permitido aplicar o upgrade v1 -> v2 diretamente sobre o controlador de fábrica."
+    echo "Procedimento de upgrade abortado imediatamente (fail-closed)."
+    exit 1
+elif [ "$CURRENT_SHA" != "$EXPECTED_V1_SHA" ]; then
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: SHA-256 do arquivo operacional atual ($CURRENT_SHA) é DESCONHECIDO ou incompatível!"
+    echo "  Versão requerida para este upgrade: Simulação v1 ($EXPECTED_V1_SHA)"
+    echo "Procedimento abortado imediatamente (fail-closed)."
     exit 1
 fi
-echo "OK (SHA conhecido: $CURRENT_SHA)"
+echo "OK (Versão ativa confirmada: Simulação v1 - $CURRENT_SHA)"
 
-# 2. Preservação e validação de backups (Original e V1)
-echo -n "[2/7] Validando integridade dos backups (Original e V1)... "
+# 2. Preservação e validação prévia obrigatória dos backups (Original e V1)
+echo -n "[2/7] Validando existência e SHA-256 prévios dos backups (Original e V1)... "
+# Backup Original
 if [ ! -f "$BACKUP_ORIGINAL" ] && [ ! -f "$BACKUP_EXTERNAL" ]; then
     echo "FALHA!"
     echo "ERRO CRÍTICO: Backup original inexistente em $BACKUP_ORIGINAL e $BACKUP_EXTERNAL!"
     exit 1
 fi
-
 SOURCE_ORIGINAL="$BACKUP_ORIGINAL"
 if [ ! -f "$SOURCE_ORIGINAL" ]; then
     SOURCE_ORIGINAL="$BACKUP_EXTERNAL"
@@ -101,25 +109,25 @@ if [ "$ORIG_SHA" != "$EXPECTED_ORIGINAL_SHA" ]; then
     exit 1
 fi
 
-# Se estiver na versão v1, garante que backup_v1 existe e é íntegro
-if [ "$CURRENT_SHA" = "$EXPECTED_V1_SHA" ]; then
-    if [ ! -f "$BACKUP_V1" ]; then
-        echo -n "Criando $BACKUP_V1... "
-        cp -p "$TARGET_FILE" "$BACKUP_V1"
-        if [ -d "$(dirname "$BACKUP_V1_EXTERNAL")" ]; then
-            cp -p "$TARGET_FILE" "$BACKUP_V1_EXTERNAL"
-            chmod 0440 "$BACKUP_V1_EXTERNAL" 2>/dev/null || true
-        fi
-        chmod 0440 "$BACKUP_V1" 2>/dev/null || true
-    fi
-    V1_SHA=$(sha256sum "$BACKUP_V1" | awk '{print $1}')
-    if [ "$V1_SHA" != "$EXPECTED_V1_SHA" ]; then
-        echo "FALHA!"
-        echo "ERRO CRÍTICO: Backup V1 divergente ($V1_SHA vs $EXPECTED_V1_SHA)!"
-        exit 1
-    fi
+# Backup V1 (obrigatório para rollback seguro)
+if [ ! -f "$BACKUP_V1" ] && [ ! -f "$BACKUP_V1_EXTERNAL" ]; then
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: Backup da versão v1 inexistente em $BACKUP_V1 e $BACKUP_V1_EXTERNAL!"
+    echo "  O backup v1 previamente homologado é obrigatório para garantir reversibilidade."
+    exit 1
 fi
-echo "OK (Original e V1 íntegros)"
+SOURCE_V1="$BACKUP_V1"
+if [ ! -f "$SOURCE_V1" ]; then
+    SOURCE_V1="$BACKUP_V1_EXTERNAL"
+fi
+V1_SHA=$(sha256sum "$SOURCE_V1" | awk '{print $1}')
+if [ "$V1_SHA" != "$EXPECTED_V1_SHA" ]; then
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: SHA-256 do backup v1 divergente ($V1_SHA vs $EXPECTED_V1_SHA)!"
+    echo "  O backup v1 para rollback está corrompido ou inconsistente."
+    exit 1
+fi
+echo "OK (Original: $ORIG_SHA, V1: $V1_SHA)"
 
 # 3. Verificação das variáveis de simulação no systemd ANTES da aplicação
 echo -n "[3/7] Verificando configurações systemd de simulação obrigatória (pré-upgrade)... "
@@ -219,14 +227,46 @@ fi
 echo ""
 echo ">>> FASE 3: Aplicando nova versão operacional (--apply solicitado)..."
 
+# Identificação rigorosa do usuário e grupo alvo (não ignora erros)
+if id tuninho >/dev/null 2>&1; then
+    TARGET_USER="tuninho"
+    TARGET_GROUP="tuninho"
+else
+    TARGET_USER="$(id -un)"
+    TARGET_GROUP="$(id -gn)"
+fi
+
 # Substituição atômica via mktemp no mesmo diretório de destino e rename (mv -f)
-# Evita escrita direta / truncamento in-place em arquivo operacional em execução
 echo -n "[1/4] Realizando substituição verdadeiramente atômica do controlador... "
 TARGET_DIR="$(dirname "$TARGET_FILE")"
 TMP_ATOMIC=$(mktemp "${TARGET_DIR}/.jarvis-operacional.py.tmp.XXXXXX")
+
 cp "$TMP_BUILD" "$TMP_ATOMIC"
-chmod 0755 "$TMP_ATOMIC"
-chown tuninho:tuninho "$TMP_ATOMIC" 2>/dev/null || true
+
+# Definir e verificar permissões rigorosamente (sem ignorar erros)
+if ! chmod 0755 "$TMP_ATOMIC"; then
+    rm -f "$TMP_ATOMIC"
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: Falha ao executar chmod 0755 em $TMP_ATOMIC!"
+    exit 1
+fi
+
+if ! chown "${TARGET_USER}:${TARGET_GROUP}" "$TMP_ATOMIC"; then
+    rm -f "$TMP_ATOMIC"
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: Falha ao executar chown ${TARGET_USER}:${TARGET_GROUP} em $TMP_ATOMIC!"
+    exit 1
+fi
+
+# Verificação das permissões e proprietário antes do rename
+TMP_PERMS=$(stat -c "%a" "$TMP_ATOMIC")
+TMP_OWNER=$(stat -c "%U:%G" "$TMP_ATOMIC")
+if [ "$TMP_PERMS" != "755" ] || [ "$TMP_OWNER" != "${TARGET_USER}:${TARGET_GROUP}" ]; then
+    rm -f "$TMP_ATOMIC"
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: Permissões ($TMP_PERMS) ou proprietário ($TMP_OWNER) incorretos em $TMP_ATOMIC!"
+    exit 1
+fi
 
 ATOMIC_SHA=$(sha256sum "$TMP_ATOMIC" | awk '{print $1}')
 if [ "$ATOMIC_SHA" != "$EXPECTED_NEW_SHA" ]; then
@@ -236,33 +276,60 @@ if [ "$ATOMIC_SHA" != "$EXPECTED_NEW_SHA" ]; then
     exit 1
 fi
 
-# POSIX rename (atômico): arquivo operacional nunca fica em estado intermediário
+# POSIX rename (atômico): substituição instantânea sem truncamento
 mv -f "$TMP_ATOMIC" "$TARGET_FILE"
+
 FINAL_SHA=$(sha256sum "$TARGET_FILE" | awk '{print $1}')
+FINAL_PERMS=$(stat -c "%a" "$TARGET_FILE")
+FINAL_OWNER=$(stat -c "%U:%G" "$TARGET_FILE")
+
 if [ "$FINAL_SHA" != "$EXPECTED_NEW_SHA" ]; then
     echo "FALHA!"
     echo "ERRO CRÍTICO: SHA-256 final de $TARGET_FILE divergente após substituição!"
     exit 1
 fi
-echo "OK (Substituição atômica concluída com SHA: $FINAL_SHA)"
+if [ "$FINAL_PERMS" != "755" ] || [ "$FINAL_OWNER" != "${TARGET_USER}:${TARGET_GROUP}" ]; then
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: Verificação pós-substituição falhou (Permissões: $FINAL_PERMS, Proprietário: $FINAL_OWNER)!"
+    exit 1
+fi
+echo "OK (Substituição atômica concluída: SHA $FINAL_SHA, 0755, $FINAL_OWNER)"
 
-# Reinicialização dos serviços
+# Reinicialização dos serviços com captura explícita de erro e gatilho de rollback
 echo -n "[2/4] Reiniciando serviços operacionais no systemd... "
 if command -v systemctl >/dev/null 2>&1; then
-    systemctl daemon-reload
-    systemctl restart jarvis-voice.service
-    systemctl restart jarvis-audio-gateway.service
+    if ! systemctl daemon-reload; then
+        echo "FALHA!"
+        echo "ERRO CRÍTICO: 'systemctl daemon-reload' falhou! Acionando rollback para v1..."
+        "$ROLLBACK_SCRIPT" v1
+        exit 1
+    fi
+
+    if ! systemctl restart jarvis-voice.service; then
+        echo "FALHA!"
+        echo "ERRO CRÍTICO: 'systemctl restart jarvis-voice.service' falhou! Acionando rollback para v1..."
+        "$ROLLBACK_SCRIPT" v1
+        exit 1
+    fi
+
+    if ! systemctl restart jarvis-audio-gateway.service; then
+        echo "FALHA!"
+        echo "ERRO CRÍTICO: 'systemctl restart jarvis-audio-gateway.service' falhou! Acionando rollback para v1..."
+        "$ROLLBACK_SCRIPT" v1
+        exit 1
+    fi
+
     sleep 2
 
     if ! systemctl is-active --quiet jarvis-voice.service; then
         echo "FALHA!"
-        echo "ERRO CRÍTICO: jarvis-voice.service falhou ao reiniciar! Acionando rollback para v1..."
+        echo "ERRO CRÍTICO: jarvis-voice.service não está ativo após reinício! Acionando rollback para v1..."
         "$ROLLBACK_SCRIPT" v1
         exit 1
     fi
     if ! systemctl is-active --quiet jarvis-audio-gateway.service; then
         echo "FALHA!"
-        echo "ERRO CRÍTICO: jarvis-audio-gateway.service falhou ao reiniciar! Acionando rollback para v1..."
+        echo "ERRO CRÍTICO: jarvis-audio-gateway.service não está ativo após reinício! Acionando rollback para v1..."
         "$ROLLBACK_SCRIPT" v1
         exit 1
     fi

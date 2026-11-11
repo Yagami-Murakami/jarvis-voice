@@ -5,7 +5,7 @@
 # ou para o backup original de fábrica (original: c51d58e6...).
 # NUNCA REATIVA WAKE-ON-LAN OU SSH REAIS.
 # Preserva estritamente JARVIS_WOL_REAL=0, JARVIS_SSH_REAL=0 e JARVIS_REQUIRE_PERSISTENCE=1.
-# Realiza substituição verdadeiramente atômica do arquivo operacional.
+# Realiza substituição verdadeiramente atômica e verifica permissões e proprietário.
 # ==============================================================================
 set -euo pipefail
 
@@ -91,30 +91,68 @@ else
     echo "AVISO (Diretório $DROPIN_DIR não configurado ou mock)"
 fi
 
-# 3. Restaurar arquivo operacional via substituição atômica
+# 3. Restaurar arquivo operacional via substituição atômica com validação de permissão e proprietário
 echo -n "[3/5] Restaurando $TARGET_FILE a partir de $SOURCE_BACKUP de forma atômica... "
+if id tuninho >/dev/null 2>&1; then
+    TARGET_USER="tuninho"
+    TARGET_GROUP="tuninho"
+else
+    TARGET_USER="$(id -un)"
+    TARGET_GROUP="$(id -gn)"
+fi
+
 TARGET_DIR="$(dirname "$TARGET_FILE")"
 TMP_ATOMIC=$(mktemp "${TARGET_DIR}/.jarvis-operacional.py.rollback.XXXXXX")
+
 cp "$SOURCE_BACKUP" "$TMP_ATOMIC"
-chmod 0755 "$TMP_ATOMIC"
-chown tuninho:tuninho "$TMP_ATOMIC" 2>/dev/null || true
+
+if ! chmod 0755 "$TMP_ATOMIC"; then
+    rm -f "$TMP_ATOMIC"
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: Falha ao executar chmod 0755 no arquivo de rollback!"
+    exit 1
+fi
+
+if ! chown "${TARGET_USER}:${TARGET_GROUP}" "$TMP_ATOMIC"; then
+    rm -f "$TMP_ATOMIC"
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: Falha ao executar chown ${TARGET_USER}:${TARGET_GROUP} no arquivo de rollback!"
+    exit 1
+fi
+
+TMP_PERMS=$(stat -c "%a" "$TMP_ATOMIC")
+TMP_OWNER=$(stat -c "%U:%G" "$TMP_ATOMIC")
+if [ "$TMP_PERMS" != "755" ] || [ "$TMP_OWNER" != "${TARGET_USER}:${TARGET_GROUP}" ]; then
+    rm -f "$TMP_ATOMIC"
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: Permissão ou proprietário incorretos no arquivo de restauração!"
+    exit 1
+fi
 
 ATOMIC_RESTORE_SHA=$(sha256sum "$TMP_ATOMIC" | awk '{print $1}')
 if [ "$ATOMIC_RESTORE_SHA" != "$EXPECTED_RESTORE_SHA" ]; then
     rm -f "$TMP_ATOMIC"
     echo "FALHA!"
-    echo "ERRO CRÍTICO: Hash do arquivo atômico temporário divergente!"
+    echo "ERRO CRÍTICO: Hash do arquivo atômico temporário de restauração divergente!"
     exit 1
 fi
 
 mv -f "$TMP_ATOMIC" "$TARGET_FILE"
 RESTORED_SHA=$(sha256sum "$TARGET_FILE" | awk '{print $1}')
+RESTORED_PERMS=$(stat -c "%a" "$TARGET_FILE")
+RESTORED_OWNER=$(stat -c "%U:%G" "$TARGET_FILE")
+
 if [ "$RESTORED_SHA" != "$EXPECTED_RESTORE_SHA" ]; then
     echo "FALHA!"
     echo "ERRO CRÍTICO: Hash do arquivo restaurado divergente de $EXPECTED_RESTORE_SHA!"
     exit 1
 fi
-echo "OK ($RESTORED_SHA)"
+if [ "$RESTORED_PERMS" != "755" ] || [ "$RESTORED_OWNER" != "${TARGET_USER}:${TARGET_GROUP}" ]; then
+    echo "FALHA!"
+    echo "ERRO CRÍTICO: Permissões ou proprietário incorretos no arquivo restaurado ($RESTORED_PERMS, $RESTORED_OWNER)!"
+    exit 1
+fi
+echo "OK (Restaurado: SHA $RESTORED_SHA, 0755, $RESTORED_OWNER)"
 
 # 4. Reiniciar serviços operacionais
 echo -n "[4/5] Reiniciando jarvis-voice.service... "

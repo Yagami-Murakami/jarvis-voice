@@ -3,12 +3,16 @@
 Testes de Falhas e Segurança do Procedimento de Upgrade da Etapa 1
 Verifica os cenários de falhas de segurança exigidos:
 1. Rejeição imediata de SHA desconhecido (fail-closed).
-2. Interrupção por pre-flight com falha.
-3. Rejeição por drop-in do systemd com flags reais (WOL=1 ou SSH=1).
-4. Interrupção na geração por patch corrompido (produção preservada).
-5. Substituição verdadeiramente atômica (rename POSIX, sem truncamento).
-6. Falha na auditoria pós-inicialização aciona rollback automático para v1.
-7. Rollback granular restaura v1 e original com validação rigorosa de SHA e simulação.
+2. Rejeição de upgrade direto sobre o original de fábrica (restrito a v1 -> v2).
+3. Rejeição por backup original ausente ou corrompido.
+4. Rejeição por backup v1 ausente ou corrompido prévio.
+5. Interrupção por pre-flight com falha.
+6. Rejeição por drop-in do systemd com flags reais (WOL=1 ou SSH=1).
+7. Interrupção na geração por patch corrompido (produção preservada).
+8. Substituição verdadeiramente atômica e verificação estrita de permissão/owner.
+9. Falha de 'systemctl restart' dispara rollback automático para v1.
+10. Falha na auditoria pós-inicialização aciona rollback automático para v1.
+11. Rollback granular restaura v1 e original com validação rigorosa de SHA e simulação.
 """
 
 import os
@@ -45,20 +49,26 @@ class TestUpgradeFalhasESeguranca(unittest.TestCase):
         self.var_backups = os.path.join(self.tmpdir, "var", "backups", "jarvis")
         self.dropin_dir = os.path.join(self.tmpdir, "etc", "systemd", "system", "jarvis-voice.service.d")
         self.state_dir = os.path.join(self.tmpdir, "var", "lib", "jarvis")
+        self.bin_dir = os.path.join(self.tmpdir, "bin")
 
         os.makedirs(self.patches_dir, exist_ok=True)
         os.makedirs(self.var_backups, exist_ok=True)
         os.makedirs(self.dropin_dir, exist_ok=True)
         os.makedirs(self.state_dir, exist_ok=True)
-
-        # Mock bin directory for isolated systemctl
-        self.bin_dir = os.path.join(self.tmpdir, "bin")
         os.makedirs(self.bin_dir, exist_ok=True)
+
+        # Mock systemctl script
         mock_systemctl = os.path.join(self.bin_dir, "systemctl")
         with open(mock_systemctl, "w") as f:
             f.write("""#!/usr/bin/env bash
 cmd="$1"
 shift || true
+
+if [ "${MOCK_SYSTEMCTL_FAIL_RESTART:-0}" = "1" ] && [ "$cmd" = "restart" ]; then
+    echo "MOCK SYSTEMCTL ERROR: falha simulada ao reiniciar serviço" >&2
+    exit 1
+fi
+
 case "$cmd" in
     daemon-reload|restart|is-active)
         exit 0
@@ -101,36 +111,18 @@ esac
         self.assertEqual(ret.returncode, 0, f"Falha ao reconstruir original: {ret.stderr.decode()}")
         shutil.copy2(self.backup_original, self.backup_original_ext)
 
-        # Create genuine v1 file (or target)
-        # Note: v1 SHA is f6c727... Let's check if we have the v1 backup on disk or we can generate/copy it
-        # If we have local backup or remote, let's create a known v1 file:
-        # Let's check if f6c727... matches a known file in the workspace or we fetch it
-        v1_local_candidates = [
-            "/opt/jarvis-voice/jarvis-operacional.py.backup_simulacao_v1",
-            os.path.join(BASE_DIR, "jarvis-operacional.py.backup_simulacao_v1"),
-        ]
-        v1_created = False
-        for c in v1_local_candidates:
-            if os.path.isfile(c):
-                shutil.copy2(c, self.backup_v1)
-                shutil.copy2(c, self.backup_v1_ext)
-                shutil.copy2(c, self.target_file)
-                v1_created = True
-                break
-
-        if not v1_created:
-            # Reconstruct v1 from git commit 94876f4 or similar, or create file with exact v1 content
-            # Let's see if we can get it via git show 94876f4:scripts/jarvis_operacional_corrigido.py or similar
-            cmd_git = "git show 94876f4:scripts/jarvis_operacional_corrigido.py"
-            ret_git = subprocess.run(cmd_git, shell=True, cwd=BASE_DIR, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if ret_git.returncode == 0:
-                with open(self.backup_v1, "wb") as f:
-                    f.write(ret_git.stdout)
-                shutil.copy2(self.backup_v1, self.backup_v1_ext)
-                shutil.copy2(self.backup_v1, self.target_file)
-            else:
-                # Fallback: start with original
-                shutil.copy2(self.backup_original, self.target_file)
+        # Reconstruct genuine v1
+        cmd_git = "git show 94876f4:scripts/jarvis_operacional_corrigido.py"
+        ret_git = subprocess.run(cmd_git, shell=True, cwd=BASE_DIR, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if ret_git.returncode == 0:
+            with open(self.backup_v1, "wb") as f:
+                f.write(ret_git.stdout)
+        else:
+            v1_src = "/opt/jarvis-voice/jarvis-operacional.py.backup_simulacao_v1"
+            if os.path.isfile(v1_src):
+                shutil.copy2(v1_src, self.backup_v1)
+        shutil.copy2(self.backup_v1, self.backup_v1_ext)
+        shutil.copy2(self.backup_v1, self.target_file)
 
         # Create drop-in with simulation flags
         with open(self.dropin_file, "w") as f:
@@ -171,7 +163,6 @@ esac
 
     def test_01_rejeita_hash_desconhecido(self):
         """1. Rejeição imediata de SHA desconhecido (fail-closed) sem tocar no arquivo."""
-        # Coloca conteúdo arbitrário no arquivo operacional
         with open(self.target_file, "w") as f:
             f.write("# ARQUIVO OPERACIONAL COM CONTEUDO DESCONHECIDO\nprint('hack')\n")
 
@@ -179,13 +170,21 @@ esac
         self.assertNotEqual(res.returncode, 0, "Upgrade deveria ter falhado para hash desconhecido")
         self.assertIn("DESCONHECIDO", res.stdout + res.stderr)
 
-        # Confirma que o conteúdo não foi alterado
         with open(self.target_file, "r") as f:
             content = f.read()
         self.assertIn("CONTEUDO DESCONHECIDO", content)
 
-    def test_02_backup_original_corrompido_interrompe(self):
-        """2. Backup original com SHA divergente interrompe o procedimento imediatamente."""
+    def test_02_rejeita_upgrade_a_partir_do_original_direto(self):
+        """2. Rejeição de upgrade v1 -> v2 quando o arquivo alvo está na versão original."""
+        shutil.copy2(self.backup_original, self.target_file)
+
+        res = subprocess.run([UPGRADE_SCRIPT], env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertNotEqual(res.returncode, 0, "Upgrade v1->v2 não pode rodar sobre versão original")
+        self.assertIn("versão original de fábrica", res.stdout + res.stderr)
+        self.assertIn("exclusivamente para o upgrade v1 -> v2", res.stdout + res.stderr)
+
+    def test_03_backup_original_corrompido_interrompe(self):
+        """3. Backup original com SHA divergente interrompe o procedimento imediatamente."""
         with open(self.backup_original, "w") as f:
             f.write("# BACKUP CORROMPIDO\n")
         if os.path.exists(self.backup_original_ext):
@@ -193,12 +192,30 @@ esac
                 f.write("# BACKUP CORROMPIDO EXT\n")
 
         res = subprocess.run([UPGRADE_SCRIPT], env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        self.assertNotEqual(res.returncode, 0, "Upgrade deveria falhar com backup corrompido")
+        self.assertNotEqual(res.returncode, 0, "Upgrade deveria falhar com backup original corrompido")
         self.assertIn("divergente", res.stdout + res.stderr)
 
-    def test_03_preflight_falhando_interrompe_upgrade(self):
-        """3. Falha no pre-flight aborta imediatamente na Fase 1 sem alterar produção."""
-        # Configura preflight para falhar
+    def test_04_backup_v1_ausente_ou_corrompido_interrompe(self):
+        """4. Backup v1 ausente ou corrompido antes do upgrade aborta o procedimento."""
+        # Remove ambos os backups v1
+        os.remove(self.backup_v1)
+        if os.path.exists(self.backup_v1_ext):
+            os.remove(self.backup_v1_ext)
+
+        res = subprocess.run([UPGRADE_SCRIPT], env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertNotEqual(res.returncode, 0, "Upgrade deveria falhar com backup v1 ausente")
+        self.assertIn("Backup da versão v1 inexistente", res.stdout + res.stderr)
+
+        # Agora testa backup v1 com hash corrompido
+        with open(self.backup_v1, "w") as f:
+            f.write("# BACKUP V1 CORROMPIDO\n")
+
+        res2 = subprocess.run([UPGRADE_SCRIPT], env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertNotEqual(res2.returncode, 0, "Upgrade deveria falhar com backup v1 divergente")
+        self.assertIn("SHA-256 do backup v1 divergente", res2.stdout + res2.stderr)
+
+    def test_05_preflight_falhando_interrompe_upgrade(self):
+        """5. Falha no pre-flight aborta imediatamente na Fase 1 sem alterar produção."""
         with open(self.mock_preflight, "w") as f:
             f.write("#!/bin/bash\necho 'Falha intencional de pre-flight' >&2\nexit 1\n")
 
@@ -206,8 +223,8 @@ esac
         self.assertNotEqual(res.returncode, 0, "Upgrade deveria falhar quando preflight falha")
         self.assertIn("pre-flight", res.stdout + res.stderr)
 
-    def test_04_systemd_flag_real_detectada_interrompe(self):
-        """4. Configuração de systemd com modo real (WOL=1) detectada e rejeitada."""
+    def test_06_systemd_flag_real_detectada_interrompe(self):
+        """6. Configuração de systemd com modo real (WOL=1) detectada e rejeitada."""
         with open(self.dropin_file, "w") as f:
             f.write("[Service]\nEnvironment=JARVIS_WOL_REAL=1\nEnvironment=JARVIS_SSH_REAL=0\n")
 
@@ -215,8 +232,8 @@ esac
         self.assertNotEqual(res.returncode, 0, "Upgrade deveria falhar com flag real no dropin")
         self.assertIn("modo real detectada", res.stdout + res.stderr)
 
-    def test_05_patch_corrompido_limpa_tmp_sem_alterar_producao(self):
-        """5. Patch corrompido aborta a geração e mantém produção intocada."""
+    def test_07_patch_corrompido_limpa_tmp_sem_alterar_producao(self):
+        """7. Patch corrompido aborta a geração e mantém produção intocada."""
         with open(self.patch_file, "w") as f:
             f.write("--- patch corrompido inválido\n+++ patch corrompido\n@@ -1,1 +1,1 @@\n-invalido\n+invalido2\n")
 
@@ -229,62 +246,66 @@ esac
         with open(self.target_file, "r") as f:
             self.assertEqual(f.read(), orig_content, "Arquivo operacional de produção foi indevidamente modificado")
 
-    def test_06_substituicao_atomica_e_permissao(self):
-        """6. Substituição atômica (--apply) gera exatamente EXPECTED_NEW_SHA com permissão 0755."""
+    def test_08_substituicao_atomica_e_permissao(self):
+        """8. Substituição atômica (--apply) gera exatamente EXPECTED_NEW_SHA com permissão 0755 e valida owner."""
         res = subprocess.run([UPGRADE_SCRIPT, "--apply"], env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.assertEqual(res.returncode, 0, f"Upgrade --apply falhou:\n{res.stdout}\n{res.stderr}")
 
-        # Verifica SHA final
         cmd_sha = f"sha256sum {self.target_file}"
         ret_sha = subprocess.run(cmd_sha, shell=True, stdout=subprocess.PIPE, text=True)
         sha_final = ret_sha.stdout.split()[0]
         self.assertEqual(sha_final, EXPECTED_NEW_SHA, "SHA final após substituição atômica divergente")
 
-        # Verifica permissões (0755)
         st = os.stat(self.target_file)
         self.assertTrue(bool(st.st_mode & stat.S_IXUSR), "Arquivo deve ter permissão de execução")
 
-    def test_07_falha_auditoria_pos_inicializacao_aciona_rollback_v1(self):
-        """7. Falha na auditoria pós-inicialização dispara rollback automático para a versão v1."""
-        # Configura auditoria pós-inicialização para falhar
+    def test_09_falha_systemctl_restart_aciona_rollback_v1(self):
+        """9. Falha de 'systemctl restart' é capturada explicitamente e aciona rollback automático para v1."""
+        env_fail = self.env.copy()
+        env_fail["MOCK_SYSTEMCTL_FAIL_RESTART"] = "1"
+
+        res = subprocess.run([UPGRADE_SCRIPT, "--apply"], env=env_fail, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertNotEqual(res.returncode, 0, "Upgrade deveria ter falhado com restart falho")
+        self.assertIn("systemctl restart jarvis-voice.service' falhou", res.stdout + res.stderr)
+        self.assertIn("rollback", res.stdout.lower() + res.stderr.lower())
+
+        # Verifica se o rollback restaurou o hash da v1
+        cmd_target_sha = f"sha256sum {self.target_file}"
+        curr_target_sha = subprocess.run(cmd_target_sha, shell=True, stdout=subprocess.PIPE, text=True).stdout.split()[0]
+        self.assertEqual(curr_target_sha, EXPECTED_V1_SHA, "Rollback deveria ter restaurado o SHA de v1")
+
+    def test_10_falha_auditoria_pos_inicializacao_aciona_rollback_v1(self):
+        """10. Falha na auditoria pós-inicialização dispara rollback automático para a versão v1."""
         with open(self.mock_postcheck, "w") as f:
             f.write("#!/bin/bash\necho 'Falha intencional de auditoria pós-inicialização' >&2\nexit 1\n")
-
-        # Salva o conteúdo/hash inicial de v1
-        with open(self.backup_v1, "r") as f:
-            v1_content = f.read()
-        cmd_sha_v1 = f"sha256sum {self.backup_v1}"
-        sha_v1 = subprocess.run(cmd_sha_v1, shell=True, stdout=subprocess.PIPE, text=True).stdout.split()[0]
 
         res = subprocess.run([UPGRADE_SCRIPT, "--apply"], env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.assertNotEqual(res.returncode, 0, "Upgrade deveria falhar e acionar rollback")
         self.assertIn("Auditoria pós-inicialização falhou", res.stdout + res.stderr)
         self.assertIn("rollback", res.stdout.lower() + res.stderr.lower())
 
-        # Verifica se o rollback para v1 foi efetivado
         cmd_target_sha = f"sha256sum {self.target_file}"
         curr_target_sha = subprocess.run(cmd_target_sha, shell=True, stdout=subprocess.PIPE, text=True).stdout.split()[0]
-        self.assertEqual(curr_target_sha, sha_v1, "Rollback automático para v1 deveria ter restaurado o SHA de v1")
+        self.assertEqual(curr_target_sha, EXPECTED_V1_SHA, "Rollback automático para v1 deveria ter restaurado o SHA de v1")
 
-    def test_08_rollback_granular_v1_e_original(self):
-        """8. Rollback granular restaura v1 e original com validação rigorosa de SHA e preservação de simulação."""
-        # 1. Modifica o target para nova versão
+    def test_11_rollback_granular_v1_e_original(self):
+        """11. Rollback granular restaura v1 e original com validação rigorosa de SHA, permissão 0755 e simulação."""
         shutil.copy2(CORRIGIDO_PY, self.target_file)
 
-        # 2. Testa rollback para v1
+        # Testa rollback para v1
         res_v1 = subprocess.run([ROLLBACK_SCRIPT, "v1"], env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.assertEqual(res_v1.returncode, 0, f"Rollback v1 falhou: {res_v1.stdout}\n{res_v1.stderr}")
         cmd_sha = f"sha256sum {self.target_file}"
         curr_sha = subprocess.run(cmd_sha, shell=True, stdout=subprocess.PIPE, text=True).stdout.split()[0]
         self.assertEqual(curr_sha, EXPECTED_V1_SHA, "Rollback v1 não restaurou EXPECTED_V1_SHA")
 
-        # 3. Testa rollback para original
+        # Testa rollback para original
         res_orig = subprocess.run([ROLLBACK_SCRIPT, "original"], env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.assertEqual(res_orig.returncode, 0, f"Rollback original falhou: {res_orig.stdout}\n{res_orig.stderr}")
         curr_sha_orig = subprocess.run(cmd_sha, shell=True, stdout=subprocess.PIPE, text=True).stdout.split()[0]
         self.assertEqual(curr_sha_orig, EXPECTED_ORIGINAL_SHA, "Rollback original não restaurou EXPECTED_ORIGINAL_SHA")
 
-        # 4. Verifica que drop-in manteve estritamente as variáveis de simulação
+        # Drop-in manteve estritamente as variáveis de simulação
         with open(self.dropin_file, "r") as f:
             dropin_content = f.read()
         self.assertIn("JARVIS_WOL_REAL=0", dropin_content)

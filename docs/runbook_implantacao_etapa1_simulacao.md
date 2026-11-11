@@ -81,15 +81,15 @@ O pre-flight é executado automaticamente pelo script de upgrade como Fase 1. Pa
 *Fluxo de execução do upgrade:*
 1. **Fase 1 (Pre-Flight):** Executa `validar_pre_implantacao.sh` compulsoriamente (aborta em caso de falha).
 2. **Fase 2 (Auditoria e Validação):**
-   - Valida que o SHA do arquivo operacional atual é de versão homologada (`c51d58...` ou `f6c727...`). Hash desconhecido aborta imediatamente;
-   - Valida os backups original e v1;
+   - Valida restritivamente que o SHA do arquivo operacional atual é o da versão v1 (`f6c72731...`). Rejeita versão original de fábrica ou SHA desconhecido (fail-closed);
+   - Valida previamente a existência e os hashes do backup original (`c51d58e6...`) e do backup v1 (`f6c72731...`) para garantir rollback seguro;
    - Valida configurações de simulação no systemd;
    - Gera a nova versão a partir do backup original e valida hash `810aca6e...`;
    - Valida sintaxe Python e reversibilidade do patch.
 3. **Fase 3 (Substituição Atômica e Pós-Auditoria):**
-   - Cria arquivo temporário no mesmo diretório (`.jarvis-operacional.py.tmp.XXXXXX`), copia, define `chmod 0755` e valida SHA;
-   - Executa `mv -f` (substituição verdadeiramente atômica, sem escrita direta in-place);
-   - Reinicia `jarvis-voice.service` e `jarvis-audio-gateway.service`;
+   - Cria arquivo temporário no mesmo diretório (`.jarvis-operacional.py.tmp.XXXXXX`), copia, define `chmod 0755` e `chown`, verificando estritamente permissões e proprietário sem ignorar erros;
+   - Executa `mv -f` (substituição verdadeiramente atômica via POSIX rename, sem escrita direta in-place);
+   - Reinicia os serviços capturando explicitamente qualquer erro de `systemctl restart`, disparando rollback automático para v1 caso ocorra falha;
    - Valida configurações de simulação no systemd pós-reinicialização;
    - Executa `validar_pos_inicializacao.sh`. **Se a auditoria pós-inicialização falhar, dispara rollback automático para v1.**
 
