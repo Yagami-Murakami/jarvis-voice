@@ -74,44 +74,36 @@ systemctl restart jarvis-audio-gateway.service
 
 ---
 
-## 4. Plano de Testes Operacionais Cruzados em Simulação
+## 4. Separação de Testes: Automatizados (Classe A) vs. Físicos de Bancada (Classe B)
 
-Executar a suíte de testes cruzados com coleta contínua e sanitizada de logs:
+### Classe A: Testes Automatizados em Ambiente Isolado (Pré-Implantação)
+Executados em processo isolado sem tocar no serviço de produção:
 ```bash
-/opt/jarvis-voice/scripts/testes_cruzados_etapa1_simulacao.sh
+/opt/jarvis-voice/venv/bin/python3 /opt/jarvis-voice/scripts/testes_automatizados_simulacao.py
 ```
+*Cobertura dos 6 Cenários Automatizados:*
+1. **Diferenciação de Portas e Schemas:** Gateway HTTP API (porta 18089 / `/api/mics`) vs. Jarvis Display (porta 18080 / `/api/status`).
+2. **TLS 1.2+ Estrito e Reconexão:** Verificação com certificado (`ssl.CERT_REQUIRED`, SAN `IP:127.0.0.1`), handshake `JMIC`, envio de frames PCM (1280 bytes), desconexão e reconexão limpa.
+3. **Detecção e Recuperação ME6S:** Simulação de término de processo/pipe de áudio `arecord`, detecção de interrupção, auto-recovery e retorno da fila de áudio.
+4. **Injeção de Eventos Cruzados via Endpoint Existente:** `POST /api/test/inject` com `fonte`, `evento`, `texto` (`me6s` wake -> `lg_mic` command `ligar fusion`), verificando WoL simulado (0 pacotes).
+5. **Confirmação Cruzada de Desligamento Simulado:** `lg_mic` wake -> `me6s` command `desligar fusion` -> `lg_mic` confirm, verificando SSH simulado (0 conexões) e gravação atômica em `/var/lib/jarvis/acoes_recentes.json`.
+6. **Proteção contra Retransmissão:** Deduplicação de confirmações repetidas com bloqueio de reexecução.
 
-### Cenários Cobertos:
-1. **Ativação pelo ME6S e Comando pelo LG:**
-   - Pronunciar "assistente" próximo ao microfone ME6S (verificar log `[ME6S] Ouvi: assistente` e Jarvis Display).
-   - Pronunciar comando pelo LG (ex.: "ligar fusion").
-   - Verificar no log: `SIMULACAO: Wake-on-LAN.` (Nenhum pacote transmitido).
+---
 
-2. **Ativação pelo LG e Comando pelo ME6S:**
-   - Pronunciar "assistente" no LG (verificar transição de tela para Ativo e som de chime).
-   - Pronunciar comando pelo ME6S (ex.: "desligar fusion").
-   - Verificar solicitação de confirmação: `CONFIRMAR desligamento de Fusion (Windows) ? Diga confirmar ou cancelar.`
+### Classe B: Protocolo de Validação Física Supervisionada (Pós-Autorização)
+Executado em bancada física com fala real exclusivamente após autorização da Etapa 1:
+Consulte o checklist oficial em: [`docs/checklist_validacao_fisica_etapa1.md`](checklist_validacao_fisica_etapa1.md).
 
-3. **Reconhecimento Simultâneo ("assistente"):**
-   - Falar "assistente" em ambos os microfones.
-   - Verificar deduplicação pelo árbitro: uma única sessão é iniciada, sem concorrência de `session_id`.
-
-4. **Confirmação Cruzada de Desligamento Simulado:**
-   - ME6S inicia o desligamento; LG envia a confirmação ("confirmar").
-   - Verificar log: `SIMULACAO SSH para Fusion (Windows)`.
-   - Confirmar que o computador permanece ligado e o estado de conclusão foi gravado em `/var/lib/jarvis/acoes_recentes.json`.
-
-5. **Recuperação de Desconexão do ME6S (USB):**
-   - Simular desconexão temporária do microfone Fifine ME6S (ou interrupção do stream ALSA).
-   - Reconectar o microfone.
-   - Verificar reabertura automática pelo `arecord` e auto-recovery do monitor.
-
-6. **Reconexão de Rede do LG:**
-   - Reconexão TLS automática na porta 8088 com handshake validado.
-
-7. **Validação do Jarvis Display:**
-   - Sincronização visual de estados no aplicativo LG (`IDLE` -> `OUVINDO` -> `CONFIRMANDO` -> `IDLE`).
-   - Som de chime de ativação reproduzido.
+*Roteiro de 8 Etapas em Bancada:*
+1. **Fala Real no ME6S USB:** Operador fala `"assistente"` -> `"ligar fusion"`. Valida display do LG, chime sonoro e log `SIMULACAO: Wake-on-LAN`.
+2. **Fala Real no LG:** Operador fala `"assistente"` -> `"desligar fusion"`. Valida transição para estado de alerta de confirmação.
+3. **Reconhecimento Simultâneo:** Fala simultânea nos dois microfones; valida sessão única (`session_id`) e chime único.
+4. **Confirmação Cruzada:** LG inicia desligamento -> ME6S fala `"confirmar desligamento"`. Valida `SIMULACAO SSH para Fusion` (computador permanece ligado).
+5. **Proteção de Idempotência:** Repetição imediata de `"confirmar"` rejeitada sem reexecução.
+6. **Perda e Retorno Físico do ME6S USB:** Desconexão física do cabo USB do Proxmox por 5s, reconexão e validação de retomada da fala.
+7. **Reconexão Física do Smartphone LG:** Desativação de Wi-Fi no LG por 5s, reativação, reconexão TLS automática e retomada de streaming.
+8. **Fechamento e Auditoria:** Verificação de integridade dos equipamentos e exportação de logs sanitizados.
 
 ---
 
