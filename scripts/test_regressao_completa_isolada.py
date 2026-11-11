@@ -115,6 +115,8 @@ class TestPatchedOperationalScript(unittest.TestCase):
             delattr(self.mod.painel, "simular_atraso_ssh_s")
         if hasattr(self.mod.painel, "simular_codigo_ssh"):
             delattr(self.mod.painel, "simular_codigo_ssh")
+        if "JARVIS_ALLOWED_REAL_TARGETS" in os.environ:
+            del os.environ["JARVIS_ALLOWED_REAL_TARGETS"]
         if os.path.exists(self.state_file):
             try:
                 os.remove(self.state_file)
@@ -711,6 +713,88 @@ class TestPatchedOperationalScript(unittest.TestCase):
         # 5. Gateway sincroniza com o ACK recebido
         restarted_arbitrator.sync_session_id(ack["active_session_id"])
         self.assertEqual(restarted_arbitrator.session_id, "sess-authoritative-prior-42")
+
+    def test_19_allowed_real_targets_wol_isolation(self):
+        """Valida que quando JARVIS_ALLOWED_REAL_TARGETS='fusion', o alvo 'ananuke' nunca recebe WoL real."""
+        os.environ["JARVIS_WOL_REAL"] = "1"
+        os.environ["JARVIS_ALLOWED_REAL_TARGETS"] = "fusion"
+
+        # 1. Ativação + Comando ligar fusion (alvo autorizado): entra no fluxo real
+        self.mod.processar("assistente", fonte="me6s")
+        self.assertEqual(self.mod.estado, "comando")
+
+        out_fusion = io.StringIO()
+        with patch("sys.stdout", out_fusion):
+            with patch.object(self.mod.painel, "host_ligado", return_value=True) as mock_host:
+                self.mod.processar("ligar fusion", fonte="me6s")
+                time.sleep(0.1)
+                self.assertTrue(mock_host.called, "host_ligado deve ser chamado para fusion quando autorizado")
+                self.assertIn("Computador ja esta acessivel.", out_fusion.getvalue())
+
+        # 2. Ativação + Comando ligar ananuke (alvo NÃO autorizado): NUNCA chama host_ligado nem envia WoL real
+        self.mod.processar("assistente", fonte="me6s")
+        self.assertEqual(self.mod.estado, "comando")
+
+        out_ananuke = io.StringIO()
+        with patch("sys.stdout", out_ananuke):
+            with patch.object(self.mod.painel, "host_ligado", return_value=True) as mock_host:
+                self.mod.processar("ligar computador dois", fonte="me6s")
+                self.assertFalse(mock_host.called, "host_ligado NÃO deve ser chamado para alvo não autorizado")
+                self.assertIn("SIMULAÇÃO: enviaria Wake-on-LAN.", out_ananuke.getvalue())
+                self.assertIn("SIMULACAO: Wake-on-LAN.", out_ananuke.getvalue())
+
+    def test_20_allowed_real_targets_ssh_isolation(self):
+        """Valida que quando JARVIS_ALLOWED_REAL_TARGETS='fusion', o alvo 'ananuke' nunca recebe SSH real."""
+        os.environ["JARVIS_SSH_REAL"] = "1"
+        os.environ["JARVIS_ALLOWED_REAL_TARGETS"] = "fusion"
+
+        self.mod.processar("assistente", fonte="me6s")
+        self.assertEqual(self.mod.estado, "comando")
+
+        out_desligar = io.StringIO()
+        with patch("sys.stdout", out_desligar):
+            with patch("subprocess.run") as mock_subproc:
+                self.mod.processar("desligar computador dois", fonte="me6s")
+                self.assertEqual(self.mod.estado, "confirmacao")
+                self.assertEqual(self.mod.pendente, "ananuke")
+
+                self.mod.processar("confirmar desligamento", fonte="me6s")
+                time.sleep(0.1)
+                mock_subproc.assert_not_called()
+                self.assertIn("SIMULAÇÃO: enviaria desligamento SSH.", out_desligar.getvalue())
+                self.assertIn("SIMULACAO SSH para Ananuke (Debian)", out_desligar.getvalue())
+
+    def test_21_allowed_real_targets_fail_closed_when_empty_or_unset(self):
+        """Valida comportamento fail-closed: se JARVIS_ALLOWED_REAL_TARGETS estiver vazio ou ausente, nenhum alvo é real."""
+        os.environ["JARVIS_WOL_REAL"] = "1"
+        os.environ["JARVIS_SSH_REAL"] = "1"
+        if "JARVIS_ALLOWED_REAL_TARGETS" in os.environ:
+            del os.environ["JARVIS_ALLOWED_REAL_TARGETS"]
+
+        # 1. WoL para Fusion deve permanecer estritamente em simulação
+        self.mod.processar("assistente", fonte="me6s")
+        self.assertEqual(self.mod.estado, "comando")
+
+        out_wol = io.StringIO()
+        with patch("sys.stdout", out_wol):
+            with patch.object(self.mod.painel, "host_ligado") as mock_host:
+                self.mod.processar("ligar fusion", fonte="me6s")
+                mock_host.assert_not_called()
+                self.assertIn("SIMULAÇÃO: enviaria Wake-on-LAN.", out_wol.getvalue())
+
+        # 2. SSH para Fusion deve permanecer estritamente em simulação
+        self.mod.processar("assistente", fonte="me6s")
+        self.assertEqual(self.mod.estado, "comando")
+
+        out_ssh = io.StringIO()
+        with patch("sys.stdout", out_ssh):
+            with patch("subprocess.run") as mock_subproc:
+                self.mod.processar("desligar fusion", fonte="me6s")
+                self.assertEqual(self.mod.estado, "confirmacao")
+                self.mod.processar("confirmar desligamento", fonte="me6s")
+                time.sleep(0.1)
+                mock_subproc.assert_not_called()
+                self.assertIn("SIMULAÇÃO: enviaria desligamento SSH.", out_ssh.getvalue())
 
 
 if __name__ == "__main__":

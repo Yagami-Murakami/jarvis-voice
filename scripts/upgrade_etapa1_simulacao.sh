@@ -12,7 +12,8 @@ set -euo pipefail
 EXPECTED_ORIGINAL_SHA="c51d58e6d3a19003eac55a827212e5e084d583fea43389ec0ea5466080ee2d54"
 EXPECTED_V1_SHA="f6c7273116aea4c4b34c0c6007d335b7925356ecb174e7066781716f2f604ed8"
 EXPECTED_V2_SHA="810aca6e25897f6b95aaf297ca8fdff7d9659270bf079a8c398c4ee21df93b42"
-EXPECTED_NEW_SHA="c5ea9b984434e33ff9b194a3c873cfb826178a4e853e42ebac3be55b4060fecf"
+EXPECTED_V3_SHA="c5ea9b984434e33ff9b194a3c873cfb826178a4e853e42ebac3be55b4060fecf"
+EXPECTED_NEW_SHA="4a52006def0c54ddcb468561e53c09d2066faa231c86d653893998b73700707f"
 
 TARGET_FILE="${JARVIS_TARGET_FILE:-/opt/jarvis-voice/jarvis-operacional.py}"
 BACKUP_ORIGINAL="${JARVIS_BACKUP_ORIGINAL:-/opt/jarvis-voice/jarvis-operacional.py.backup_original}"
@@ -21,6 +22,8 @@ BACKUP_V1="${JARVIS_BACKUP_V1:-/opt/jarvis-voice/jarvis-operacional.py.backup_si
 BACKUP_V1_EXTERNAL="${JARVIS_BACKUP_V1_EXTERNAL:-/var/backups/jarvis/jarvis-operacional.py.backup_simulacao_v1}"
 BACKUP_V2="${JARVIS_BACKUP_V2:-/opt/jarvis-voice/jarvis-operacional.py.backup_simulacao_v2}"
 BACKUP_V2_EXTERNAL="${JARVIS_BACKUP_V2_EXTERNAL:-/var/backups/jarvis/jarvis-operacional.py.backup_simulacao_v2}"
+BACKUP_V3="${JARVIS_BACKUP_V3:-/opt/jarvis-voice/jarvis-operacional.py.backup_simulacao_v3}"
+BACKUP_V3_EXTERNAL="${JARVIS_BACKUP_V3_EXTERNAL:-/var/backups/jarvis/jarvis-operacional.py.backup_simulacao_v3}"
 PATCH_FILE="${JARVIS_PATCH_FILE:-/opt/jarvis-voice/patches/jarvis-operacional-dual.patch}"
 DROPIN_FILE="${JARVIS_DROPIN_FILE:-/etc/systemd/system/jarvis-voice.service.d/zz-simulacao-etapa1.conf}"
 PREFLIGHT_SCRIPT="${JARVIS_PREFLIGHT_SCRIPT:-/opt/jarvis-voice/scripts/validar_pre_implantacao.sh}"
@@ -90,17 +93,21 @@ elif [ "$CURRENT_SHA" = "$EXPECTED_V1_SHA" ]; then
     echo "  Este script é homologado exclusivamente para o upgrade v2 -> v3."
     echo "Procedimento de upgrade abortado imediatamente (fail-closed)."
     exit 1
-elif [ "$CURRENT_SHA" != "$EXPECTED_V2_SHA" ]; then
+elif [ "$CURRENT_SHA" != "$EXPECTED_V2_SHA" ] && [ "$CURRENT_SHA" != "$EXPECTED_V3_SHA" ]; then
     echo "FALHA!"
     echo "ERRO CRÍTICO: SHA-256 do arquivo operacional atual ($CURRENT_SHA) é DESCONHECIDO ou incompatível!"
-    echo "  Versão requerida para este upgrade: Simulação v2 ($EXPECTED_V2_SHA)"
+    echo "  Versão requerida para este upgrade: Simulação v2 ($EXPECTED_V2_SHA) ou v3 ($EXPECTED_V3_SHA)"
     echo "Procedimento abortado imediatamente (fail-closed)."
     exit 1
 fi
-echo "OK (Versão ativa confirmada: Simulação v2 - $CURRENT_SHA)"
+ROLLBACK_TARGET="v2"
+if [ "$CURRENT_SHA" = "$EXPECTED_V3_SHA" ]; then
+    ROLLBACK_TARGET="v3"
+fi
+echo "OK (Versão ativa confirmada: $CURRENT_SHA, rollback alvo: $ROLLBACK_TARGET)"
 
-# 2. Preservação e validação prévia obrigatória dos backups (Original e V2)
-echo -n "[2/7] Validando existência e SHA-256 prévios dos backups (Original e V2)... "
+# 2. Preservação e validação prévia obrigatória dos backups (Original e V2/V3)
+echo -n "[2/7] Validando existência e SHA-256 prévios dos backups... "
 # Backup Original
 if [ ! -f "$BACKUP_ORIGINAL" ] && [ ! -f "$BACKUP_EXTERNAL" ]; then
     echo "FALHA!"
@@ -118,25 +125,44 @@ if [ "$ORIG_SHA" != "$EXPECTED_ORIGINAL_SHA" ]; then
     exit 1
 fi
 
-# Backup V2 (obrigatório para rollback seguro)
-if [ ! -f "$BACKUP_V2" ] && [ ! -f "$BACKUP_V2_EXTERNAL" ]; then
-    echo "FALHA!"
-    echo "ERRO CRÍTICO: Backup da versão v2 inexistente em $BACKUP_V2 e $BACKUP_V2_EXTERNAL!"
-    echo "  O backup v2 previamente homologado é obrigatório para garantir reversibilidade."
-    exit 1
+if [ "$ROLLBACK_TARGET" = "v3" ]; then
+    if [ ! -f "$BACKUP_V3" ] && [ ! -f "$BACKUP_V3_EXTERNAL" ]; then
+        echo "FALHA!"
+        echo "ERRO CRÍTICO: Backup da versão v3 inexistente em $BACKUP_V3 e $BACKUP_V3_EXTERNAL!"
+        exit 1
+    fi
+    SOURCE_V3="$BACKUP_V3"
+    if [ ! -f "$SOURCE_V3" ]; then
+        SOURCE_V3="$BACKUP_V3_EXTERNAL"
+    fi
+    V3_SHA=$(sha256sum "$SOURCE_V3" | awk '{print $1}')
+    if [ "$V3_SHA" != "$EXPECTED_V3_SHA" ]; then
+        echo "FALHA!"
+        echo "ERRO CRÍTICO: SHA-256 do backup v3 divergente ($V3_SHA vs $EXPECTED_V3_SHA)!"
+        exit 1
+    fi
+    echo "OK (Original: $ORIG_SHA, V3: $V3_SHA)"
+else
+    # Backup V2 (obrigatório para rollback seguro)
+    if [ ! -f "$BACKUP_V2" ] && [ ! -f "$BACKUP_V2_EXTERNAL" ]; then
+        echo "FALHA!"
+        echo "ERRO CRÍTICO: Backup da versão v2 inexistente em $BACKUP_V2 e $BACKUP_V2_EXTERNAL!"
+        echo "  O backup v2 previamente homologado é obrigatório para garantir reversibilidade."
+        exit 1
+    fi
+    SOURCE_V2="$BACKUP_V2"
+    if [ ! -f "$SOURCE_V2" ]; then
+        SOURCE_V2="$BACKUP_V2_EXTERNAL"
+    fi
+    V2_SHA=$(sha256sum "$SOURCE_V2" | awk '{print $1}')
+    if [ "$V2_SHA" != "$EXPECTED_V2_SHA" ]; then
+        echo "FALHA!"
+        echo "ERRO CRÍTICO: SHA-256 do backup v2 divergente ($V2_SHA vs $EXPECTED_V2_SHA)!"
+        echo "  O backup v2 para rollback está corrompido ou inconsistente."
+        exit 1
+    fi
+    echo "OK (Original: $ORIG_SHA, V2: $V2_SHA)"
 fi
-SOURCE_V2="$BACKUP_V2"
-if [ ! -f "$SOURCE_V2" ]; then
-    SOURCE_V2="$BACKUP_V2_EXTERNAL"
-fi
-V2_SHA=$(sha256sum "$SOURCE_V2" | awk '{print $1}')
-if [ "$V2_SHA" != "$EXPECTED_V2_SHA" ]; then
-    echo "FALHA!"
-    echo "ERRO CRÍTICO: SHA-256 do backup v2 divergente ($V2_SHA vs $EXPECTED_V2_SHA)!"
-    echo "  O backup v2 para rollback está corrompido ou inconsistente."
-    exit 1
-fi
-echo "OK (Original: $ORIG_SHA, V2: $V2_SHA)"
 
 # 3. Verificação das variáveis de simulação no systemd ANTES da aplicação
 echo -n "[3/7] Verificando configurações systemd de simulação obrigatória (pré-upgrade)... "
@@ -310,21 +336,21 @@ if command -v systemctl >/dev/null 2>&1; then
     if ! systemctl daemon-reload; then
         echo "FALHA!"
         echo "ERRO CRÍTICO: 'systemctl daemon-reload' falhou! Acionando rollback para v2..."
-        "$ROLLBACK_SCRIPT" v2
+        "$ROLLBACK_SCRIPT" "$ROLLBACK_TARGET"
         exit 1
     fi
 
     if ! systemctl restart jarvis-voice.service; then
         echo "FALHA!"
         echo "ERRO CRÍTICO: 'systemctl restart jarvis-voice.service' falhou! Acionando rollback para v2..."
-        "$ROLLBACK_SCRIPT" v2
+        "$ROLLBACK_SCRIPT" "$ROLLBACK_TARGET"
         exit 1
     fi
 
     if ! systemctl restart jarvis-audio-gateway.service; then
         echo "FALHA!"
         echo "ERRO CRÍTICO: 'systemctl restart jarvis-audio-gateway.service' falhou! Acionando rollback para v2..."
-        "$ROLLBACK_SCRIPT" v2
+        "$ROLLBACK_SCRIPT" "$ROLLBACK_TARGET"
         exit 1
     fi
 
@@ -333,13 +359,13 @@ if command -v systemctl >/dev/null 2>&1; then
     if ! systemctl is-active --quiet jarvis-voice.service; then
         echo "FALHA!"
         echo "ERRO CRÍTICO: jarvis-voice.service não está ativo após reinício! Acionando rollback para v2..."
-        "$ROLLBACK_SCRIPT" v2
+        "$ROLLBACK_SCRIPT" "$ROLLBACK_TARGET"
         exit 1
     fi
     if ! systemctl is-active --quiet jarvis-audio-gateway.service; then
         echo "FALHA!"
         echo "ERRO CRÍTICO: jarvis-audio-gateway.service não está ativo após reinício! Acionando rollback para v2..."
-        "$ROLLBACK_SCRIPT" v2
+        "$ROLLBACK_SCRIPT" "$ROLLBACK_TARGET"
         exit 1
     fi
     echo "OK (Serviços operacionais ativos)"
@@ -359,7 +385,7 @@ if command -v systemctl >/dev/null 2>&1; then
         echo "FALHA!"
         echo "ERRO CRÍTICO: Configurações pós-reinício violaram modo simulação ($POST_ENV)!"
         echo "Acionando rollback automático imediato para versão v2..."
-        "$ROLLBACK_SCRIPT" v2
+        "$ROLLBACK_SCRIPT" "$ROLLBACK_TARGET"
         exit 1
     fi
     echo "OK (WoL=0, SSH=0, REQUIRE_PERSISTENCE=1 ativos)"
@@ -373,7 +399,7 @@ if [ ! -f "$POSTCHECK_SCRIPT" ] || [ ! -x "$POSTCHECK_SCRIPT" ]; then
     echo "FALHA!"
     echo "ERRO CRÍTICO: Script de auditoria '$POSTCHECK_SCRIPT' inexistente ou sem permissão de execução!"
     echo "Acionando rollback automático imediato para versão v2..."
-    "$ROLLBACK_SCRIPT" v2
+    "$ROLLBACK_SCRIPT" "$ROLLBACK_TARGET"
     exit 1
 fi
 
@@ -381,7 +407,7 @@ if ! "$POSTCHECK_SCRIPT"; then
     echo "FALHA!"
     echo "ERRO CRÍTICO: Auditoria pós-inicialização falhou!"
     echo "Acionando rollback automático imediato para versão v2..."
-    "$ROLLBACK_SCRIPT" v2
+    "$ROLLBACK_SCRIPT" "$ROLLBACK_TARGET"
     exit 1
 fi
 

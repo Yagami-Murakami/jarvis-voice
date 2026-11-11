@@ -14,6 +14,7 @@ TARGET_VERSION="${1:-v2}"
 EXPECTED_ORIGINAL_SHA="c51d58e6d3a19003eac55a827212e5e084d583fea43389ec0ea5466080ee2d54"
 EXPECTED_V1_SHA="f6c7273116aea4c4b34c0c6007d335b7925356ecb174e7066781716f2f604ed8"
 EXPECTED_V2_SHA="810aca6e25897f6b95aaf297ca8fdff7d9659270bf079a8c398c4ee21df93b42"
+EXPECTED_V3_SHA="c5ea9b984434e33ff9b194a3c873cfb826178a4e853e42ebac3be55b4060fecf"
 
 TARGET_FILE="${JARVIS_TARGET_FILE:-/opt/jarvis-voice/jarvis-operacional.py}"
 BACKUP_ORIGINAL="${JARVIS_BACKUP_ORIGINAL:-/opt/jarvis-voice/jarvis-operacional.py.backup_original}"
@@ -22,6 +23,8 @@ BACKUP_V1="${JARVIS_BACKUP_V1:-/opt/jarvis-voice/jarvis-operacional.py.backup_si
 BACKUP_V1_EXT="${JARVIS_BACKUP_V1_EXTERNAL:-/var/backups/jarvis/jarvis-operacional.py.backup_simulacao_v1}"
 BACKUP_V2="${JARVIS_BACKUP_V2:-/opt/jarvis-voice/jarvis-operacional.py.backup_simulacao_v2}"
 BACKUP_V2_EXT="${JARVIS_BACKUP_V2_EXTERNAL:-/var/backups/jarvis/jarvis-operacional.py.backup_simulacao_v2}"
+BACKUP_V3="${JARVIS_BACKUP_V3:-/opt/jarvis-voice/jarvis-operacional.py.backup_simulacao_v3}"
+BACKUP_V3_EXT="${JARVIS_BACKUP_V3_EXTERNAL:-/var/backups/jarvis/jarvis-operacional.py.backup_simulacao_v3}"
 DROPIN_DIR="${JARVIS_DROPIN_DIR:-/etc/systemd/system/jarvis-voice.service.d}"
 
 echo "=== INICIANDO PROCEDIMENTO DE ROLLBACK SEGURO (ALVO: $TARGET_VERSION) ==="
@@ -29,7 +32,19 @@ echo "=== INICIANDO PROCEDIMENTO DE ROLLBACK SEGURO (ALVO: $TARGET_VERSION) ==="
 SOURCE_BACKUP=""
 EXPECTED_RESTORE_SHA=""
 
-if [ "$TARGET_VERSION" = "v2" ]; then
+if [ "$TARGET_VERSION" = "v3" ]; then
+    echo "[INFO] Revertendo para a versão de simulação v3 (c5ea9b98...)..."
+    if [ -f "$BACKUP_V3" ]; then
+        SOURCE_BACKUP="$BACKUP_V3"
+    elif [ -f "$BACKUP_V3_EXT" ]; then
+        SOURCE_BACKUP="$BACKUP_V3_EXT"
+    else
+        echo "FALHA!"
+        echo "ERRO CRÍTICO: Backup da versão v3 inexistente em $BACKUP_V3 e $BACKUP_V3_EXT!"
+        exit 1
+    fi
+    EXPECTED_RESTORE_SHA="$EXPECTED_V3_SHA"
+elif [ "$TARGET_VERSION" = "v2" ]; then
     echo "[INFO] Revertendo para a versão de simulação v2 (810aca6e...)..."
     if [ -f "$BACKUP_V2" ]; then
         SOURCE_BACKUP="$BACKUP_V2"
@@ -67,7 +82,7 @@ elif [ "$TARGET_VERSION" = "original" ]; then
     EXPECTED_RESTORE_SHA="$EXPECTED_ORIGINAL_SHA"
 else
     echo "FALHA!"
-    echo "ERRO: Versão de rollback desconhecida: $TARGET_VERSION. Use 'v2', 'v1' ou 'original'."
+    echo "ERRO: Versão de rollback desconhecida: $TARGET_VERSION. Use 'v3', 'v2', 'v1' ou 'original'."
     exit 1
 fi
 

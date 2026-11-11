@@ -973,7 +973,7 @@ class TestIpcRealSocketIntegration(unittest.TestCase):
         def _timeout_ssh(*args, **kwargs):
             raise subprocess.TimeoutExpired(cmd=["ssh"], timeout=25)
 
-        with patch.dict(os.environ, {"JARVIS_SSH_REAL": "1"}), \
+        with patch.dict(os.environ, {"JARVIS_SSH_REAL": "1", "JARVIS_ALLOWED_REAL_TARGETS": "fusion"}), \
              patch.object(self.mod.painel, "host_ligado", return_value=True), \
              patch.object(self.mod.subprocess, "run", side_effect=_timeout_ssh):
             res = self.mod.processar("confirmar desligamento", fonte="lg_mic", session_id="sess-ssh-timeout-1", event_id=ev_id)

@@ -120,6 +120,7 @@ class TestHTTPServerIntegration(unittest.TestCase):
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), JarvisDisplayHandler)
         cls.server.display_state = JarvisDisplayState()
         cls.server.weather_service = WeatherService()
+        cls.server.demo_mode = True
         cls.port = cls.server.server_address[1]
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()

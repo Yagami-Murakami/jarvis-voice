@@ -295,6 +295,19 @@ def ja_executado_recentemente(acao, alvo, janela=3.5):
         return (agora - ultimo_ts) <= janela
 
 
+def alvo_real_permitido(alvo_nome):
+    """Verifica se o alvo está expressamente autorizado na lista de controle seguro.
+    Se JARVIS_ALLOWED_REAL_TARGETS não estiver definido ou vazio, nenhum alvo é autorizado (fail-closed).
+    """
+    if not alvo_nome:
+        return False
+    raw = os.getenv("JARVIS_ALLOWED_REAL_TARGETS", "")
+    if not raw or not raw.strip():
+        return False
+    permitidos = [a.strip().lower() for a in raw.split(",") if a.strip()]
+    return str(alvo_nome).strip().lower() in permitidos
+
+
 _recuperar_estado_na_inicializacao()
 
 
@@ -477,7 +490,8 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                         "processado": True,
                     }
 
-            modo_real = os.getenv("JARVIS_WOL_REAL") == "1"
+            alvo_autorizado = alvo_real_permitido(alvo)
+            modo_real = (os.getenv("JARVIS_WOL_REAL") == "1") and alvo_autorizado
             atraso_wol = getattr(painel, "simular_atraso_wol_s", 0.0)
 
             estado = "espera"
@@ -489,7 +503,9 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                 try:
                     atualizar_status_acao(ev_id, "em_processamento", acao="ligar", alvo=alvo_nome)
                     t_ini_sond = time.monotonic()
-                    if os.getenv("JARVIS_WOL_REAL") == "1":
+                    alvo_worker_autorizado = alvo_real_permitido(alvo_nome)
+                    modo_real_efetivo = (os.getenv("JARVIS_WOL_REAL") == "1") and alvo_worker_autorizado
+                    if modo_real_efetivo:
                         acessivel = painel.host_ligado(srv_info)
                     else:
                         atraso = getattr(painel, "simular_atraso_wol_s", 0.0)
@@ -497,14 +513,14 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                             time.sleep(atraso)
                         acessivel = False
                     duracao_sond = time.monotonic() - t_ini_sond
-                    print(f"LATENCIA: sondagem_wol_worker={duracao_sond:.4f}s (real={os.getenv('JARVIS_WOL_REAL') == '1'})", flush=True)
+                    print(f"LATENCIA: sondagem_wol_worker={duracao_sond:.4f}s (real={modo_real_efetivo})", flush=True)
 
                     if acessivel:
                         print("Computador ja esta acessivel.", flush=True)
                         atualizar_status_acao(ev_id, "concluido", acao="ligar", alvo=alvo_nome, resultado={"ja_ligado": True})
                         return
 
-                    if os.getenv("JARVIS_WOL_REAL") == "1":
+                    if modo_real_efetivo:
                         if not srv_info.get("mac"):
                             raise ValueError("MAC nao configurado")
 
@@ -567,13 +583,15 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
 
         # Tratamento de acao == "desligar"
         t_ini_sond = time.monotonic()
-        if os.getenv("JARVIS_SSH_REAL") == "1":
+        alvo_autorizado_ssh = alvo_real_permitido(alvo)
+        modo_ssh_real = (os.getenv("JARVIS_SSH_REAL") == "1") and alvo_autorizado_ssh
+        if modo_ssh_real:
             acessivel = painel.host_ligado(srv)
         else:
             # Em modo de simulação, evita I/O de rede e latências de sondagem (ping/portas)
             acessivel = True
         duracao_sond = time.monotonic() - t_ini_sond
-        print(f"LATENCIA: sondagem_desligar={duracao_sond:.4f}s (simulacao={os.getenv('JARVIS_SSH_REAL') != '1'})", flush=True)
+        print(f"LATENCIA: sondagem_desligar={duracao_sond:.4f}s (simulacao={not modo_ssh_real})", flush=True)
 
         if not acessivel:
             print(
@@ -650,16 +668,18 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
             srv = painel.SERVIDORES[pendente]
             status_acao = "falha"
             t_ini_sond = time.monotonic()
-            if os.getenv("JARVIS_SSH_REAL") == "1":
+            alvo_autorizado_ssh = alvo_real_permitido(pendente)
+            modo_ssh_real = (os.getenv("JARVIS_SSH_REAL") == "1") and alvo_autorizado_ssh
+            if modo_ssh_real:
                 host_ativo = painel.host_ligado(srv)
             else:
                 # Em modo de simulação, evita I/O de rede desnecessário
                 host_ativo = True
             duracao_sond = time.monotonic() - t_ini_sond
-            print(f"LATENCIA: sondagem_confirmar_desligar={duracao_sond:.4f}s (simulacao={os.getenv('JARVIS_SSH_REAL') != '1'})", flush=True)
+            print(f"LATENCIA: sondagem_confirmar_desligar={duracao_sond:.4f}s (simulacao={not modo_ssh_real})", flush=True)
 
             if host_ativo:
-                if os.getenv("JARVIS_SSH_REAL") == "1":
+                if modo_ssh_real:
                     if texto != "confirmar desligamento":
                         print(
                             "Confirmacao insuficiente. Pedido cancelado.",
@@ -731,7 +751,9 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                 def _executar_ssh_worker(srv_info, conf, ev_id, alvo_nome):
                     try:
                         cmd = painel.montar_comando_ssh(conf) if hasattr(painel, "montar_comando_ssh") else None
-                        if os.getenv("JARVIS_SSH_REAL") == "1":
+                        alvo_worker_autorizado = alvo_real_permitido(alvo_nome)
+                        modo_real_efetivo = (os.getenv("JARVIS_SSH_REAL") == "1") and alvo_worker_autorizado
+                        if modo_real_efetivo:
                             resultado = subprocess.run(
                                 cmd,
                                 capture_output=True,
@@ -1257,6 +1279,9 @@ def iniciar_servicos(max_iteracoes=None):
         print(f"MODO MISTO (WoL={'ATIVO' if wol_real else 'SIMULADO'}, SSH={'ATIVO' if ssh_real else 'SIMULADO'})", flush=True)
     else:
         print("MODO SIMULACAO - SEM ACOES REAIS", flush=True)
+    if wol_real or ssh_real:
+        alvos_permitidos = [a.strip().lower() for a in os.getenv("JARVIS_ALLOWED_REAL_TARGETS", "").split(",") if a.strip()]
+        print(f"ALVOS REAIS AUTORIZADOS: {','.join(alvos_permitidos) if alvos_permitidos else 'NENHUM (fail-closed)'}", flush=True)
     print("Fale 'assistente', pause, depois o comando.", flush=True)
 
     loop_principal_ativo.set()
