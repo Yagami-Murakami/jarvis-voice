@@ -512,6 +512,14 @@ class LgMicServer(threading.Thread):
         except (socket.timeout, socket.error, EOFError) as e:
             logger.info("Cliente LG desconectado (%s): %s", ip, e)
         finally:
+            if not self.echo_guard_active and self.vosk_rec is not None:
+                try:
+                    res = json.loads(self.vosk_rec.FinalResult())
+                    texto = res.get("text", "").strip()
+                    if texto:
+                        self._processar_texto_reconhecido(texto)
+                except Exception:
+                    pass
             self.connected = False
             self.client_ip = None
             try:

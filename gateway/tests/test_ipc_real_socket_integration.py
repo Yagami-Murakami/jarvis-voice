@@ -16,9 +16,11 @@ import os
 import queue
 import shutil
 import socket
+import subprocess
 import tempfile
 import threading
 import time
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -34,7 +36,28 @@ from gateway.audio_gateway import SessionArbitrator
 class TestIpcRealSocketIntegration(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        # Carrega o módulo isolado do controlador corrigido uma única vez
+        import types
+        from unittest.mock import MagicMock
+
+        try:
+            import vosk
+        except ImportError:
+            mock_vosk = types.ModuleType("vosk")
+            mock_vosk.Model = MagicMock()
+            mock_vosk.KaldiRecognizer = MagicMock()
+            mock_vosk.SetLogLevel = MagicMock()
+            sys.modules["vosk"] = mock_vosk
+
+        if "app" not in sys.modules:
+            mock_app = types.ModuleType("app")
+            mock_app.SERVIDORES = {
+                "fusion": {"nome": "Fusion (Windows)", "mac": "bc:24:11:83:35:82"},
+                "ananuke": {"nome": "Ananuke (Debian)", "mac": "0a:e0:af:c3:06:fc"},
+            }
+            mock_app.host_ligado = lambda srv: False
+            mock_app.montar_comando_ssh = lambda cfg: ["echo", "ssh_simulado"]
+            sys.modules["app"] = mock_app
+
         target_path = Path(__file__).resolve().parent.parent.parent / "scripts" / "jarvis_operacional_corrigido.py"
         spec = importlib.util.spec_from_file_location("jarvis_op_test", str(target_path))
         cls.mod = importlib.util.module_from_spec(spec)
@@ -43,6 +66,8 @@ class TestIpcRealSocketIntegration(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.sock_path = os.path.join(self.temp_dir, "real_ipc_test.sock")
+        self.state_file = os.path.join(self.temp_dir, "acoes_recentes.json")
+        os.environ["JARVIS_STATE_FILE"] = self.state_file
 
         # Reseta o estado do controlador
         self.mod.estado = "espera"
@@ -52,10 +77,11 @@ class TestIpcRealSocketIntegration(unittest.TestCase):
         self.mod.ultima_ativacao = 0.0
         with self.mod.lock_acoes:
             self.mod.acoes_recentes.clear()
-        with self.mod.lock_registro_acoes:
             self.mod.registro_acoes.clear()
         if hasattr(self.mod.painel, "simular_atraso_ssh_s"):
             delattr(self.mod.painel, "simular_atraso_ssh_s")
+        if hasattr(self.mod.painel, "simular_codigo_ssh"):
+            delattr(self.mod.painel, "simular_codigo_ssh")
         while not self.mod.fila_intencoes.empty():
             try:
                 self.mod.fila_intencoes.get_nowait()
@@ -71,6 +97,13 @@ class TestIpcRealSocketIntegration(unittest.TestCase):
             pass
         if hasattr(self.mod.painel, "simular_atraso_ssh_s"):
             delattr(self.mod.painel, "simular_atraso_ssh_s")
+        if hasattr(self.mod.painel, "simular_codigo_ssh"):
+            delattr(self.mod.painel, "simular_codigo_ssh")
+        if os.path.exists(self.state_file):
+            try:
+                os.remove(self.state_file)
+            except OSError:
+                pass
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_01_timeout_waiting_for_ack_returns_failure(self):
@@ -865,6 +898,90 @@ class TestIpcRealSocketIntegration(unittest.TestCase):
             self.mod.loop_principal_ativo.clear()
             worker_th.join(timeout=1.0)
             listener.stop()
+
+    def test_15_action_state_persists_across_controller_restarts(self):
+        """15. Persistência de estado segura protege contra ações duplicadas mesmo após reinício do controlador."""
+        ev_id = "ev-persist-restart-15"
+        self.mod.estado = "confirmacao"
+        self.mod.pendente = "fusion"
+        self.mod.sessao_ativa_id = "sess-persist-1"
+
+        with patch.object(self.mod.painel, "host_ligado", return_value=True):
+            res = self.mod.processar("confirmar desligamento", fonte="lg_mic", session_id="sess-persist-1", event_id=ev_id)
+            self.assertTrue(res.get("sucesso"))
+
+        # Confirma que o arquivo de estado foi gravado no disco
+        self.assertTrue(os.path.exists(self.state_file))
+
+        # Simula o reinício total do processo do controlador (limpeza de memória RAM)
+        with self.mod.lock_acoes:
+            self.mod.acoes_recentes.clear()
+            self.mod.registro_acoes.clear()
+
+        # O novo processo inicia e recarrega o estado persistido do arquivo
+        self.mod._carregar_estado_acoes()
+
+        # 1. Verifica que a ação anterior foi recuperada
+        status_recuperado = self.mod.obter_status_acao(ev_id)
+        self.assertIsNotNone(status_recuperado)
+        self.assertEqual(status_recuperado.get("status"), "concluido")
+
+        # 2. Verifica que a mesma ação dentro da janela de idempotência permanece bloqueada após reinício
+        self.assertTrue(self.mod.ja_executado_recentemente("desligar", "fusion", janela=3.5))
+
+        # 3. Uma nova tentativa de desligar fusion logo após o reinício é descartada por idempotência
+        self.mod.estado = "confirmacao"
+        self.mod.pendente = "fusion"
+        self.mod.sessao_ativa_id = "sess-persist-2"
+        with patch.object(self.mod.painel, "host_ligado", return_value=True):
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                res_retry = self.mod.processar("confirmar desligamento", fonte="me6s", session_id="sess-persist-2")
+            self.assertTrue(res_retry.get("deduplicado"))
+            self.assertIn("Desligamento de fusion descartado por idempotencia.", out.getvalue())
+
+    def test_16_ssh_nonzero_returncode_registers_failure(self):
+        """16. Código de retorno SSH != 0 registra status 'falha' e erro correspondente."""
+        ev_id = "ev-ssh-exit-error-16"
+        self.mod.estado = "confirmacao"
+        self.mod.pendente = "fusion"
+        self.mod.sessao_ativa_id = "sess-ssh-fail-1"
+
+        # Simula código de retorno 255 (falha de conexão / host down)
+        self.mod.painel.simular_codigo_ssh = 255
+        try:
+            with patch.object(self.mod.painel, "host_ligado", return_value=True):
+                res = self.mod.processar("confirmar desligamento", fonte="lg_mic", session_id="sess-ssh-fail-1", event_id=ev_id)
+                time.sleep(0.06)
+
+            status_reg = self.mod.obter_status_acao(ev_id)
+            self.assertIsNotNone(status_reg)
+            self.assertEqual(status_reg.get("status"), "falha")
+            self.assertEqual(status_reg.get("erro"), "ssh_returncode_255")
+        finally:
+            if hasattr(self.mod.painel, "simular_codigo_ssh"):
+                delattr(self.mod.painel, "simular_codigo_ssh")
+
+    def test_17_ssh_timeout_registers_failure(self):
+        """17. Timeout de 25s no SSH registra status 'falha' com erro 'ssh_timeout_25s'."""
+        ev_id = "ev-ssh-timeout-17"
+        self.mod.estado = "confirmacao"
+        self.mod.pendente = "fusion"
+        self.mod.sessao_ativa_id = "sess-ssh-timeout-1"
+
+        def _timeout_ssh(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd=["ssh"], timeout=25)
+
+        with patch.dict(os.environ, {"JARVIS_SSH_REAL": "1"}), \
+             patch.object(self.mod.painel, "host_ligado", return_value=True), \
+             patch.object(self.mod.subprocess, "run", side_effect=_timeout_ssh):
+            res = self.mod.processar("confirmar desligamento", fonte="lg_mic", session_id="sess-ssh-timeout-1", event_id=ev_id)
+            time.sleep(0.06)
+
+        status_reg = self.mod.obter_status_acao(ev_id)
+        self.assertIsNotNone(status_reg)
+        self.assertEqual(status_reg.get("status"), "falha")
+        self.assertEqual(status_reg.get("erro"), "ssh_timeout_25s")
 
 
 if __name__ == "__main__":

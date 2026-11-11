@@ -2,31 +2,16 @@ import sys
 import os
 import json
 import time
+import tempfile
 import subprocess
 import threading
 import queue
 
-try:
-    from vosk import Model, KaldiRecognizer, SetLogLevel
-except ImportError:
-    Model = None
-    KaldiRecognizer = None
-    def SetLogLevel(*args): pass
+from vosk import Model, KaldiRecognizer, SetLogLevel
 
 # Carregar funcoes do painel existente
 sys.path.insert(0, "/home/tuninho/homelab-panel")
-sys.path.insert(0, "/opt/jarvis-voice")
-try:
-    import app as painel
-except ImportError:
-    from unittest.mock import MagicMock
-    painel = MagicMock()
-    painel.SERVIDORES = {
-        "fusion": {"nome": "Fusion (Windows)", "mac": "00:11:22:33:44:55"},
-        "ananuke": {"nome": "Ananuke", "mac": "00:11:22:33:44:66"},
-    }
-    painel.host_ligado = lambda srv: False
-    painel.montar_comando_ssh = lambda cfg: ["echo", "ssh_simulado"]
+import app as painel
 
 from gateway.ipc_bus import DEFAULT_IPC_SOCKET, IpcEventListener
 
@@ -78,42 +63,117 @@ sessao_ativa_id = None
 fila_intencoes = queue.Queue(maxsize=32)
 loop_principal_ativo = threading.Event()
 
-# Cache de idempotência / deduplicação de ações
-acoes_recentes = {}
+# --- Persistência de Estado e Proteção contra Execuções Duplicadas (Mesmo após reinício) ---
 lock_acoes = threading.Lock()
-
-# Registro do ciclo de vida de ações: 'aceito' -> 'em_processamento' -> 'concluido' / 'falha'
+acoes_recentes = {}
 registro_acoes = {}
-lock_registro_acoes = threading.Lock()
+
+
+def _obter_caminho_estado():
+    caminho = os.getenv("JARVIS_STATE_FILE", "/run/jarvis/acoes_recentes.json")
+    pasta = os.path.dirname(caminho)
+    if pasta and not os.path.exists(pasta):
+        try:
+            os.makedirs(pasta, exist_ok=True)
+        except OSError:
+            pass
+    if pasta and os.access(pasta, os.W_OK):
+        return caminho
+    # Fallback seguro caso /run/jarvis não seja gravável (ex.: execução sem privilégios nos testes)
+    fallback_dir = os.path.join(tempfile.gettempdir(), "jarvis_run")
+    os.makedirs(fallback_dir, exist_ok=True)
+    return os.path.join(fallback_dir, "acoes_recentes.json")
+
+
+def _carregar_estado_acoes():
+    global acoes_recentes, registro_acoes
+    caminho = _obter_caminho_estado()
+    if not os.path.exists(caminho):
+        return
+    try:
+        with open(caminho, "r", encoding="utf-8") as f:
+            dados = json.load(f)
+        agora = time.time()
+        # Restaura acoes_recentes podando entradas com mais de 300 segundos
+        carregadas_acoes = {}
+        for chave, ts in dados.get("acoes_recentes", {}).items():
+            if isinstance(ts, (int, float)) and (agora - ts) <= 300.0:
+                carregadas_acoes[chave] = ts
+        acoes_recentes.clear()
+        acoes_recentes.update(carregadas_acoes)
+
+        # Restaura registro_acoes podando entradas com mais de 300 segundos
+        carregados_registros = {}
+        for ev_id, reg in dados.get("registro_acoes", {}).items():
+            ts_inicio = reg.get("timestamp_inicio", 0)
+            if isinstance(ts_inicio, (int, float)) and (agora - ts_inicio) <= 300.0:
+                carregados_registros[ev_id] = reg
+        registro_acoes.clear()
+        registro_acoes.update(carregados_registros)
+    except Exception:
+        pass
+
+
+def _salvar_estado_acoes():
+    caminho = _obter_caminho_estado()
+    pasta = os.path.dirname(caminho)
+    if pasta:
+        try:
+            os.makedirs(pasta, exist_ok=True)
+        except OSError:
+            pass
+    dados = {
+        "acoes_recentes": acoes_recentes,
+        "registro_acoes": registro_acoes,
+        "timestamp_atualizacao": time.time(),
+    }
+    tmp_path = f"{caminho}.tmp.{os.getpid()}_{int(time.time() * 1000)}"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(dados, f, ensure_ascii=False)
+        os.replace(tmp_path, caminho)
+        try:
+            os.chmod(caminho, 0o600)
+        except OSError:
+            pass
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 def registrar_inicio_acao(event_id, acao, alvo, status="aceito"):
     ev_key = event_id or f"ev-{int(time.time() * 1000)}"
-    with lock_registro_acoes:
+    with lock_acoes:
+        _carregar_estado_acoes()
         registro_acoes[ev_key] = {
             "event_id": ev_key,
             "acao": acao,
             "alvo": alvo,
             "status": status,
-            "timestamp_inicio": time.monotonic(),
+            "timestamp_inicio": time.time(),
             "timestamp_conclusao": None,
             "resultado": None,
             "erro": None,
         }
+        _salvar_estado_acoes()
     return ev_key
 
 
 def atualizar_status_acao(event_id, status, acao=None, alvo=None, resultado=None, erro=None):
     if not event_id:
         return
-    with lock_registro_acoes:
+    with lock_acoes:
+        _carregar_estado_acoes()
         if event_id not in registro_acoes:
             registro_acoes[event_id] = {
                 "event_id": event_id,
                 "acao": acao,
                 "alvo": alvo,
                 "status": status,
-                "timestamp_inicio": time.monotonic(),
+                "timestamp_inicio": time.time(),
                 "timestamp_conclusao": None,
                 "resultado": resultado,
                 "erro": erro,
@@ -130,11 +190,13 @@ def atualizar_status_acao(event_id, status, acao=None, alvo=None, resultado=None
             if erro is not None:
                 reg["erro"] = erro
             if status in ("concluido", "falha"):
-                reg["timestamp_conclusao"] = time.monotonic()
+                reg["timestamp_conclusao"] = time.time()
+        _salvar_estado_acoes()
 
 
 def obter_status_acao(event_id=None, acao=None, alvo=None):
-    with lock_registro_acoes:
+    with lock_acoes:
+        _carregar_estado_acoes()
         if event_id and event_id in registro_acoes:
             return dict(registro_acoes[event_id])
         if acao and alvo:
@@ -146,6 +208,7 @@ def obter_status_acao(event_id=None, acao=None, alvo=None):
                 candidatos.sort(key=lambda x: x.get("timestamp_inicio", 0), reverse=True)
                 return dict(candidatos[0])
         return None
+
 
 contador_sessao = 0
 lock_sessao = threading.Lock()
@@ -160,17 +223,28 @@ def gerar_session_id(fonte="me6s"):
 
 def registrar_acao(acao, alvo):
     with lock_acoes:
-        acoes_recentes[(acao, alvo)] = time.monotonic()
+        _carregar_estado_acoes()
+        chave = f"{acao}:{alvo}"
+        acoes_recentes[chave] = time.time()
+        _salvar_estado_acoes()
 
 
 def ja_executado_recentemente(acao, alvo, janela=3.5):
     with lock_acoes:
-        with lock_registro_acoes:
-            # Se uma ação idêntica estiver atualmente 'em_processamento', bloqueia imediatamente
-            for reg in registro_acoes.values():
-                if reg.get("acao") == acao and reg.get("alvo") == alvo and reg.get("status") == "em_processamento":
+        _carregar_estado_acoes()
+        agora = time.time()
+        # 1. Bloqueia se há ação idêntica em andamento iniciada há menos de 30s
+        for reg in registro_acoes.values():
+            if reg.get("acao") == acao and reg.get("alvo") == alvo and reg.get("status") == "em_processamento":
+                if (agora - reg.get("timestamp_inicio", 0)) <= 30.0:
                     return True
-        return (time.monotonic() - acoes_recentes.get((acao, alvo), 0.0)) <= janela
+        # 2. Bloqueia se a mesma ação foi concluída dentro da janela de idempotência
+        chave = f"{acao}:{alvo}"
+        ultimo_ts = acoes_recentes.get(chave, 0.0)
+        return (agora - ultimo_ts) <= janela
+
+
+_carregar_estado_acoes()
 
 
 def processar(texto, fonte="me6s", session_id=None, event_id=None):
@@ -315,6 +389,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                 registrar_acao("ligar", alvo)
                 ev_wol = event_id or f"ev-wol-{int(time.time() * 1000)}"
                 registrar_inicio_acao(ev_wol, "ligar", alvo)
+                status_wol = "concluido"
                 if os.getenv("JARVIS_WOL_REAL") == "1":
                     try:
                         if not srv.get("mac"):
@@ -340,6 +415,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                     except Exception as erro:
                         print("Falha no Wake-on-LAN:", erro, flush=True)
                         atualizar_status_acao(ev_wol, "falha", erro=str(erro))
+                        status_wol = "falha"
                 else:
                     print("SIMULACAO: Wake-on-LAN.", flush=True)
                     atualizar_status_acao(ev_wol, "concluido", resultado={"simulacao": True})
@@ -348,13 +424,14 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
             sessao_ativa_id = None
             ultima_ativacao = 0.0
             return {
-                "sucesso": True,
+                "sucesso": True if status_wol == "concluido" else False,
+                "erro": "falha_wol" if status_wol == "falha" else None,
                 "event_id": event_id,
                 "acao": "ligar",
                 "alvo": alvo,
                 "active_session_id": None,
                 "estado": "espera",
-                "status": "concluido",
+                "status": status_wol,
                 "processado": True,
             }
 
@@ -483,20 +560,70 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                                 text=True,
                                 timeout=25
                             )
-                            print("SSH enviado. Codigo:", resultado.returncode, flush=True)
-                            if resultado.stderr:
-                                print("SSH:", resultado.stderr.strip(), flush=True)
-                            print("Verifique se o computador desligou.", flush=True)
-                            atualizar_status_acao(ev_id, "concluido", acao="desligar", alvo=alvo_nome, resultado={"codigo": resultado.returncode})
+                            if resultado.returncode == 0:
+                                print("SSH enviado com sucesso. Codigo: 0", flush=True)
+                                print("Verifique se o computador desligou.", flush=True)
+                                atualizar_status_acao(
+                                    ev_id,
+                                    "concluido",
+                                    acao="desligar",
+                                    alvo=alvo_nome,
+                                    resultado={"codigo": 0}
+                                )
+                            else:
+                                print(f"Falha no SSH: codigo de retorno {resultado.returncode}.", flush=True)
+                                if resultado.stderr:
+                                    print("SSH:", resultado.stderr.strip(), flush=True)
+                                atualizar_status_acao(
+                                    ev_id,
+                                    "falha",
+                                    acao="desligar",
+                                    alvo=alvo_nome,
+                                    erro=f"ssh_returncode_{resultado.returncode}",
+                                    resultado={"codigo": resultado.returncode}
+                                )
                         else:
+                            codigo_simulado = getattr(painel, "simular_codigo_ssh", 0)
                             atraso = getattr(painel, "simular_atraso_ssh_s", 0.0)
                             if isinstance(atraso, (int, float)) and atraso > 0:
                                 time.sleep(atraso)
-                            print("SIMULACAO SSH para", srv_info["nome"], flush=True)
-                            atualizar_status_acao(ev_id, "concluido", acao="desligar", alvo=alvo_nome, resultado={"codigo": 0})
+                            if codigo_simulado == 0:
+                                print("SIMULACAO SSH para", srv_info["nome"], flush=True)
+                                atualizar_status_acao(
+                                    ev_id,
+                                    "concluido",
+                                    acao="desligar",
+                                    alvo=alvo_nome,
+                                    resultado={"codigo": 0}
+                                )
+                            else:
+                                print(f"SIMULACAO SSH com falha (codigo {codigo_simulado}) para", srv_info["nome"], flush=True)
+                                atualizar_status_acao(
+                                    ev_id,
+                                    "falha",
+                                    acao="desligar",
+                                    alvo=alvo_nome,
+                                    erro=f"ssh_returncode_{codigo_simulado}",
+                                    resultado={"codigo": codigo_simulado}
+                                )
+                    except subprocess.TimeoutExpired as erro_timeout:
+                        print("Erro no SSH: timeout de 25s excedido.", flush=True)
+                        atualizar_status_acao(
+                            ev_id,
+                            "falha",
+                            acao="desligar",
+                            alvo=alvo_nome,
+                            erro="ssh_timeout_25s"
+                        )
                     except Exception as erro:
                         print("Erro no SSH:", erro, flush=True)
-                        atualizar_status_acao(ev_id, "falha", acao="desligar", alvo=alvo_nome, erro=str(erro))
+                        atualizar_status_acao(
+                            ev_id,
+                            "falha",
+                            acao="desligar",
+                            alvo=alvo_nome,
+                            erro=str(erro)
+                        )
 
                 th_ssh = threading.Thread(
                     target=_executar_ssh_worker,

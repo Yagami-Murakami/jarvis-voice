@@ -10,6 +10,7 @@ import json
 import os
 import re
 import socket
+import shutil
 import struct
 import sys
 import tempfile
@@ -47,6 +48,28 @@ class TestPatchedOperationalScript(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        import types
+        from unittest.mock import MagicMock
+
+        try:
+            import vosk
+        except ImportError:
+            mock_vosk = types.ModuleType("vosk")
+            mock_vosk.Model = MagicMock()
+            mock_vosk.KaldiRecognizer = MagicMock()
+            mock_vosk.SetLogLevel = MagicMock()
+            sys.modules["vosk"] = mock_vosk
+
+        if "app" not in sys.modules:
+            mock_app = types.ModuleType("app")
+            mock_app.SERVIDORES = {
+                "fusion": {"nome": "Fusion (Windows)", "mac": "bc:24:11:83:35:82"},
+                "ananuke": {"nome": "Ananuke (Debian)", "mac": "0a:e0:af:c3:06:fc"},
+            }
+            mock_app.host_ligado = lambda srv: False
+            mock_app.montar_comando_ssh = lambda cfg: ["echo", "ssh_simulado"]
+            sys.modules["app"] = mock_app
+
         if os.path.exists("/opt/jarvis-voice/test_isolado/jarvis-operacional.py"):
             cls.isolated_path = "/opt/jarvis-voice/test_isolado/jarvis-operacional.py"
         else:
@@ -63,6 +86,9 @@ class TestPatchedOperationalScript(unittest.TestCase):
             spec.loader.exec_module(cls.mod)
 
     def setUp(self):
+        self.temp_state_dir = tempfile.mkdtemp()
+        self.state_file = os.path.join(self.temp_state_dir, "acoes_recentes.json")
+        os.environ["JARVIS_STATE_FILE"] = self.state_file
         os.environ["JARVIS_WOL_REAL"] = "0"
         os.environ["JARVIS_SSH_REAL"] = "0"
         self.mod.estado = "espera"
@@ -78,6 +104,23 @@ class TestPatchedOperationalScript(unittest.TestCase):
                 pass
         with self.mod.lock_acoes:
             self.mod.acoes_recentes.clear()
+            self.mod.registro_acoes.clear()
+        if hasattr(self.mod.painel, "simular_atraso_ssh_s"):
+            delattr(self.mod.painel, "simular_atraso_ssh_s")
+        if hasattr(self.mod.painel, "simular_codigo_ssh"):
+            delattr(self.mod.painel, "simular_codigo_ssh")
+
+    def tearDown(self):
+        if hasattr(self.mod.painel, "simular_atraso_ssh_s"):
+            delattr(self.mod.painel, "simular_atraso_ssh_s")
+        if hasattr(self.mod.painel, "simular_codigo_ssh"):
+            delattr(self.mod.painel, "simular_codigo_ssh")
+        if os.path.exists(self.state_file):
+            try:
+                os.remove(self.state_file)
+            except OSError:
+                pass
+        shutil.rmtree(self.temp_state_dir, ignore_errors=True)
 
     # =========================================================================
     # TESTES OBRIGATÓRIOS ESPECIFICADOS PELO REVISOR (PR #4)
