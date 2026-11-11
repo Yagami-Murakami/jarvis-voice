@@ -983,6 +983,195 @@ class TestIpcRealSocketIntegration(unittest.TestCase):
         self.assertEqual(status_reg.get("status"), "falha")
         self.assertEqual(status_reg.get("erro"), "ssh_timeout_25s")
 
+    def test_18_persistence_failure_blocks_real_wol_and_ssh(self):
+        """18. Falha na persistência bloqueia estritamente ações reais de WoL e SSH (Requisitos 1 e 2)."""
+        invalid_state_file = "/sys/kernel/security/jarvis_invalid_state/acoes.json"
+
+        with patch.dict(os.environ, {"JARVIS_STATE_FILE": invalid_state_file, "JARVIS_WOL_REAL": "1", "JARVIS_SSH_REAL": "1"}):
+            self.mod.estado = "comando"
+            self.mod.sessao_ativa_id = "sess-persist-fail-1"
+
+            # 1. Teste WoL com falha na persistência
+            with patch.object(self.mod.painel, "host_ligado", return_value=False), \
+                 patch.object(self.mod.subprocess, "run") as mock_subproc:
+                res_wol = self.mod.processar("ligar fusion", fonte="lg_mic", session_id="sess-persist-fail-1", event_id="ev-wol-fail")
+                self.assertFalse(res_wol.get("sucesso"))
+                self.assertEqual(res_wol.get("erro"), "falha_persistencia_estado")
+                mock_subproc.assert_not_called()
+
+            # 2. Teste SSH com falha na persistência
+            self.mod.estado = "confirmacao"
+            self.mod.pendente = "fusion"
+            self.mod.sessao_ativa_id = "sess-persist-fail-2"
+            with patch.object(self.mod.painel, "host_ligado", return_value=True), \
+                 patch.object(self.mod.subprocess, "run") as mock_subproc_ssh:
+                res_ssh = self.mod.processar("confirmar desligamento", fonte="lg_mic", session_id="sess-persist-fail-2", event_id="ev-ssh-fail")
+                self.assertFalse(res_ssh.get("sucesso"))
+                self.assertEqual(res_ssh.get("erro"), "falha_persistencia_estado")
+                mock_subproc_ssh.assert_not_called()
+
+            # 3. Garante que nenhum fallback silencioso para /tmp ocorreu
+            fallback_path = os.path.join(tempfile.gettempdir(), "jarvis_run", "acoes_recentes.json")
+            self.assertFalse(os.path.exists(fallback_path))
+
+    def test_19_real_isolated_process_kill_during_ssh_recovers_as_indetermined(self):
+        """19. Reinicialização real de processo isolado durante SSH em andamento recupera como INDETERMINADO e preserva microfones (Requisitos 3, 4 e 5)."""
+        temp_dir = tempfile.mkdtemp()
+        state_file = os.path.join(temp_dir, "acoes_recentes.json")
+        repo_root = str(Path(__file__).resolve().parent.parent.parent)
+
+        code_proc1 = f"""
+import sys, os, time, json
+from pathlib import Path
+try:
+    import vosk
+except ImportError:
+    import types
+    from unittest.mock import MagicMock
+    mv = types.ModuleType('vosk')
+    mv.Model = MagicMock()
+    mv.KaldiRecognizer = MagicMock()
+    mv.SetLogLevel = MagicMock()
+    sys.modules['vosk'] = mv
+
+try:
+    import app
+except ImportError:
+    import types
+    ma = types.ModuleType('app')
+    ma.SERVIDORES = {{'fusion': {{'nome': 'Fusion (Windows)', 'mac': 'bc:24:11:83:35:82'}}}}
+    ma.host_ligado = lambda srv: True
+    ma.montar_comando_ssh = lambda cfg: ['echo', 'sim']
+    sys.modules['app'] = ma
+
+sys.path.insert(0, r'{repo_root}')
+sys.path.insert(0, os.path.join(r'{repo_root}', 'scripts'))
+os.environ['JARVIS_STATE_FILE'] = r'{state_file}'
+os.environ['JARVIS_SSH_REAL'] = '0'
+os.environ['JARVIS_WOL_REAL'] = '0'
+
+import jarvis_operacional_corrigido as mod
+mod.painel.simular_atraso_ssh_s = 5.0
+mod.painel.host_ligado = lambda srv: True
+
+mod.processar('assistente', fonte='lg_mic', session_id='sess-kill-test')
+mod.processar('desligar fusion', fonte='lg_mic', session_id='sess-kill-test')
+res = mod.processar('confirmar desligamento', fonte='lg_mic', session_id='sess-kill-test', event_id='ev-kill-test-1')
+print('PROC1_DISPATCHED:' + json.dumps(res), flush=True)
+
+time.sleep(10.0)
+"""
+        try:
+            proc1 = subprocess.Popen(
+                [sys.executable, "-c", code_proc1],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            linha = ""
+            for _ in range(30):
+                l = proc1.stdout.readline()
+                if not l:
+                    break
+                if "PROC1_DISPATCHED:" in l:
+                    linha = l
+                    break
+            self.assertIn("PROC1_DISPATCHED:", linha)
+
+            with open(state_file, "r", encoding="utf-8") as f:
+                dados1 = json.load(f)
+            reg1 = dados1.get("registro_acoes", {}).get("ev-kill-test-1")
+            self.assertIsNotNone(reg1)
+            self.assertEqual(reg1.get("status"), "em_processamento")
+
+            proc1.kill()
+            proc1.wait()
+
+            code_proc2 = f"""
+import sys, os, time, json
+from pathlib import Path
+try:
+    import vosk
+except ImportError:
+    import types
+    from unittest.mock import MagicMock
+    mv = types.ModuleType('vosk')
+    mv.Model = MagicMock()
+    mv.KaldiRecognizer = MagicMock()
+    mv.SetLogLevel = MagicMock()
+    sys.modules['vosk'] = mv
+
+try:
+    import app
+except ImportError:
+    import types
+    ma = types.ModuleType('app')
+    ma.SERVIDORES = {{
+        'fusion': {{'nome': 'Fusion (Windows)', 'mac': 'bc:24:11:83:35:82'}},
+        'ananuke': {{'nome': 'Ananuke (Debian)', 'mac': '0a:e0:af:c3:06:fc'}},
+    }}
+    ma.host_ligado = lambda srv: True
+    ma.montar_comando_ssh = lambda cfg: ['echo', 'sim']
+    sys.modules['app'] = ma
+
+sys.path.insert(0, r'{repo_root}')
+sys.path.insert(0, os.path.join(r'{repo_root}', 'scripts'))
+os.environ['JARVIS_STATE_FILE'] = r'{state_file}'
+os.environ['JARVIS_SSH_REAL'] = '0'
+os.environ['JARVIS_WOL_REAL'] = '0'
+
+import jarvis_operacional_corrigido as mod
+
+st = mod.obter_status_acao(event_id='ev-kill-test-1')
+print('INTERRUPTED_STATUS:' + json.dumps(st), flush=True)
+
+blocked = mod.ja_executado_recentemente('desligar', 'fusion', janela=3.5)
+print('IDEMPOTENCY_BLOCKED:' + str(blocked), flush=True)
+
+retrans = mod.processar('confirmar desligamento', fonte='lg_mic', session_id='sess-kill-test', event_id='ev-kill-test-1')
+print('RETRANS_RESULT:' + json.dumps(retrans), flush=True)
+
+wake_res = mod.processar('assistente', fonte='me6s')
+print('ME6S_WAKE:' + json.dumps(wake_res), flush=True)
+
+cmd_res = mod.processar('ligar computador dois', fonte='lg_mic')
+print('LG_CMD:' + json.dumps(cmd_res), flush=True)
+"""
+            proc2 = subprocess.Popen(
+                [sys.executable, "-c", code_proc2],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            out2, err2 = proc2.communicate(timeout=10)
+            self.assertEqual(proc2.returncode, 0, f"Processo 2 falhou: {err2}")
+
+            linhas_out = {l.split(":", 1)[0].strip(): l.split(":", 1)[1].strip() for l in out2.strip().split("\n") if ":" in l}
+
+            st_interrupted = json.loads(linhas_out["INTERRUPTED_STATUS"])
+            self.assertEqual(st_interrupted.get("status"), "indeterminado")
+            self.assertEqual(st_interrupted.get("erro"), "operacao_interrompida_por_reinicio")
+
+            self.assertEqual(linhas_out["IDEMPOTENCY_BLOCKED"], "True")
+
+            st_retrans = json.loads(linhas_out["RETRANS_RESULT"])
+            self.assertFalse(st_retrans.get("sucesso"))
+            self.assertEqual(st_retrans.get("status"), "indeterminado")
+            self.assertTrue(st_retrans.get("retransmissao"))
+
+            st_wake = json.loads(linhas_out["ME6S_WAKE"])
+            self.assertTrue(st_wake.get("sucesso"))
+            self.assertEqual(st_wake.get("estado"), "comando")
+
+            st_cmd = json.loads(linhas_out["LG_CMD"])
+            self.assertTrue(st_cmd.get("sucesso"))
+            self.assertEqual(st_cmd.get("acao"), "ligar")
+            self.assertEqual(st_cmd.get("alvo"), "ananuke")
+
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

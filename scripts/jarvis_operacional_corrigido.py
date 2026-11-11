@@ -68,60 +68,32 @@ lock_acoes = threading.Lock()
 acoes_recentes = {}
 registro_acoes = {}
 
+DEFAULT_STATE_FILE = "/var/lib/jarvis/acoes_recentes.json"
+
 
 def _obter_caminho_estado():
-    caminho = os.getenv("JARVIS_STATE_FILE", "/run/jarvis/acoes_recentes.json")
-    pasta = os.path.dirname(caminho)
-    if pasta and not os.path.exists(pasta):
-        try:
-            os.makedirs(pasta, exist_ok=True)
-        except OSError:
-            pass
-    if pasta and os.access(pasta, os.W_OK):
+    # Permite configuração explícita via variável de ambiente (ex.: testes isolados)
+    caminho = os.getenv("JARVIS_STATE_FILE")
+    if caminho:
         return caminho
-    # Fallback seguro caso /run/jarvis não seja gravável (ex.: execução sem privilégios nos testes)
-    fallback_dir = os.path.join(tempfile.gettempdir(), "jarvis_run")
-    os.makedirs(fallback_dir, exist_ok=True)
-    return os.path.join(fallback_dir, "acoes_recentes.json")
-
-
-def _carregar_estado_acoes():
-    global acoes_recentes, registro_acoes
-    caminho = _obter_caminho_estado()
-    if not os.path.exists(caminho):
-        return
-    try:
-        with open(caminho, "r", encoding="utf-8") as f:
-            dados = json.load(f)
-        agora = time.time()
-        # Restaura acoes_recentes podando entradas com mais de 300 segundos
-        carregadas_acoes = {}
-        for chave, ts in dados.get("acoes_recentes", {}).items():
-            if isinstance(ts, (int, float)) and (agora - ts) <= 300.0:
-                carregadas_acoes[chave] = ts
-        acoes_recentes.clear()
-        acoes_recentes.update(carregadas_acoes)
-
-        # Restaura registro_acoes podando entradas com mais de 300 segundos
-        carregados_registros = {}
-        for ev_id, reg in dados.get("registro_acoes", {}).items():
-            ts_inicio = reg.get("timestamp_inicio", 0)
-            if isinstance(ts_inicio, (int, float)) and (agora - ts_inicio) <= 300.0:
-                carregados_registros[ev_id] = reg
-        registro_acoes.clear()
-        registro_acoes.update(carregados_registros)
-    except Exception:
-        pass
+    return DEFAULT_STATE_FILE
 
 
 def _salvar_estado_acoes():
+    """Salva estado no arquivo persistente de forma atômica com permissões 0600.
+    Retorna (True, None) em caso de sucesso, ou (False, mensagem_erro) em caso de falha.
+    NÃO realiza fallback silencioso para /tmp.
+    """
     caminho = _obter_caminho_estado()
     pasta = os.path.dirname(caminho)
-    if pasta:
+    if pasta and not os.path.exists(pasta):
         try:
-            os.makedirs(pasta, exist_ok=True)
-        except OSError:
-            pass
+            os.makedirs(pasta, mode=0o750, exist_ok=True)
+        except OSError as e:
+            msg = f"Impossivel criar diretorio de persistencia '{pasta}': {e}"
+            print(f"FALHA PERSISTENCIA: {msg}", flush=True)
+            return False, msg
+
     dados = {
         "acoes_recentes": acoes_recentes,
         "registro_acoes": registro_acoes,
@@ -136,18 +108,75 @@ def _salvar_estado_acoes():
             os.chmod(caminho, 0o600)
         except OSError:
             pass
-    except Exception:
+        return True, None
+    except Exception as e:
+        msg = f"Falha ao gravar estado persistente em '{caminho}': {e}"
+        print(f"FALHA PERSISTENCIA: {msg}", flush=True)
         if os.path.exists(tmp_path):
             try:
                 os.remove(tmp_path)
             except OSError:
                 pass
+        return False, msg
+
+
+def _carregar_estado_acoes():
+    """Carrega estado do disco na memória se existir."""
+    global acoes_recentes, registro_acoes
+    caminho = _obter_caminho_estado()
+    if not os.path.exists(caminho):
+        return
+    try:
+        with open(caminho, "r", encoding="utf-8") as f:
+            dados = json.load(f)
+        agora = time.time()
+        for chave, ts in dados.get("acoes_recentes", {}).items():
+            if isinstance(ts, (int, float)) and (agora - ts) <= 300.0:
+                acoes_recentes[chave] = ts
+        for ev_id, reg in dados.get("registro_acoes", {}).items():
+            ts_inicio = reg.get("timestamp_inicio", 0)
+            if isinstance(ts_inicio, (int, float)) and (agora - ts_inicio) <= 300.0:
+                registro_acoes[ev_id] = reg
+    except Exception as e:
+        print(f"Aviso: falha ao carregar estado de acoes: {e}", flush=True)
+
+
+def _recuperar_estado_na_inicializacao():
+    """Executado na inicialização/reinício do controlador.
+    Identifica operações de hardware (desligar/ligar) que estavam em andamento quando
+    o processo anterior morreu e as transiciona para 'indeterminado', prevenindo
+    qualquer repetição automática (Requisito 3).
+    """
+    global acoes_recentes, registro_acoes
+    caminho = _obter_caminho_estado()
+    if not os.path.exists(caminho):
+        return
+    with lock_acoes:
+        _carregar_estado_acoes()
+        agora = time.time()
+        houve_interrupcao = False
+        for ev_id, reg in list(registro_acoes.items()):
+            if reg.get("status") in ("em_processamento", "aceito") and reg.get("acao") in ("desligar", "ligar"):
+                reg["status"] = "indeterminado"
+                reg["timestamp_conclusao"] = agora
+                reg["erro"] = "operacao_interrompida_por_reinicio"
+                houve_interrupcao = True
+                acao = reg.get("acao")
+                alvo = reg.get("alvo")
+                print(
+                    f"RECUPERACAO: Operacao '{acao}' para '{alvo}' (ID: {ev_id}) "
+                    f"estava em andamento durante o reinicio. Marcada como INDETERMINADO.",
+                    flush=True,
+                )
+                if acao and alvo:
+                    acoes_recentes[f"{acao}:{alvo}"] = agora
+        if houve_interrupcao:
+            _salvar_estado_acoes()
 
 
 def registrar_inicio_acao(event_id, acao, alvo, status="aceito"):
     ev_key = event_id or f"ev-{int(time.time() * 1000)}"
     with lock_acoes:
-        _carregar_estado_acoes()
         registro_acoes[ev_key] = {
             "event_id": ev_key,
             "acao": acao,
@@ -158,13 +187,15 @@ def registrar_inicio_acao(event_id, acao, alvo, status="aceito"):
             "resultado": None,
             "erro": None,
         }
-        _salvar_estado_acoes()
-    return ev_key
+        chave = f"{acao}:{alvo}"
+        acoes_recentes[chave] = time.time()
+        ok, erro = _salvar_estado_acoes()
+        return ok, erro
 
 
 def atualizar_status_acao(event_id, status, acao=None, alvo=None, resultado=None, erro=None):
     if not event_id:
-        return
+        return False, "event_id_invalido"
     with lock_acoes:
         _carregar_estado_acoes()
         if event_id not in registro_acoes:
@@ -189,9 +220,12 @@ def atualizar_status_acao(event_id, status, acao=None, alvo=None, resultado=None
                 reg["resultado"] = resultado
             if erro is not None:
                 reg["erro"] = erro
-            if status in ("concluido", "falha"):
+            if status in ("concluido", "falha", "indeterminado"):
                 reg["timestamp_conclusao"] = time.time()
-        _salvar_estado_acoes()
+        if acao and alvo:
+            acoes_recentes[f"{acao}:{alvo}"] = time.time()
+        ok, erro = _salvar_estado_acoes()
+        return ok, erro
 
 
 def obter_status_acao(event_id=None, acao=None, alvo=None):
@@ -226,7 +260,8 @@ def registrar_acao(acao, alvo):
         _carregar_estado_acoes()
         chave = f"{acao}:{alvo}"
         acoes_recentes[chave] = time.time()
-        _salvar_estado_acoes()
+        ok, erro = _salvar_estado_acoes()
+        return ok, erro
 
 
 def ja_executado_recentemente(acao, alvo, janela=3.5):
@@ -235,22 +270,45 @@ def ja_executado_recentemente(acao, alvo, janela=3.5):
         agora = time.time()
         # 1. Bloqueia se há ação idêntica em andamento iniciada há menos de 30s
         for reg in registro_acoes.values():
-            if reg.get("acao") == acao and reg.get("alvo") == alvo and reg.get("status") == "em_processamento":
-                if (agora - reg.get("timestamp_inicio", 0)) <= 30.0:
+            if reg.get("acao") == acao and reg.get("alvo") == alvo:
+                st = reg.get("status")
+                ts = reg.get("timestamp_inicio", 0)
+                if st == "em_processamento" and (agora - ts) <= 30.0:
                     return True
-        # 2. Bloqueia se a mesma ação foi concluída dentro da janela de idempotência
+                if st == "indeterminado" and (agora - ts) <= janela:
+                    return True
+        # 2. Bloqueia se a mesma ação foi concluída ou tentada dentro da janela de idempotência
         chave = f"{acao}:{alvo}"
         ultimo_ts = acoes_recentes.get(chave, 0.0)
         return (agora - ultimo_ts) <= janela
 
 
-_carregar_estado_acoes()
+_recuperar_estado_na_inicializacao()
 
 
 def processar(texto, fonte="me6s", session_id=None, event_id=None):
     global estado, limite, pendente, ultima_ativacao, fonte_ativa, sessao_ativa_id
 
     agora = time.monotonic()
+
+    # Verificação de retransmissão de evento já registrado no histórico persistente
+    if event_id and texto not in ("assistente", "cancelar"):
+        reg_existente = obter_status_acao(event_id=event_id)
+        if reg_existente and reg_existente.get("status") in ("concluido", "em_processamento", "indeterminado", "falha"):
+            st = reg_existente.get("status")
+            print(f"Retransmissao de acao recuperada do estado persistente ({event_id}, status: {st}).", flush=True)
+            return {
+                "sucesso": True if st == "concluido" else False,
+                "event_id": event_id,
+                "acao": reg_existente.get("acao"),
+                "alvo": reg_existente.get("alvo"),
+                "status": st,
+                "erro": reg_existente.get("erro"),
+                "active_session_id": sessao_ativa_id,
+                "estado": estado,
+                "processado": True,
+                "retransmissao": True,
+            }
 
     if estado != "espera" and agora > limite:
         print("Tempo esgotado.", flush=True)
@@ -366,6 +424,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
         acessivel = painel.host_ligado(srv)
 
         if acao == "ligar":
+            status_wol = "concluido"
             if acessivel:
                 print("Computador ja esta acessivel.", flush=True)
             else:
@@ -388,7 +447,26 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
 
                 registrar_acao("ligar", alvo)
                 ev_wol = event_id or f"ev-wol-{int(time.time() * 1000)}"
-                registrar_inicio_acao(ev_wol, "ligar", alvo)
+                salvo_ok, erro_salvar = registrar_inicio_acao(ev_wol, "ligar", alvo)
+                if not salvo_ok:
+                    print(f"FALHA NA PERSISTENCIA: {erro_salvar}", flush=True)
+                    if os.getenv("JARVIS_WOL_REAL") == "1" or os.getenv("JARVIS_REQUIRE_PERSISTENCE") == "1":
+                        print("FALHA CRITICA: WoL real BLOQUEADO por seguranca (falha ao persistir estado).", flush=True)
+                        estado = "espera"
+                        fonte_ativa = None
+                        sessao_ativa_id = None
+                        return {
+                            "sucesso": False,
+                            "erro": "falha_persistencia_estado",
+                            "event_id": event_id,
+                            "acao": "ligar",
+                            "alvo": alvo,
+                            "active_session_id": None,
+                            "estado": "espera",
+                            "status": "falha",
+                            "processado": True,
+                        }
+
                 status_wol = "concluido"
                 if os.getenv("JARVIS_WOL_REAL") == "1":
                     try:
@@ -543,7 +621,26 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                 alvo_confirmado = pendente
                 registrar_acao("desligar", alvo_confirmado)
                 ev_key = event_id or f"ev-desligar-{int(time.time() * 1000)}"
-                registrar_inicio_acao(ev_key, "desligar", alvo_confirmado, status="em_processamento")
+                salvo_ok, erro_salvar = registrar_inicio_acao(ev_key, "desligar", alvo_confirmado, status="em_processamento")
+                if not salvo_ok:
+                    print(f"FALHA NA PERSISTENCIA: {erro_salvar}", flush=True)
+                    if os.getenv("JARVIS_SSH_REAL") == "1" or os.getenv("JARVIS_REQUIRE_PERSISTENCE") == "1":
+                        print("FALHA CRITICA: SSH real BLOQUEADO por seguranca (falha ao persistir estado).", flush=True)
+                        estado = "espera"
+                        pendente = None
+                        fonte_ativa = None
+                        sessao_ativa_id = None
+                        return {
+                            "sucesso": False,
+                            "erro": "falha_persistencia_estado",
+                            "event_id": event_id,
+                            "acao": "desligar",
+                            "alvo": alvo_confirmado,
+                            "active_session_id": None,
+                            "estado": "espera",
+                            "status": "falha",
+                            "processado": True,
+                        }
 
                 configuracao = dict(srv)
                 if alvo_confirmado == "ananuke":
@@ -718,6 +815,25 @@ def on_ipc_event(evento):
     sid = evento.get("session_id")
     event_id = evento.get("event_id") or evento.get("nonce")
 
+    # Verificação de retransmissão de evento no histórico persistente
+    if event_id and tipo in ("comando", "confirmar"):
+        reg_existente = obter_status_acao(event_id=event_id)
+        if reg_existente and reg_existente.get("status") in ("concluido", "em_processamento", "indeterminado", "falha"):
+            st = reg_existente.get("status")
+            print(f"IPC: Retransmissao de evento recuperada do historico persistente ({event_id}, status: {st}).", flush=True)
+            return {
+                "sucesso": True if st == "concluido" else False,
+                "event_id": event_id,
+                "acao": reg_existente.get("acao"),
+                "alvo": reg_existente.get("alvo"),
+                "status": st,
+                "erro": reg_existente.get("erro"),
+                "active_session_id": sessao_ativa_id,
+                "estado": estado,
+                "processado": True,
+                "retransmissao": True,
+            }
+
     # 1. Se a fila estiver cheia, responde imediatamente com FALHA (Requisito 3)
     if fila_intencoes.full():
         print(f"Fila de intencoes cheia ({fila_intencoes.qsize()}/{fila_intencoes.maxsize}). Descartando evento IPC.", flush=True)
@@ -834,7 +950,8 @@ def on_ipc_event(evento):
         comp_q = queue.Queue(maxsize=1)
         try:
             fila_intencoes.put_nowait((fonte, texto, sid, event_id, comp_q))
-            registrar_inicio_acao(event_id, tipo, texto, status="aceito")
+            if tipo in ("comando", "confirmar"):
+                registrar_inicio_acao(event_id, tipo, texto, status="aceito")
         except queue.Full:
             print("Fila de intencoes cheia. Descartando evento IPC.", flush=True)
             return {
@@ -872,7 +989,8 @@ def on_ipc_event(evento):
         # Modo isolado/unitário fora do loop principal: enfileira se couber
         try:
             fila_intencoes.put_nowait((fonte, texto, sid))
-            registrar_inicio_acao(event_id, tipo, texto, status="aceito")
+            if tipo in ("comando", "confirmar"):
+                registrar_inicio_acao(event_id, tipo, texto, status="aceito")
         except queue.Full:
             return {
                 "sucesso": False,
