@@ -432,97 +432,143 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
         srv = painel.SERVIDORES[alvo]
 
         print("Computador:", srv["nome"], flush=True)
-        acessivel = painel.host_ligado(srv)
 
         if acao == "ligar":
-            status_wol = "concluido"
-            if acessivel:
-                print("Computador ja esta acessivel.", flush=True)
-            else:
-                # Deduplicação na camada de ação (idempotência do WoL)
-                if ja_executado_recentemente("ligar", alvo):
-                    print(f"WoL para {alvo} descartado por idempotencia.", flush=True)
+            # Deduplicação na camada de ação (idempotência do WoL)
+            if ja_executado_recentemente("ligar", alvo):
+                print(f"WoL para {alvo} descartado por idempotencia.", flush=True)
+                estado = "espera"
+                fonte_ativa = None
+                sessao_ativa_id = None
+                return {
+                    "sucesso": True,
+                    "event_id": event_id,
+                    "acao": "ligar",
+                    "alvo": alvo,
+                    "deduplicado": True,
+                    "active_session_id": None,
+                    "estado": "espera",
+                    "status": "concluido",
+                    "processado": True,
+                }
+
+            registrar_acao("ligar", alvo)
+            ev_wol = event_id or f"ev-wol-{int(time.time() * 1000)}"
+            salvo_ok, erro_salvar = registrar_inicio_acao(ev_wol, "ligar", alvo, status="aceito")
+            if not salvo_ok:
+                print(f"FALHA NA PERSISTENCIA: {erro_salvar}", flush=True)
+                if os.getenv("JARVIS_WOL_REAL") == "1" or os.getenv("JARVIS_REQUIRE_PERSISTENCE") == "1":
+                    print("FALHA CRITICA: WoL real BLOQUEADO por seguranca (falha ao persistir estado).", flush=True)
                     estado = "espera"
                     fonte_ativa = None
                     sessao_ativa_id = None
                     return {
-                        "sucesso": True,
+                        "sucesso": False,
+                        "erro": "falha_persistencia_estado",
                         "event_id": event_id,
                         "acao": "ligar",
                         "alvo": alvo,
-                        "deduplicado": True,
                         "active_session_id": None,
                         "estado": "espera",
+                        "status": "falha",
                         "processado": True,
                     }
 
-                registrar_acao("ligar", alvo)
-                ev_wol = event_id or f"ev-wol-{int(time.time() * 1000)}"
-                salvo_ok, erro_salvar = registrar_inicio_acao(ev_wol, "ligar", alvo)
-                if not salvo_ok:
-                    print(f"FALHA NA PERSISTENCIA: {erro_salvar}", flush=True)
-                    if os.getenv("JARVIS_WOL_REAL") == "1" or os.getenv("JARVIS_REQUIRE_PERSISTENCE") == "1":
-                        print("FALHA CRITICA: WoL real BLOQUEADO por seguranca (falha ao persistir estado).", flush=True)
-                        estado = "espera"
-                        fonte_ativa = None
-                        sessao_ativa_id = None
-                        return {
-                            "sucesso": False,
-                            "erro": "falha_persistencia_estado",
-                            "event_id": event_id,
-                            "acao": "ligar",
-                            "alvo": alvo,
-                            "active_session_id": None,
-                            "estado": "espera",
-                            "status": "falha",
-                            "processado": True,
-                        }
+            modo_real = os.getenv("JARVIS_WOL_REAL") == "1"
+            atraso_wol = getattr(painel, "simular_atraso_wol_s", 0.0)
 
-                status_wol = "concluido"
-                if os.getenv("JARVIS_WOL_REAL") == "1":
-                    try:
-                        if not srv.get("mac"):
+            estado = "espera"
+            fonte_ativa = None
+            sessao_ativa_id = None
+            ultima_ativacao = 0.0
+
+            def _executar_wol_worker(srv_info, ev_id, alvo_nome):
+                try:
+                    atualizar_status_acao(ev_id, "em_processamento", acao="ligar", alvo=alvo_nome)
+                    t_ini_sond = time.monotonic()
+                    if os.getenv("JARVIS_WOL_REAL") == "1":
+                        acessivel = painel.host_ligado(srv_info)
+                    else:
+                        atraso = getattr(painel, "simular_atraso_wol_s", 0.0)
+                        if isinstance(atraso, (int, float)) and atraso > 0:
+                            time.sleep(atraso)
+                        acessivel = False
+                    duracao_sond = time.monotonic() - t_ini_sond
+                    print(f"LATENCIA: sondagem_wol_worker={duracao_sond:.4f}s (real={os.getenv('JARVIS_WOL_REAL') == '1'})", flush=True)
+
+                    if acessivel:
+                        print("Computador ja esta acessivel.", flush=True)
+                        atualizar_status_acao(ev_id, "concluido", acao="ligar", alvo=alvo_nome, resultado={"ja_ligado": True})
+                        return
+
+                    if os.getenv("JARVIS_WOL_REAL") == "1":
+                        if not srv_info.get("mac"):
                             raise ValueError("MAC nao configurado")
 
-                        if srv.get("wol_python"):
+                        if srv_info.get("wol_python"):
                             painel.enviar_magic_packet(
-                                srv["mac"],
-                                broadcast=srv.get(
+                                srv_info["mac"],
+                                broadcast=srv_info.get(
                                     "broadcast", "255.255.255.255"
                                 )
                             )
                         else:
                             subprocess.run(
-                                ["wakeonlan", srv["mac"]],
+                                ["wakeonlan", srv_info["mac"]],
                                 check=True,
                                 timeout=10
                             )
 
                         print("Wake-on-LAN enviado.", flush=True)
-                        atualizar_status_acao(ev_wol, "concluido", resultado={"wol": True})
+                        atualizar_status_acao(ev_id, "concluido", acao="ligar", alvo=alvo_nome, resultado={"wol": True})
+                    else:
+                        print("SIMULACAO: Wake-on-LAN.", flush=True)
+                        atualizar_status_acao(ev_id, "concluido", acao="ligar", alvo=alvo_nome, resultado={"simulacao": True})
+                except Exception as erro:
+                    print(f"Falha no Wake-on-LAN: {erro}", flush=True)
+                    atualizar_status_acao(ev_id, "falha", acao="ligar", alvo=alvo_nome, erro=str(erro))
 
-                    except Exception as erro:
-                        print("Falha no Wake-on-LAN:", erro, flush=True)
-                        atualizar_status_acao(ev_wol, "falha", erro=str(erro))
-                        status_wol = "falha"
-                else:
-                    print("SIMULACAO: Wake-on-LAN.", flush=True)
-                    atualizar_status_acao(ev_wol, "concluido", resultado={"simulacao": True})
-            estado = "espera"
-            fonte_ativa = None
-            sessao_ativa_id = None
-            ultima_ativacao = 0.0
-            return {
-                "sucesso": True if status_wol == "concluido" else False,
-                "erro": "falha_wol" if status_wol == "falha" else None,
-                "event_id": event_id,
-                "acao": "ligar",
-                "alvo": alvo,
-                "active_session_id": None,
-                "estado": "espera",
-                "status": status_wol,
-                "processado": True,
-            }
+            if modo_real or atraso_wol > 0:
+                threading.Thread(
+                    target=_executar_wol_worker,
+                    args=(srv, ev_wol, alvo),
+                    daemon=True
+                ).start()
+                return {
+                    "sucesso": True,
+                    "event_id": event_id,
+                    "acao": "ligar",
+                    "alvo": alvo,
+                    "active_session_id": None,
+                    "estado": "espera",
+                    "status": "aceito",
+                    "processado": True,
+                }
+            else:
+                # Simulação pura imediata sem I/O de rede desnecessário
+                print("LATENCIA: sondagem_wol=0.0000s (simulacao=True)", flush=True)
+                print("SIMULACAO: Wake-on-LAN.", flush=True)
+                atualizar_status_acao(ev_wol, "concluido", acao="ligar", alvo=alvo, resultado={"simulacao": True})
+                return {
+                    "sucesso": True,
+                    "event_id": event_id,
+                    "acao": "ligar",
+                    "alvo": alvo,
+                    "active_session_id": None,
+                    "estado": "espera",
+                    "status": "concluido",
+                    "processado": True,
+                }
+
+        # Tratamento de acao == "desligar"
+        t_ini_sond = time.monotonic()
+        if os.getenv("JARVIS_SSH_REAL") == "1":
+            acessivel = painel.host_ligado(srv)
+        else:
+            # Em modo de simulação, evita I/O de rede e latências de sondagem (ping/portas)
+            acessivel = True
+        duracao_sond = time.monotonic() - t_ini_sond
+        print(f"LATENCIA: sondagem_desligar={duracao_sond:.4f}s (simulacao={os.getenv('JARVIS_SSH_REAL') != '1'})", flush=True)
 
         if not acessivel:
             print(
@@ -539,6 +585,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                 "event_id": event_id,
                 "active_session_id": None,
                 "estado": "espera",
+                "status": "falha",
                 "processado": True,
             }
 
@@ -588,7 +635,16 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
         if texto in ("confirmar", "confirmar desligar", "confirmar desligamento"):
             srv = painel.SERVIDORES[pendente]
             status_acao = "falha"
-            if painel.host_ligado(srv):
+            t_ini_sond = time.monotonic()
+            if os.getenv("JARVIS_SSH_REAL") == "1":
+                host_ativo = painel.host_ligado(srv)
+            else:
+                # Em modo de simulação, evita I/O de rede desnecessário
+                host_ativo = True
+            duracao_sond = time.monotonic() - t_ini_sond
+            print(f"LATENCIA: sondagem_confirmar_desligar={duracao_sond:.4f}s (simulacao={os.getenv('JARVIS_SSH_REAL') != '1'})", flush=True)
+
+            if host_ativo:
                 if os.getenv("JARVIS_SSH_REAL") == "1":
                     if texto != "confirmar desligamento":
                         print(
@@ -892,6 +948,22 @@ def on_ipc_event(evento):
 
     if tipo == "comando":
         if estado != "comando":
+            # Deduplicação de comando reconhecido simultaneamente por ambos os microfones
+            if texto in COMANDOS:
+                acao_cand, alvo_cand = COMANDOS[texto]
+                if ja_executado_recentemente(acao_cand, alvo_cand):
+                    print(f"IPC: Comando '{texto}' deduplicado (acao '{acao_cand} {alvo_cand}' ja executada recentemente).", flush=True)
+                    return {
+                        "sucesso": True,
+                        "event_id": event_id,
+                        "acao": acao_cand,
+                        "alvo": alvo_cand,
+                        "deduplicado": True,
+                        "active_session_id": None,
+                        "estado": "espera",
+                        "status": "concluido",
+                        "processado": True,
+                    }
             print(f"IPC descartado: comando recebido fora do estado 'comando' (estado atual: {estado}).", flush=True)
             return {
                 "sucesso": False,
@@ -915,6 +987,21 @@ def on_ipc_event(evento):
 
     if tipo == "confirmar":
         if estado != "confirmacao" or pendente is None:
+            # Deduplicação de confirmação reconhecida simultaneamente por ambos os microfones
+            for alvo_chk in ("fusion", "ananuke"):
+                if ja_executado_recentemente("desligar", alvo_chk):
+                    print(f"IPC: Confirmacao de desligamento para '{alvo_chk}' deduplicada (ja executada recentemente).", flush=True)
+                    return {
+                        "sucesso": True,
+                        "event_id": event_id,
+                        "acao": "desligar",
+                        "alvo": alvo_chk,
+                        "deduplicado": True,
+                        "active_session_id": None,
+                        "estado": "espera",
+                        "status": "concluido",
+                        "processado": True,
+                    }
             print(f"IPC descartado: confirmacao recebida fora do estado 'confirmacao' (estado atual: {estado}).", flush=True)
             return {
                 "sucesso": False,

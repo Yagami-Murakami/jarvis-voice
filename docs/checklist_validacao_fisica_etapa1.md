@@ -63,11 +63,12 @@ Este documento define o protocolo oficial de bancada para a homologação físic
 
 ---
 
-### ETAPA 3 — Reconhecimento Simultâneo ("assistente" em Ambos os Microfones)
-* **Ação do Operador:** Pronunciar `"assistente"` simultaneamente próximo a ambos os microfones (<100ms de intervalo).
-  * **Critério de Aceite:** O árbitro de sessão identifica as ativações concorrentes e deduplica a segunda.
-  * **Critério de Coerência:** Estritamente **UMA única sessão** é aberta com identificador sincronizado (`session_id`).
-  * **Critério de UX:** Apenas **UM chime sonoro** é emitido; nenhum erro de corrida no journal.
+### ETAPA 3 — Reconhecimento Simultâneo ("assistente" ou "ligar fusion" em Ambos os Microfones)
+* **Ação do Operador:** Pronunciar `"assistente"` simultaneamente próximo a ambos os microfones (<100ms de intervalo), ou proferir `"ligar fusion"` de modo audível a ambos os transdutores.
+  * **Critério de Aceite:** O árbitro de sessão e o controlador identificam as ativações e comandos concorrentes, aplicando deduplicação bidirecional.
+  * **Critério de Coerência:** Estritamente **UMA única sessão** é mantida e **UMA única ação** é registrada no histórico.
+  * **Critério de Desempenho:** Latência nula de sondagem (<1ms) em modo simulado; nenhum timeout IPC de 2s.
+  * **Critério de UX:** Apenas **UM chime sonoro** é emitido; nenhum erro de concorrência ou colisão no journal.
 - [ ] **Etapa 3 Aprovada**
 
 ---

@@ -160,8 +160,29 @@ class SessionArbitrator:
         """Processa comando de voz recebido de uma das fontes."""
         now = time.monotonic()
         with self._lock:
+            texto = raw_text.strip().lower()
             if self.state != "comando":
-                # Se não estiver no modo comando, ignora
+                # Se não estiver no modo comando, verifica se é comando duplicado do outro microfone
+                if texto in COMANDOS:
+                    acao, alvo = COMANDOS[texto]
+                    delta_action = now - self._recent_actions.get((acao, alvo), 0.0)
+                    if delta_action <= self.action_dedup_window_s:
+                        self.deduplicated_count += 1
+                        logger.info(
+                            "Deduplicação de comando: '%s %s' via %s descartado (ação idêntica executada há %.2fs)",
+                            acao,
+                            alvo,
+                            source,
+                            delta_action,
+                        )
+                        return {
+                            "valido": False,
+                            "acao": acao,
+                            "alvo": alvo,
+                            "deduplicado": True,
+                            "session_id": self.session_id,
+                            "motivo": f"Ação '{acao} {alvo}' recentemente executada (idempotência)",
+                        }
                 return {"valido": False, "motivo": f"Estado atual não aceita comandos ({self.state})"}
 
             if now > self.expires_at:
@@ -169,7 +190,6 @@ class SessionArbitrator:
                 self.session_id = None
                 return {"valido": False, "motivo": "Sessão expirada por inatividade"}
 
-            texto = raw_text.strip().lower()
             if texto == "cancelar":
                 self.state = "espera"
                 old_id = self.session_id
@@ -206,13 +226,14 @@ class SessionArbitrator:
                     }
                 self._recent_actions[(acao, alvo)] = now
 
-                # Conclui sessão com sucesso simulado
+                # Conclui sessão com reconhecimento local
                 sid = self.session_id
                 self.state = "espera"
                 self.session_id = None
-                self._registrar_evento("command_wol_simulated", source, alvo=alvo, session_id=sid)
+                self._registrar_evento("command_recognized_local", source, acao=acao, alvo=alvo, session_id=sid)
                 logger.info(
-                    "[SIMULAÇÃO] WoL reconhecido para '%s' via %s (sessão %s). NENHUM pacote transmitido.",
+                    "Comando reconhecido localmente: %s para '%s' via %s (sessão %s)",
+                    acao,
                     alvo,
                     source,
                     sid,
@@ -252,6 +273,26 @@ class SessionArbitrator:
         now = time.monotonic()
         with self._lock:
             if self.state != "confirmacao":
+                # Verifica se confirmação já foi realizada recentemente (deduplicação entre microfones)
+                for alvo_cand in (self.target_computer, "fusion", "ananuke"):
+                    if alvo_cand:
+                        delta_action = now - self._recent_actions.get(("desligar", alvo_cand), 0.0)
+                        if delta_action <= self.action_dedup_window_s:
+                            self.deduplicated_count += 1
+                            logger.info(
+                                "Deduplicação de confirmação: 'desligar %s' via %s descartada (ação idêntica confirmada há %.2fs)",
+                                alvo_cand,
+                                source,
+                                delta_action,
+                            )
+                            return {
+                                "valido": False,
+                                "acao": "desligar_confirmado",
+                                "alvo": alvo_cand,
+                                "deduplicado": True,
+                                "session_id": self.session_id,
+                                "motivo": f"Ação 'desligar {alvo_cand}' recentemente confirmada (idempotência)",
+                            }
                 return {"valido": False, "motivo": "Nenhuma confirmação pendente"}
 
             if now > self.expires_at:
@@ -284,9 +325,9 @@ class SessionArbitrator:
 
             self.state = "espera"
             self.session_id = None
-            self._registrar_evento("shutdown_confirmed_simulated", source, alvo=alvo, session_id=sid)
+            self._registrar_evento("confirmation_recognized_local", source, alvo=alvo, session_id=sid)
             logger.info(
-                "[SIMULAÇÃO] Desligamento SSH confirmado para '%s' via %s (sessão %s). NENHUM comando SSH enviado.",
+                "Confirmação de desligamento reconhecida localmente para '%s' via %s (sessão %s)",
                 alvo,
                 source,
                 sid,
@@ -574,6 +615,9 @@ class LgMicServer(threading.Thread):
             res = self.arbitrator.report_command("lg_mic", texto)
             logger.info("[Vosk-LG] Resultado do comando: %s", res)
             if res.get("valido") and self.ipc_broadcaster:
+                if res.get("deduplicado"):
+                    logger.info("[Vosk-LG] Comando deduplicado localmente, nenhum evento IPC emitido.")
+                    return
                 ack = self.ipc_broadcaster.emit_event(
                     source="lg_mic",
                     event_type="comando",
@@ -583,11 +627,25 @@ class LgMicServer(threading.Thread):
                 )
                 if isinstance(ack, dict) and ack.get("active_session_id"):
                     self.arbitrator.sync_session_id(ack["active_session_id"])
+                # Confirmação do gateway refletindo o resultado real do controlador (Requisito 3)
+                if isinstance(ack, dict) and ack.get("sucesso"):
+                    if res.get("acao") == "ligar":
+                        logger.info(
+                            "[SIMULAÇÃO] WoL confirmado pelo controlador para '%s' via lg_mic (sessão %s, status=%s)",
+                            res.get("alvo"),
+                            res.get("session_id"),
+                            ack.get("status"),
+                        )
+                else:
+                    logger.error("Falha ao confirmar comando pelo controlador: ack=%s", ack)
         elif self.arbitrator.state == "confirmacao":
             if "confirmar" in texto:
                 res = self.arbitrator.report_confirmation("lg_mic")
                 logger.info("[Vosk-LG] Resultado da confirmação: %s", res)
                 if res.get("valido") and self.ipc_broadcaster:
+                    if res.get("deduplicado"):
+                        logger.info("[Vosk-LG] Confirmação deduplicada localmente, nenhum evento IPC emitido.")
+                        return
                     ack = self.ipc_broadcaster.emit_event(
                         source="lg_mic",
                         event_type="confirmar",
@@ -597,6 +655,16 @@ class LgMicServer(threading.Thread):
                     )
                     if isinstance(ack, dict) and ack.get("active_session_id"):
                         self.arbitrator.sync_session_id(ack["active_session_id"])
+                    # Confirmação do gateway refletindo o resultado real do controlador (Requisito 3)
+                    if isinstance(ack, dict) and ack.get("sucesso"):
+                        logger.info(
+                            "[SIMULAÇÃO] Desligamento SSH confirmado pelo controlador para '%s' via lg_mic (sessão %s, status=%s)",
+                            res.get("alvo"),
+                            res.get("session_id"),
+                            ack.get("status"),
+                        )
+                    else:
+                        logger.error("Falha ao confirmar desligamento pelo controlador: ack=%s", ack)
 
     def _calcular_rms(self, pcm_bytes: bytes) -> float:
         if len(pcm_bytes) < 2:
@@ -819,12 +887,47 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
                 res = self.server.arbitrator.report_command(fonte, texto)
                 resultado = {"sucesso": True, "resultado": res}
                 if res.get("valido") and getattr(self.server, "ipc_broadcaster", None):
-                    self.server.ipc_broadcaster.emit_event(fonte, "comando", texto, session_id=res.get("session_id"), extra=res)
+                    if not res.get("deduplicado"):
+                        ack = self.server.ipc_broadcaster.emit_event(
+                            fonte, "comando", texto, session_id=res.get("session_id"), extra=res
+                        )
+                        resultado["ack"] = ack
+                        if ack is None:
+                            resultado["sucesso"] = False
+                            resultado["erro"] = getattr(self.server.ipc_broadcaster, "last_error", "falha_controlador")
+                        elif isinstance(ack, dict) and not ack.get("sucesso"):
+                            resultado["sucesso"] = False
+                            resultado["erro"] = ack.get("erro", "falha_controlador")
+                        elif isinstance(ack, dict) and ack.get("sucesso"):
+                            if res.get("acao") == "ligar":
+                                logger.info(
+                                    "[SIMULAÇÃO] WoL confirmado pelo controlador para '%s' via %s (sessão %s)",
+                                    res.get("alvo"),
+                                    fonte,
+                                    res.get("session_id"),
+                                )
             elif evento == "confirm":
                 res = self.server.arbitrator.report_confirmation(fonte)
                 resultado = {"sucesso": True, "resultado": res}
                 if res.get("valido") and getattr(self.server, "ipc_broadcaster", None):
-                    self.server.ipc_broadcaster.emit_event(fonte, "confirmar", "confirmar desligamento", session_id=res.get("session_id"), extra=res)
+                    if not res.get("deduplicado"):
+                        ack = self.server.ipc_broadcaster.emit_event(
+                            fonte, "confirmar", "confirmar desligamento", session_id=res.get("session_id"), extra=res
+                        )
+                        resultado["ack"] = ack
+                        if ack is None:
+                            resultado["sucesso"] = False
+                            resultado["erro"] = getattr(self.server.ipc_broadcaster, "last_error", "falha_controlador")
+                        elif isinstance(ack, dict) and not ack.get("sucesso"):
+                            resultado["sucesso"] = False
+                            resultado["erro"] = ack.get("erro", "falha_controlador")
+                        elif isinstance(ack, dict) and ack.get("sucesso"):
+                            logger.info(
+                                "[SIMULAÇÃO] Desligamento SSH confirmado pelo controlador para '%s' via %s (sessão %s)",
+                                res.get("alvo"),
+                                fonte,
+                                res.get("session_id"),
+                            )
 
             self._responder_json(resultado)
         else:

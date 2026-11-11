@@ -132,6 +132,39 @@ class IsolatedTestRunner:
 
             self.controller_state["logs_capturados"].append(f"[IPC Event] {origem}: {tipo} - '{texto}' (sid={sid})")
 
+            # Simulação de rejeição configurada para testes
+            if self.controller_state.get("simular_falha"):
+                erro_motivo = self.controller_state.get("simular_falha_erro", "falha_controlador_simulada")
+                return {
+                    "sucesso": False,
+                    "erro": erro_motivo,
+                    "event_id": ev_id,
+                    "estado": self.controller_state["estado"],
+                    "processado": False,
+                    "status": "falha",
+                }
+
+            if tipo in ("status", "consultar_acao"):
+                target_id = evento.get("target_event_id") or ev_id
+                st = "desconhecido"
+                if os.path.exists(self.state_file):
+                    try:
+                        with open(self.state_file, "r", encoding="utf-8") as f:
+                            pers = json.load(f)
+                            reg = pers.get("registro_acoes", {}).get(target_id)
+                            if reg:
+                                st = reg.get("status", "desconhecido")
+                    except Exception:
+                        pass
+                return {
+                    "sucesso": True,
+                    "event_id": ev_id,
+                    "target_event_id": target_id,
+                    "status": st,
+                    "estado": self.controller_state["estado"],
+                    "processado": True,
+                }
+
             if tipo == "wake":
                 self.controller_state["estado"] = "comando"
                 self.controller_state["session_id"] = sid
@@ -147,19 +180,59 @@ class IsolatedTestRunner:
             elif tipo == "comando":
                 alvo = extra.get("alvo")
                 acao = extra.get("acao")
+                if not alvo and "fusion" in texto:
+                    alvo = "fusion"
+                if not acao and "ligar" in texto:
+                    acao = "ligar"
+                elif not acao and "desligar" in texto:
+                    acao = "desligar"
+
                 if acao == "ligar":
+                    # Deduplicação de comando WoL idêntico
+                    ja_feito = any(ac.get("tipo") == "wol" and ac.get("alvo") == alvo for ac in self.controller_state["acoes_executadas"])
+                    if ja_feito:
+                        return {
+                            "sucesso": True,
+                            "event_id": ev_id,
+                            "estado": "espera",
+                            "processado": True,
+                            "status": "concluido",
+                            "deduplicado": True,
+                            "active_session_id": None,
+                        }
+
                     self.controller_state["acoes_executadas"].append({"tipo": "wol", "alvo": alvo, "event_id": ev_id})
                     self.controller_state["estado"] = "espera"
                     self.controller_state["session_id"] = None
-                    self._persistir_acao(ev_id, "ligar", alvo, "concluido")
-                    return {
-                        "sucesso": True,
-                        "event_id": ev_id,
-                        "estado": "espera",
-                        "processado": True,
-                        "status": "concluido",
-                        "active_session_id": None,
-                    }
+
+                    atraso_wol = self.controller_state.get("simular_atraso_wol_s", 0.0)
+                    if atraso_wol > 0:
+                        self._persistir_acao(ev_id, "ligar", alvo, "em_processamento")
+
+                        def _concluir_wol_worker(e_id=ev_id, a_nome=alvo, atraso=atraso_wol):
+                            time.sleep(atraso)
+                            self._persistir_acao(e_id, "ligar", a_nome, "concluido")
+
+                        threading.Thread(target=_concluir_wol_worker, daemon=True).start()
+                        return {
+                            "sucesso": True,
+                            "event_id": ev_id,
+                            "estado": "espera",
+                            "processado": True,
+                            "status": "aceito",
+                            "active_session_id": None,
+                        }
+                    else:
+                        self._persistir_acao(ev_id, "ligar", alvo, "concluido")
+                        return {
+                            "sucesso": True,
+                            "event_id": ev_id,
+                            "estado": "espera",
+                            "processado": True,
+                            "status": "concluido",
+                            "active_session_id": None,
+                        }
+
                 elif acao == "desligar":
                     self.controller_state["estado"] = "confirmacao"
                     self.controller_state["pendente"] = alvo
@@ -612,6 +685,181 @@ class IsolatedTestRunner:
         self.tests_passed += 1
         self.log(f"{GREEN}[PASS]{RESET} Teste 6 concluído com sucesso.")
 
+    def test_07_latencia_simulada_6_a_10s_sem_bloqueio_ipc(self):
+        """Teste 7: Latência simulada de 6 a 10s não bloqueia fila IPC nem estoura timeout de 2s."""
+        self.tests_run += 1
+        self.log(">>> [TESTE 7] Validando operação demorada (6s) sem bloqueio de fila IPC...")
+
+        url_inject = f"http://127.0.0.1:{self.gateway_http_port}/api/test/inject"
+
+        # Limpa cache recente para permitir novo ciclo limpo no teste
+        if self.gateway_app and self.gateway_app.arbitrator:
+            self.gateway_app.arbitrator._recent_actions.clear()
+        self.controller_state["acoes_executadas"].clear()
+        self.controller_state["estado"] = "espera"
+        self.controller_state["session_id"] = None
+
+        # 1. Configura latência simulada de 6.0 segundos
+        self.controller_state["simular_atraso_wol_s"] = 6.0
+
+        # Wake ME6S
+        req_wake = urllib.request.Request(
+            url_inject,
+            data=json.dumps({"fonte": "me6s", "evento": "wake"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req_wake, timeout=2) as resp:
+            res_wake = json.loads(resp.read().decode("utf-8"))
+            assert res_wake.get("sucesso") is True
+
+        # 2. Emite comando 'ligar fusion' que demorará 6.0s
+        t_inicio = time.monotonic()
+        req_cmd = urllib.request.Request(
+            url_inject,
+            data=json.dumps({"fonte": "lg_mic", "evento": "command", "texto": "ligar fusion"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req_cmd, timeout=3) as resp:
+            t_duracao = time.monotonic() - t_inicio
+            res_cmd = json.loads(resp.read().decode("utf-8"))
+            # O ACK deve retornar imediatamente (< 1.0s), sem estourar o timeout IPC de 2.0s
+            assert t_duracao < 1.0, f"Comando demorou {t_duracao:.2f}s para responder ACK (esperado < 1.0s)"
+            assert res_cmd.get("sucesso") is True, f"Comando falhou: {res_cmd}"
+            ack = res_cmd.get("ack", {})
+            assert ack.get("status") in ("aceito", "em_processamento"), f"Status no ACK deveria ser aceito/em_processamento, obtido {ack}"
+            self.log(f"  [OK] ACK de comando aceito retornado em {t_duracao:.3f}s (abaixo do timeout de 2.0s)")
+
+        # 3. Durante a janela de 6s do worker, novos eventos IPC continuam sendo aceitos sem bloqueio de fila
+        t_wake2_ini = time.monotonic()
+        req_wake2 = urllib.request.Request(
+            url_inject,
+            data=json.dumps({"fonte": "lg_mic", "evento": "wake"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req_wake2, timeout=2) as resp:
+            t_wake2 = time.monotonic() - t_wake2_ini
+            assert t_wake2 < 0.5, f"Wake demorou {t_wake2:.2f}s - fila foi bloqueada pela ação anterior!"
+            res_wake2 = json.loads(resp.read().decode("utf-8"))
+            assert res_wake2.get("sucesso") is True
+            self.log(f"  [OK] Novo evento wake aceito em {t_wake2:.3f}s enquanto worker de 6s executa em background")
+
+        # 4. Aguarda a conclusão do worker (6s) e verifica persistência do estado 'concluido'
+        restante = 6.2 - (time.monotonic() - t_inicio)
+        if restante > 0:
+            time.sleep(restante)
+
+        assert os.path.exists(self.state_file), "Arquivo persistente não encontrado"
+        with open(self.state_file, "r", encoding="utf-8") as f:
+            pers = json.load(f)
+            regs = pers.get("registro_acoes", {})
+            assert any(r.get("acao") == "ligar" and r.get("status") == "concluido" for r in regs.values()), f"Persistência não atingiu status concluido: {regs}"
+            self.log("  [OK] Ação com latência de 6s concluída com sucesso e persistida no disco")
+
+        self.controller_state["simular_atraso_wol_s"] = 0.0
+        self.tests_passed += 1
+        self.log(f"{GREEN}[PASS]{RESET} Teste 7 concluído com sucesso.")
+
+    def test_08_deduplicacao_comando_simultaneo_lg_e_me6s(self):
+        """Teste 8: Comando reconhecido quase simultaneamente por LG e ME6S é deduplicado."""
+        self.tests_run += 1
+        self.log(">>> [TESTE 8] Validando deduplicação de comando simultâneo entre LG e ME6S...")
+
+        url_inject = f"http://127.0.0.1:{self.gateway_http_port}/api/test/inject"
+
+        # Limpa cache recente para permitir novo ciclo limpo no teste
+        if self.gateway_app and self.gateway_app.arbitrator:
+            self.gateway_app.arbitrator._recent_actions.clear()
+        self.controller_state["acoes_executadas"].clear()
+        self.controller_state["estado"] = "espera"
+        self.controller_state["session_id"] = None
+
+        # 1. Wake compartilhado na sessão
+        req_wake = urllib.request.Request(
+            url_inject,
+            data=json.dumps({"fonte": "me6s", "evento": "wake"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req_wake, timeout=2) as resp:
+            res_wake = json.loads(resp.read().decode("utf-8"))
+            assert res_wake.get("sucesso") is True
+            sid = res_wake.get("session_id")
+
+        acoes_antes = len(self.controller_state["acoes_executadas"])
+
+        # 2. ME6S envia 'ligar fusion'
+        req_cmd1 = urllib.request.Request(
+            url_inject,
+            data=json.dumps({"fonte": "me6s", "evento": "command", "texto": "ligar fusion"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req_cmd1, timeout=2) as resp:
+            res1 = json.loads(resp.read().decode("utf-8"))
+            assert res1.get("sucesso") is True, f"Comando 1 falhou: {res1}"
+            self.log("  [OK] Primeiro comando (ME6S) aceito e processado")
+
+        # 3. LG envia 'ligar fusion' quase simultaneamente (dentro da janela de deduplicação)
+        req_cmd2 = urllib.request.Request(
+            url_inject,
+            data=json.dumps({"fonte": "lg_mic", "evento": "command", "texto": "ligar fusion"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req_cmd2, timeout=2) as resp:
+            res2 = json.loads(resp.read().decode("utf-8"))
+            # O segundo comando não pode provocar uma segunda ação
+            self.log(f"  [OK] Segundo comando (LG) tratado: {res2.get('resultado', {})}")
+
+        time.sleep(0.1)
+        acoes_depois = len(self.controller_state["acoes_executadas"])
+        # Garante que estritamente UMA ação foi executada
+        novas_acoes = acoes_depois - acoes_antes
+        assert novas_acoes == 1, f"Deduplicação falhou: {novas_acoes} ações executadas (esperado 1)"
+        self.log(f"  [OK] Estritamente 1 ação executada no controlador (novas ações: {novas_acoes})")
+
+        self.tests_passed += 1
+        self.log(f"{GREEN}[PASS]{RESET} Teste 8 concluído com sucesso.")
+
+    def test_09_confirmacao_gateway_reflete_resultado_real_controlador(self):
+        """Teste 9: Confirmação do Gateway reflete estritamente o ACK do controlador (fail-closed)."""
+        self.tests_run += 1
+        self.log(">>> [TESTE 9] Validando sincronização de confirmação e fail-closed do Gateway...")
+
+        url_inject = f"http://127.0.0.1:{self.gateway_http_port}/api/test/inject"
+
+        # Limpa cache recente para permitir novo ciclo limpo no teste
+        if self.gateway_app and self.gateway_app.arbitrator:
+            self.gateway_app.arbitrator._recent_actions.clear()
+        self.controller_state["acoes_executadas"].clear()
+        self.controller_state["estado"] = "espera"
+        self.controller_state["session_id"] = None
+
+        # 1. Wake
+        req_wake = urllib.request.Request(
+            url_inject,
+            data=json.dumps({"fonte": "lg_mic", "evento": "wake"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req_wake, timeout=2) as resp:
+            assert resp.status == 200
+
+        # 2. Configura o controlador para simular falha/rejeição (ex: fila cheia ou erro de persistência)
+        self.controller_state["simular_falha"] = True
+        self.controller_state["simular_falha_erro"] = "persistencia_bloqueada"
+
+        req_cmd = urllib.request.Request(
+            url_inject,
+            data=json.dumps({"fonte": "lg_mic", "evento": "command", "texto": "ligar fusion"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req_cmd, timeout=2) as resp:
+            res_falha = json.loads(resp.read().decode("utf-8"))
+            assert res_falha.get("sucesso") is False, f"Gateway deveria ter retornado sucesso=False: {res_falha}"
+            assert res_falha.get("erro") == "persistencia_bloqueada", f"Erro divergente: {res_falha}"
+            self.log(f"  [OK] Gateway refletiu fielmente a rejeição do controlador: {res_falha.get('erro')}")
+
+        self.controller_state["simular_falha"] = False
+        self.tests_passed += 1
+        self.log(f"{GREEN}[PASS]{RESET} Teste 9 concluído com sucesso.")
+
     def run_all(self) -> bool:
         """Executa todos os testes em sequência com tratamento rigoroso de exceções."""
         print("=" * 70)
@@ -626,6 +874,9 @@ class IsolatedTestRunner:
             self.test_04_injecao_eventos_cruzados_api_existente,
             self.test_05_confirmacao_cruzada_desligamento_simulado,
             self.test_06_protecao_retransmissao_idempotencia,
+            self.test_07_latencia_simulada_6_a_10s_sem_bloqueio_ipc,
+            self.test_08_deduplicacao_comando_simultaneo_lg_e_me6s,
+            self.test_09_confirmacao_gateway_reflete_resultado_real_controlador,
         ]
 
         try:

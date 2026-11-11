@@ -81,13 +81,16 @@ Executados em processo isolado sem tocar no serviço de produção:
 ```bash
 /opt/jarvis-voice/venv/bin/python3 /opt/jarvis-voice/scripts/testes_automatizados_simulacao.py
 ```
-*Cobertura dos 6 Cenários Automatizados:*
+*Cobertura dos 9 Cenários Automatizados:*
 1. **Diferenciação de Portas e Schemas:** Gateway HTTP API (porta 18089 / `/api/mics`) vs. Jarvis Display (porta 18080 / `/api/status`).
 2. **TLS 1.2+ Estrito e Reconexão:** Verificação com certificado (`ssl.CERT_REQUIRED`, SAN `IP:127.0.0.1`), handshake `JMIC`, envio de frames PCM (1280 bytes), desconexão e reconexão limpa.
 3. **Detecção e Recuperação ME6S:** Simulação de término de processo/pipe de áudio `arecord`, detecção de interrupção, auto-recovery e retorno da fila de áudio.
-4. **Injeção de Eventos Cruzados via Endpoint Existente:** `POST /api/test/inject` com `fonte`, `evento`, `texto` (`me6s` wake -> `lg_mic` command `ligar fusion`), verificando WoL simulado (0 pacotes).
+4. **Injeção de Eventos Cruzados via Endpoint Existente:** `POST /api/test/inject` com `fonte`, `evento`, `texto` (`me6s` wake -> `lg_mic` command `ligar fusion`), verificando WoL simulado (0 pacotes) e latência nula de sondagem de rede.
 5. **Confirmação Cruzada de Desligamento Simulado:** `lg_mic` wake -> `me6s` command `desligar fusion` -> `lg_mic` confirm, verificando SSH simulado (0 conexões) e gravação atômica em `/var/lib/jarvis/acoes_recentes.json`.
 6. **Proteção contra Retransmissão:** Deduplicação de confirmações repetidas com bloqueio de reexecução.
+7. **Operações com Latência Elevada (6s a 10s) sem Bloqueio IPC:** Desacoplamento assíncrono com worker em segundo plano; retorno de ACK de aceitação imediato (<1.0s) para o Gateway enquanto o worker conclui a persistência.
+8. **Deduplicação de Comandos Simultâneos (LG + ME6S):** Reconhecimento concorrente do mesmo comando ("ligar fusion") dentro da janela temporal de 3.5s; garante que estritamente UMA ação é executada e persistida.
+9. **Sincronização Fiel de Confirmação do Gateway (Fail-Closed):** Gateway nunca anuncia sucesso local prematuramente; se o controlador rejeitar ou falhar na persistência, o Gateway reflete estritamente `sucesso=False` e o erro real.
 
 ---
 

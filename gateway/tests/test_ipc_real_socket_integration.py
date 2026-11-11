@@ -1172,6 +1172,178 @@ print('LG_CMD:' + json.dumps(cmd_res), flush=True)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_18_slow_wol_probing_6_to_10s_never_blocks_ipc_or_causes_timeout(self):
+        """18. Sondagem demorada de WoL (6-10s) não estoura timeout de 2s do IPC nem bloqueia a fila."""
+        listener = IpcEventListener(
+            socket_path=self.sock_path,
+            allowed_uid=os.getuid(),
+            on_event=self.mod.on_ipc_event,
+        )
+        listener.start()
+        time.sleep(0.05)
+
+        self.mod.loop_principal_ativo.set()
+        worker_running = threading.Event()
+        worker_running.set()
+
+        def worker_loop():
+            while worker_running.is_set():
+                try:
+                    item = self.mod.fila_intencoes.get(timeout=0.05)
+                    fonte, texto, sid = item[0], item[1], item[2]
+                    ev_id = item[3] if len(item) > 3 else None
+                    comp_q = item[4] if len(item) > 4 else None
+                    res = self.mod.processar(texto, fonte=fonte, session_id=sid, event_id=ev_id)
+                    if comp_q is not None:
+                        comp_q.put(res)
+                except queue.Empty:
+                    pass
+
+        worker_th = threading.Thread(target=worker_loop, daemon=True)
+        worker_th.start()
+
+        # Simula atraso de 6.0 segundos para WoL
+        self.mod.painel.simular_atraso_wol_s = 6.0
+
+        try:
+            broadcaster = IpcEventBroadcaster(socket_path=self.sock_path, timeout=2.0)
+
+            # 1. Ativação via LG
+            wake_ack = broadcaster.emit_event(
+                source="lg_mic",
+                event_type="wake",
+                text="assistente",
+                session_id="sess-slow-wol-1",
+            )
+            self.assertIsNotNone(wake_ack)
+            self.assertTrue(wake_ack.get("sucesso"))
+
+            # 2. Comando para ligar fusion: WoL demora 6.0s no worker, mas ACK deve retornar em < 1.0s
+            t_inicio = time.monotonic()
+            cmd_ack = broadcaster.emit_event(
+                source="lg_mic",
+                event_type="comando",
+                text="ligar fusion",
+                session_id="sess-slow-wol-1",
+                event_id="ev-slow-wol-cmd",
+            )
+            t_duracao = time.monotonic() - t_inicio
+
+            # O ACK deve ser retornado em menos de 1.0s (sem estourar timeout de 2.0s)
+            self.assertLess(t_duracao, 1.0, f"ACK demorou {t_duracao:.2f}s - estourou tempo do IPC!")
+            self.assertIsNotNone(cmd_ack)
+            self.assertTrue(cmd_ack.get("sucesso"))
+            self.assertEqual(cmd_ack.get("event_id"), "ev-slow-wol-cmd")
+            self.assertEqual(cmd_ack.get("estado"), "espera")
+            self.assertTrue(cmd_ack.get("processado"))
+            self.assertIn(cmd_ack.get("status"), ("aceito", "em_processamento"))
+
+            # 3. Verifica que a ação está registrada no controlador
+            status_reg = self.mod.obter_status_acao("ev-slow-wol-cmd")
+            self.assertIsNotNone(status_reg)
+            self.assertIn(status_reg.get("status"), ("em_processamento", "aceito"))
+
+            # 4. Enquanto o WoL de 6s roda em background, novos eventos IPC são aceitos sem bloqueio da fila
+            t_w2_ini = time.monotonic()
+            wake_ack2 = broadcaster.emit_event(
+                source="me6s",
+                event_type="wake",
+                text="assistente",
+                session_id="sess-slow-wol-2",
+            )
+            t_w2 = time.monotonic() - t_w2_ini
+            self.assertLess(t_w2, 0.5, f"Wake demorou {t_w2:.2f}s - fila bloqueada!")
+            self.assertIsNotNone(wake_ack2)
+            self.assertTrue(wake_ack2.get("sucesso"))
+            self.assertEqual(wake_ack2.get("estado"), "comando")
+
+            # 5. Aguarda conclusão do worker WoL (6s)
+            restante = 6.2 - (time.monotonic() - t_inicio)
+            if restante > 0:
+                time.sleep(restante)
+            status_final = self.mod.obter_status_acao("ev-slow-wol-cmd")
+            self.assertEqual(status_final.get("status"), "concluido")
+        finally:
+            self.mod.painel.simular_atraso_wol_s = 0.0
+            worker_running.clear()
+            self.mod.loop_principal_ativo.clear()
+            worker_th.join(timeout=1.0)
+            listener.stop()
+
+    def test_19_simultaneous_command_recognition_deduplicated_between_me6s_and_lg(self):
+        """19. Comando simultâneo reconhecido por LG e ME6S é deduplicado sem duplicar a ação."""
+        listener = IpcEventListener(
+            socket_path=self.sock_path,
+            allowed_uid=os.getuid(),
+            on_event=self.mod.on_ipc_event,
+        )
+        listener.start()
+        time.sleep(0.05)
+
+        self.mod.loop_principal_ativo.set()
+        worker_running = threading.Event()
+        worker_running.set()
+
+        def worker_loop():
+            while worker_running.is_set():
+                try:
+                    item = self.mod.fila_intencoes.get(timeout=0.05)
+                    fonte, texto, sid = item[0], item[1], item[2]
+                    ev_id = item[3] if len(item) > 3 else None
+                    comp_q = item[4] if len(item) > 4 else None
+                    res = self.mod.processar(texto, fonte=fonte, session_id=sid, event_id=ev_id)
+                    if comp_q is not None:
+                        comp_q.put(res)
+                except queue.Empty:
+                    pass
+
+        worker_th = threading.Thread(target=worker_loop, daemon=True)
+        worker_th.start()
+
+        try:
+            broadcaster = IpcEventBroadcaster(socket_path=self.sock_path, timeout=2.0)
+
+            # Wake compartilhado
+            wake_ack = broadcaster.emit_event(
+                source="me6s",
+                event_type="wake",
+                text="assistente",
+                session_id="sess-simult-1",
+            )
+            self.assertTrue(wake_ack.get("sucesso"))
+
+            # 1. ME6S reconhece 'ligar fusion' primeiro
+            cmd1 = broadcaster.emit_event(
+                source="me6s",
+                event_type="comando",
+                text="ligar fusion",
+                session_id="sess-simult-1",
+                event_id="ev-simult-1",
+            )
+            self.assertIsNotNone(cmd1)
+            self.assertTrue(cmd1.get("sucesso"))
+            self.assertFalse(cmd1.get("deduplicado", False))
+
+            # 2. LG reconhece 'ligar fusion' quase simultaneamente (dentro da janela)
+            cmd2 = broadcaster.emit_event(
+                source="lg_mic",
+                event_type="comando",
+                text="ligar fusion",
+                session_id="sess-simult-1",
+                event_id="ev-simult-2",
+            )
+            self.assertIsNotNone(cmd2)
+            self.assertTrue(cmd2.get("sucesso"))
+            self.assertTrue(cmd2.get("deduplicado"))
+            self.assertEqual(cmd2.get("acao"), "ligar")
+            self.assertEqual(cmd2.get("alvo"), "fusion")
+
+        finally:
+            worker_running.clear()
+            self.mod.loop_principal_ativo.clear()
+            worker_th.join(timeout=1.0)
+            listener.stop()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
