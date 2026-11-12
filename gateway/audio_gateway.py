@@ -393,30 +393,36 @@ class SessionArbitrator:
         with self._lock:
             if self.state != "confirmacao":
                 # Verifica se confirmação já foi realizada recentemente (deduplicação entre microfones)
+                acoes_conf = ("desligar", "fechar_navegador", "reiniciar")
                 for alvo_cand in (self.target_computer, "fusion", "ananuke"):
                     if alvo_cand:
-                        delta_action = now - self._recent_actions.get(("desligar", alvo_cand), 0.0)
-                        if delta_action <= self.action_dedup_window_s:
-                            self.deduplicated_count += 1
-                            logger.info(
-                                "Deduplicação de confirmação: 'desligar %s' via %s descartada (ação idêntica confirmada há %.2fs)",
-                                alvo_cand,
-                                source,
-                                delta_action,
-                            )
-                            return {
-                                "valido": False,
-                                "acao": "desligar_confirmado",
-                                "alvo": alvo_cand,
-                                "deduplicado": True,
-                                "session_id": self.session_id,
-                                "motivo": f"Ação 'desligar {alvo_cand}' recentemente confirmada (idempotência)",
-                            }
+                        for acao_cand in acoes_conf:
+                            delta_action = now - self._recent_actions.get((acao_cand, alvo_cand), 0.0)
+                            if delta_action <= self.action_dedup_window_s:
+                                self.deduplicated_count += 1
+                                nome_ret = "desligar_confirmado" if acao_cand == "desligar" else f"{acao_cand}_confirmado"
+                                logger.info(
+                                    "Deduplicação de confirmação: '%s %s' via %s descartada (ação idêntica confirmada há %.2fs)",
+                                    acao_cand,
+                                    alvo_cand,
+                                    source,
+                                    delta_action,
+                                )
+                                return {
+                                    "valido": False,
+                                    "acao": nome_ret,
+                                    "alvo": alvo_cand,
+                                    "deduplicado": True,
+                                    "session_id": self.session_id,
+                                    "motivo": f"Ação '{acao_cand} {alvo_cand}' recentemente confirmada (idempotência)",
+                                }
                 return {"valido": False, "motivo": "Nenhuma confirmação pendente"}
 
             if now > self.expires_at:
                 self.state = "espera"
                 self.session_id = None
+                self.target_action = None
+                self.target_computer = None
                 return {"valido": False, "motivo": "Tempo de confirmação esgotado"}
 
             sid = self.session_id
@@ -435,6 +441,8 @@ class SessionArbitrator:
                 )
                 self.state = "espera"
                 self.session_id = None
+                self.target_action = None
+                self.target_computer = None
                 self._registrar_evento("action_deduplicated", source, acao=acao_pend, alvo=alvo, delta=delta_action)
                 return {
                     "valido": False,
@@ -446,6 +454,8 @@ class SessionArbitrator:
 
             self.state = "espera"
             self.session_id = None
+            self.target_action = None
+            self.target_computer = None
             self._registrar_evento("confirmation_recognized_local", source, acao=acao_pend, alvo=alvo, session_id=sid)
             logger.info(
                 "Confirmação de %s reconhecida localmente para '%s' via %s (sessão %s)",
@@ -542,9 +552,13 @@ def _registrar_log_ack_gateway(
                 st = "aceito"
 
         if st == "confirmacao_pendente" or (st != "concluido" and ack.get("estado") == "confirmacao" and tipo_acao == "desligar"):
+            desc_acao = "Desligamento SSH" if tipo_acao == "desligar" else nome_acao
             logger.info(
-                "[AGUARDANDO CONFIRMAÇÃO] [SIMULAÇÃO] Desligamento SSH para '%s' via %s aguardando confirmação do operador (sessão %s, status=confirmacao_pendente)",
-                alvo_str, fonte, sid_str
+                "[AGUARDANDO CONFIRMAÇÃO] [SIMULAÇÃO] %s para '%s' via %s aguardando confirmação do operador (sessão %s, status=confirmacao_pendente)",
+                desc_acao,
+                alvo_str,
+                fonte,
+                sid_str,
             )
         elif st == "cancelado" or tipo_acao == "cancelar":
             logger.info(

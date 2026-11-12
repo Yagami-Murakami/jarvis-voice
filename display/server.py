@@ -404,7 +404,11 @@ class JarvisLogMonitor:
         # 6c. Eventos concluídos do PC Control
         if "PC Control:" in linha:
             msg = linha.split("PC Control:", 1)[1].strip()
-            is_falha = any(term in msg.lower() for term in ("falha", "erro", "bloqueado", "offline", "desativado"))
+            msg_lower = msg.lower()
+            is_sucesso_bloqueio = "bloqueado com sucesso" in msg_lower
+            is_falha = (not is_sucesso_bloqueio) and any(
+                term in msg_lower for term in ("falha", "erro", "offline", "desativado", "bloqueado por", "falha ao bloquear")
+            )
             self.state.atualizar(
                 status="error" if is_falha else "success",
                 mensagem=msg,

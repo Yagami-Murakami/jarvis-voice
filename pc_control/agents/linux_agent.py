@@ -57,11 +57,17 @@ class LinuxPcAgent(PcAgentServer):
     def _obter_env_sessao(self) -> Dict[str, str]:
         """Obtém variáveis de ambiente da sessão gráfica do usuário."""
         env = os.environ.copy()
+        uid = os.getuid()
         if "DISPLAY" not in env:
             env["DISPLAY"] = ":0"
         if "XDG_RUNTIME_DIR" not in env:
-            uid = os.getuid()
             env["XDG_RUNTIME_DIR"] = f"/run/user/{uid}"
+        if "DBUS_SESSION_BUS_ADDRESS" not in env:
+            bus_path = f"/run/user/{uid}/bus"
+            if os.path.exists(bus_path):
+                env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus_path}"
+        if uid == 0:
+            logger.warning("Agente Linux executando como root: aplicações gráficas devem ser invocadas na sessão de usuário.")
         return env
 
     def executar_acao(
@@ -137,6 +143,8 @@ class LinuxPcAgent(PcAgentServer):
                 cmd = ["xflock4"]
             elif shutil.which("xfce4-screensaver-command"):
                 cmd = ["xfce4-screensaver-command", "-l"]
+            elif shutil.which("xdg-screensaver"):
+                cmd = ["xdg-screensaver", "lock"]
             elif shutil.which("loginctl"):
                 cmd = ["loginctl", "lock-session"]
 
@@ -237,13 +245,60 @@ class LinuxPcAgent(PcAgentServer):
                 return False, {}, f"erro_reboot: {e}", "Falha ao solicitar reinicialização do Ananuke."
         return True, {"reiniciando": True, "simulado": self.mock_mode}, None, "Reinicialização do Ananuke solicitada com sucesso."
 
-    # 11. Mostrar área de trabalho (Xfce)
+    def _mostrar_desktop_x11(self) -> bool:
+        """Envia mensagem ClientMessage _NET_SHOWING_DESKTOP via libX11 (EWMH padrão)."""
+        try:
+            import ctypes
+
+            class XClientMsg(ctypes.Structure):
+                _fields_ = [
+                    ("type", ctypes.c_int),
+                    ("serial", ctypes.c_ulong),
+                    ("send_event", ctypes.c_int),
+                    ("display", ctypes.c_void_p),
+                    ("window", ctypes.c_ulong),
+                    ("message_type", ctypes.c_ulong),
+                    ("format", ctypes.c_int),
+                    ("data", ctypes.c_long * 5),
+                ]
+
+            class XEv(ctypes.Union):
+                _fields_ = [("type", ctypes.c_int), ("xclient", XClientMsg), ("pad", ctypes.c_long * 24)]
+
+            x11 = ctypes.cdll.LoadLibrary("libX11.so.6")
+            x11.XOpenDisplay.restype = ctypes.c_void_p
+            disp = x11.XOpenDisplay(None)
+            if not disp:
+                return False
+            root = x11.XDefaultRootWindow(disp)
+            atom = x11.XInternAtom(disp, b"_NET_SHOWING_DESKTOP", False)
+            if not atom:
+                x11.XCloseDisplay(disp)
+                return False
+
+            ev = XEv()
+            ev.type = 33  # ClientMessage
+            ev.xclient.type = 33
+            ev.xclient.window = root
+            ev.xclient.message_type = atom
+            ev.xclient.format = 32
+            ev.xclient.data[0] = 1  # 1 = show desktop
+            mask = (1 << 19) | (1 << 20)  # SubstructureNotify | SubstructureRedirect
+            x11.XSendEvent(disp, root, False, mask, ctypes.byref(ev))
+            x11.XFlush(disp)
+            x11.XCloseDisplay(disp)
+            return True
+        except Exception as e:
+            logger.debug("Falha no método EWMH libX11: %s", e)
+            return False
+
+    # 11. Mostrar área de trabalho (Xfce / EWMH)
     def _acao_mostrar_area_de_trabalho(self, params: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], Optional[str], str]:
         if not self.mock_mode:
             env = self._obter_env_sessao()
             executou = False
 
-            # wmctrl -k on ativa o modo "Mostrar Área de Trabalho" no Xfce
+            # 1. wmctrl -k on ativa o modo "Mostrar Área de Trabalho" no Xfce
             if shutil.which("wmctrl"):
                 try:
                     subprocess.run(["wmctrl", "-k", "on"], env=env, check=True, timeout=3)
@@ -251,6 +306,7 @@ class LinuxPcAgent(PcAgentServer):
                 except Exception:
                     pass
 
+            # 2. Atalho de teclado via xdotool
             if not executou and shutil.which("xdotool"):
                 try:
                     subprocess.run(["xdotool", "key", "Super_L+d"], env=env, check=True, timeout=3)
@@ -258,8 +314,12 @@ class LinuxPcAgent(PcAgentServer):
                 except Exception:
                     pass
 
+            # 3. Fallback nativo via EWMH libX11 (sem necessidade de pacotes externos)
             if not executou:
-                return False, {}, "ferramenta_desktop_ausente", "Ferramenta para alternar desktop não encontrada (wmctrl/xdotool)."
+                executou = self._mostrar_desktop_x11()
+
+            if not executou:
+                return False, {}, "ferramenta_desktop_ausente", "Ferramenta para alternar desktop não encontrada."
 
         return True, {"area_de_trabalho": True, "simulado": self.mock_mode}, None, "Área de trabalho exibida no Ananuke."
 
@@ -279,9 +339,28 @@ class LinuxPcAgent(PcAgentServer):
                 # -l 1.0 garante limite rígido de segurança em 100% de volume
                 cmd = ["wpctl", "set-volume", "-l", "1.0", "@DEFAULT_AUDIO_SINK@", pct_str]
                 subprocess.run(cmd, env=env, check=True, timeout=3)
+                # Consulta volume real
+                try:
+                    res_vol = subprocess.run(["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"], env=env, capture_output=True, text=True, timeout=2)
+                    if res_vol.returncode == 0 and "Volume:" in res_vol.stdout:
+                        vol_val = float(res_vol.stdout.split("Volume:")[1].split()[0])
+                        self._sim_volume = max(0.0, min(1.0, vol_val))
+                        return self._sim_volume, True
+                except Exception:
+                    pass
             elif self.audio_backend == "pulseaudio":
                 cmd = ["pactl", "set-sink-volume", "@DEFAULT_SINK@", pct_str]
                 subprocess.run(cmd, env=env, check=True, timeout=3)
+                try:
+                    res_vol = subprocess.run(["pactl", "get-sink-volume", "@DEFAULT_SINK@"], env=env, capture_output=True, text=True, timeout=2)
+                    if res_vol.returncode == 0 and "%" in res_vol.stdout:
+                        import re
+                        m = re.search(r"(\d+)%", res_vol.stdout)
+                        if m:
+                            self._sim_volume = max(0.0, min(1.0, float(m.group(1)) / 100.0))
+                            return self._sim_volume, True
+                except Exception:
+                    pass
             elif self.audio_backend == "alsa":
                 cmd = ["amixer", "set", "Master", pct_str]
                 subprocess.run(cmd, env=env, check=True, timeout=3)

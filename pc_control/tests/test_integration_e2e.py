@@ -437,6 +437,66 @@ class TestPcControlControllerAndDisplayE2E(unittest.TestCase):
         self.assertFalse(res_f["sucesso"])
         self.assertEqual(res_f["erro"], "fonte_desconhecida")
 
+    def test_dual_mic_pc_control_confirmation_deduplication(self) -> None:
+        """Valida que confirmação simultânea por microfones duplos para PC Control é deduplicada no IPC."""
+        # Configura estado de confirmação para reiniciar fusion
+        jarvis_ctrl.estado = "confirmacao"
+        jarvis_ctrl.pendente = "fusion"
+        jarvis_ctrl.pendente_acao = "reiniciar"
+        jarvis_ctrl.sessao_ativa_id = "sess-dual-conf-1"
+        jarvis_ctrl.limite = time.monotonic() + 20.0
+
+        with patch.object(jarvis_ctrl.pc_dispatcher.client, "enviar_comando") as mock_env:
+            mock_env.return_value = {
+                "sucesso": True,
+                "status": "concluido",
+                "resultado": {"reiniciando": True},
+                "mensagem_amigavel": "Computador Fusion reiniciado.",
+            }
+
+            # 1. ME6S confirma primeiro
+            res1 = jarvis_ctrl.processar("confirmar reinicializacao", fonte="me6s", session_id="sess-dual-conf-1", event_id="ev-conf-me6s")
+            self.assertTrue(res1["sucesso"])
+            self.assertEqual(res1["acao"], "reiniciar")
+            self.assertEqual(jarvis_ctrl.estado, "espera")
+
+            # 2. LG envia confirmação logo em seguida via IPC
+            res2 = jarvis_ctrl.on_ipc_event({
+                "versao": 1,
+                "evento": "confirmar",
+                "fonte": "lg_mic",
+                "texto": "confirmar reinicializacao",
+                "session_id": "sess-dual-conf-1",
+                "event_id": "ev-conf-lg",
+            })
+            self.assertTrue(res2["sucesso"], f"Confirmação pelo segundo mic deveria ter sido aceita: {res2}")
+            self.assertTrue(res2.get("deduplicado"), "Confirmação repetida deve ser marcada como deduplicada")
+            self.assertEqual(res2.get("acao"), "reiniciar")
+            self.assertEqual(res2.get("alvo"), "fusion")
+
+    def test_confirmation_mismatch_during_pending_shutdown_cancels_cleanly(self) -> None:
+        """Valida que confirmação incompatível durante desligamento pendente cancela sem travar ou retornar None."""
+        jarvis_ctrl.estado = "confirmacao"
+        jarvis_ctrl.pendente = "fusion"
+        jarvis_ctrl.pendente_acao = "desligar"
+        jarvis_ctrl.sessao_ativa_id = "sess-mismatch-1"
+        jarvis_ctrl.limite = time.monotonic() + 20.0
+
+        res = jarvis_ctrl.processar("confirmar reinicializacao", fonte="me6s", session_id="sess-mismatch-1", event_id="ev-mis-1")
+        self.assertIsNotNone(res, "Processar não deve retornar None em caso de confirmação incompatível")
+        self.assertFalse(res["sucesso"])
+        self.assertEqual(res["erro"], "confirmacao_insuficiente")
+        self.assertEqual(jarvis_ctrl.estado, "espera")
+        self.assertIsNone(jarvis_ctrl.pendente)
+        self.assertIsNone(jarvis_ctrl.pendente_acao)
+
+    def test_display_lock_success_status(self) -> None:
+        """Garante que 'bloqueado com sucesso' resulta em status 'success' no display, não 'error'."""
+        self.display_monitor.processar_linha("PC Control: Computador Fusion bloqueado com sucesso.")
+        display_dict = self.display_state.obter_estado()
+        self.assertEqual(display_dict["status"], "success")
+        self.assertEqual(display_dict["mensagem"], "Computador Fusion bloqueado com sucesso.")
+
 
 if __name__ == "__main__":
     unittest.main()

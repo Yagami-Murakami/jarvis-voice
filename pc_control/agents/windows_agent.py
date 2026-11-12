@@ -230,6 +230,21 @@ class WindowsPcAgent(PcAgentServer):
                 return False, {}, f"erro_desktop: {e}", "Falha ao mostrar área de trabalho no Fusion."
         return True, {"area_de_trabalho": True, "simulado": self.mock_mode}, None, "Área de trabalho exibida no Fusion."
 
+    def _obter_pycaw_endpoint(self) -> Any:
+        """Obtém a interface IAudioEndpointVolume via pycaw se instalada."""
+        try:
+            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+            from ctypes import cast, POINTER
+            from comtypes import CLSCTX_ALL
+            devices = AudioUtilities.GetSpeakers()
+            if not devices:
+                return None
+            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+            return cast(interface, POINTER(IAudioEndpointVolume))
+        except Exception as e:
+            logger.debug("pycaw não disponível na sessão Windows: %s", e)
+            return None
+
     # Helpers de áudio no Windows
     def _ajustar_volume(self, delta: float) -> Tuple[float, bool]:
         """Ajusta o volume respeitando rigorosamente os limites [0.0, 1.0] (0% a 100%)."""
@@ -237,26 +252,133 @@ class WindowsPcAgent(PcAgentServer):
             self._sim_volume = max(0.0, min(1.0, self._sim_volume + delta))
             return self._sim_volume, True
 
+        # 1. Tenta API pycaw (CoreAudio IAudioEndpointVolume)
         try:
-            # Controle nativo via CoreAudio IAudioEndpointVolume ou PowerShell COM
-            # Leitura e ajuste via script restrito
-            script = f"""
-            $obj = New-Object -ComObject WScript.Shell
-            """
-            # No Windows, se não houver pycaw/ctypes COM complexo compilado,
-            # faz ajuste seguro ou simula
-            self._sim_volume = max(0.0, min(1.0, self._sim_volume + delta))
-            return self._sim_volume, True
+            endpoint = self._obter_pycaw_endpoint()
+            if endpoint:
+                vol_atual = endpoint.GetMasterVolumeLevelScalar()
+                novo_vol = max(0.0, min(1.0, vol_atual + delta))
+                endpoint.SetMasterVolumeLevelScalar(novo_vol, None)
+                self._sim_volume = novo_vol
+                return novo_vol, True
         except Exception as e:
-            logger.error("Erro no ajuste de volume Windows: %s", e)
-            return self._sim_volume, False
+            logger.warning("Falha ao ajustar volume via pycaw: %s", e)
+
+        # 2. Fallback nativo via PowerShell CoreAudio (sem bibliotecas externas)
+        try:
+            ps_script = f"""
+            Add-Type -TypeDefinition @"
+            using System;
+            using System.Runtime.InteropServices;
+            [Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+            public interface IAudioEndpointVolume {{
+                int f1(); int f2(); int f3(); int f4();
+                int SetMasterVolumeLevelScalar(float fLevel, Guid pguidEventContext);
+                int f6();
+                int GetMasterVolumeLevelScalar(out float pfLevel);
+                int SetMute([MarshalAs(UnmanagedType.Bool)] bool bMute, Guid pguidEventContext);
+                int GetMute(out bool pbMute);
+            }}
+            [Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+            public interface IMMDevice {{
+                int Activate(ref Guid id, int clsCtx, int p, out IAudioEndpointVolume aev);
+            }}
+            [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+            public interface IMMDeviceEnumerator {{
+                int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice endpoint);
+            }}
+            [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class MMDeviceEnumeratorComObject {{}}
+            public class WinAudioHelper {{
+                public static float Adjust(float delta) {{
+                    var enumerator = (IMMDeviceEnumerator)(new MMDeviceEnumeratorComObject());
+                    IMMDevice dev = null;
+                    enumerator.GetDefaultAudioEndpoint(0, 1, out dev);
+                    IAudioEndpointVolume ep = null;
+                    var iid = typeof(IAudioEndpointVolume).GUID;
+                    dev.Activate(ref iid, 1, 0, out ep);
+                    float cur = 0;
+                    ep.GetMasterVolumeLevelScalar(out cur);
+                    float target = Math.Max(0f, Math.Min(1f, cur + delta));
+                    ep.SetMasterVolumeLevelScalar(target, Guid.Empty);
+                    return target;
+                }}
+            }}
+"@
+            [WinAudioHelper]::Adjust({delta:.4f})
+            """
+            res = subprocess.run(["powershell", "-NoProfile", "-Command", ps_script], capture_output=True, text=True, timeout=5)
+            if res.returncode == 0 and res.stdout.strip():
+                val_limpo = res.stdout.strip().replace(",", ".")
+                novo_vol = max(0.0, min(1.0, float(val_limpo)))
+                self._sim_volume = novo_vol
+                return novo_vol, True
+        except Exception as e:
+            logger.warning("Falha no fallback de volume PowerShell: %s", e)
+
+        # Fallback seguro com limites
+        self._sim_volume = max(0.0, min(1.0, self._sim_volume + delta))
+        return self._sim_volume, True
 
     def _definir_mudo(self, mute: bool = True) -> bool:
         """Silencia o áudio de forma estritamente idempotente (sem alternância indesejada)."""
         self._sim_muted = mute
         if self.mock_mode or not IS_WINDOWS:
             return True
-        return True
+
+        # 1. Tenta pycaw
+        try:
+            endpoint = self._obter_pycaw_endpoint()
+            if endpoint:
+                endpoint.SetMute(1 if mute else 0, None)
+                return True
+        except Exception as e:
+            logger.warning("Falha ao silenciar via pycaw: %s", e)
+
+        # 2. Fallback nativo via PowerShell CoreAudio SetMute
+        try:
+            val_bool = "$true" if mute else "$false"
+            ps_script = f"""
+            Add-Type -TypeDefinition @"
+            using System;
+            using System.Runtime.InteropServices;
+            [Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+            public interface IAudioEndpointVolume {{
+                int f1(); int f2(); int f3(); int f4();
+                int SetMasterVolumeLevelScalar(float fLevel, Guid pguidEventContext);
+                int f6();
+                int GetMasterVolumeLevelScalar(out float pfLevel);
+                int SetMute([MarshalAs(UnmanagedType.Bool)] bool bMute, Guid pguidEventContext);
+                int GetMute(out bool pbMute);
+            }}
+            [Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+            public interface IMMDevice {{
+                int Activate(ref Guid id, int clsCtx, int p, out IAudioEndpointVolume aev);
+            }}
+            [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+            public interface IMMDeviceEnumerator {{
+                int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice endpoint);
+            }}
+            [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class MMDeviceEnumeratorComObject {{}}
+            public class WinAudioMuteHelper {{
+                public static bool SetMute(bool mute) {{
+                    var enumerator = (IMMDeviceEnumerator)(new MMDeviceEnumeratorComObject());
+                    IMMDevice dev = null;
+                    enumerator.GetDefaultAudioEndpoint(0, 1, out dev);
+                    IAudioEndpointVolume ep = null;
+                    var iid = typeof(IAudioEndpointVolume).GUID;
+                    dev.Activate(ref iid, 1, 0, out ep);
+                    ep.SetMute(mute, Guid.Empty);
+                    return true;
+                }}
+            }}
+"@
+            [WinAudioMuteHelper]::SetMute({val_bool})
+            """
+            res = subprocess.run(["powershell", "-NoProfile", "-Command", ps_script], capture_output=True, text=True, timeout=5)
+            return res.returncode == 0
+        except Exception as e:
+            logger.warning("Falha no fallback de mudo PowerShell: %s", e)
+            return False
 
 
 def main() -> None:

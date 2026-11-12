@@ -201,6 +201,56 @@ class TestPcControlCatalog(unittest.TestCase):
             # Nenhuma palavra deve ter acento na gramática Vosk pt-0.3
             self.assertEqual(frase, remover_acentos(frase), f"Frase '{frase}' contém diacríticos!")
 
+    def test_09_aliases_fusion_computador_um(self):
+        """Valida que o alias 'computador um' funciona para todas as 11 ações no Fusion."""
+        frases_computador_um = [
+            ("abrir navegador no computador um", "abrir_navegador", "fusion"),
+            ("abrir youtube no computador um", "abrir_youtube", "fusion"),
+            ("bloquear computador um", "bloquear", "fusion"),
+            ("aumentar volume no computador um", "aumentar_volume", "fusion"),
+            ("diminuir volume no computador um", "diminuir_volume", "fusion"),
+            ("silenciar audio no computador um", "silenciar_audio", "fusion"),
+            ("informar status do computador um", "status_computador", "fusion"),
+            ("abrir terminal no computador um", "abrir_terminal", "fusion"),
+            ("fechar navegador no computador um", "fechar_navegador", "fusion"),
+            ("reiniciar computador um", "reiniciar", "fusion"),
+            ("mostrar area de trabalho no computador um", "mostrar_area_de_trabalho", "fusion"),
+        ]
+        for frase, acao_esp, alvo_esp in frases_computador_um:
+            res = obter_comando(frase)
+            self.assertIsNotNone(res, f"Alias 'computador um' não reconhecido: '{frase}'")
+            acao, alvo = res
+            self.assertEqual(acao, acao_esp)
+            self.assertEqual(alvo, alvo_esp)
+
+    def test_10_additional_confirmation_phrases(self):
+        """Valida novas frases naturais de confirmação."""
+        self.assertTrue(is_valid_confirmation("confirmar reiniciar", "reiniciar"))
+        self.assertTrue(is_valid_confirmation("confirmar fechar o navegador", "fechar_navegador"))
+        self.assertTrue(is_valid_confirmation("confirmar fechar", "fechar_navegador"))
+        self.assertFalse(is_valid_confirmation("confirmar reiniciar", "fechar_navegador"))
+        self.assertFalse(is_valid_confirmation("confirmar fechar", "reiniciar"))
+
+    def test_11_natural_phrase_variations(self):
+        """Valida variações preposicionais naturais nos comandos."""
+        variacoes = [
+            ("bloquear no fusion", "bloquear", "fusion"),
+            ("reiniciar no fusion", "reiniciar", "fusion"),
+            ("bloquear no ananuke", "bloquear", "ananuke"),
+            ("reiniciar no ananuke", "reiniciar", "ananuke"),
+            ("status computador dois", "status_computador", "ananuke"),
+            ("status ana no que", "status_computador", "ananuke"),
+            ("status computador um", "status_computador", "fusion"),
+            ("informar status fusion", "status_computador", "fusion"),
+            ("informar status ananuke", "status_computador", "ananuke"),
+        ]
+        for frase, acao_esp, alvo_esp in variacoes:
+            res = obter_comando(frase)
+            self.assertIsNotNone(res, f"Variação natural não reconhecida: '{frase}'")
+            acao, alvo = res
+            self.assertEqual(acao, acao_esp)
+            self.assertEqual(alvo, alvo_esp)
+
 
 if __name__ == "__main__":
     unittest.main()

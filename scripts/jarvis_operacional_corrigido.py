@@ -1054,6 +1054,10 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
             fonte_ativa = None
             sessao_ativa_id = None
 
+            registrar_acao(acao_confirmada, alvo_confirmado)
+            if event_id:
+                registrar_inicio_acao(event_id, acao_confirmada, alvo_confirmado, status="em_processamento")
+
             res_disp = pc_dispatcher.client.enviar_comando(
                 alvo=alvo_confirmado,
                 acao=acao_confirmada,
@@ -1084,6 +1088,28 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                 "erro": res_disp.get("erro"),
                 "processado": True,
             }
+
+        # Confirmação de desligamento (ação de energia)
+        if pendente_acao == "desligar" or pendente_acao is None:
+            if not is_valid_confirmation(texto, "desligar"):
+                print("Confirmacao insuficiente. Pedido cancelado.", flush=True)
+                alvo_falha = pendente
+                estado = "espera"
+                pendente = None
+                pendente_acao = None
+                fonte_ativa = None
+                sessao_ativa_id = None
+                if event_id:
+                    atualizar_status_acao(event_id, "falha", acao="desligar", alvo=alvo_falha, erro="confirmacao_insuficiente")
+                return {
+                    "sucesso": False,
+                    "erro": "confirmacao_insuficiente",
+                    "event_id": event_id,
+                    "active_session_id": None,
+                    "estado": "espera",
+                    "status": "falha",
+                    "processado": True,
+                }
 
         if texto in ("confirmar", "confirmar desligar", "confirmar desligamento"):
             srv = painel.SERVIDORES[pendente]
@@ -1495,21 +1521,22 @@ def on_ipc_event(evento):
     if tipo == "confirmar":
         if estado != "confirmacao" or pendente is None:
             # Deduplicação de confirmação reconhecida simultaneamente por ambos os microfones
-            acao_conf_chk = pendente_acao or "desligar"
+            acoes_a_checar = (pendente_acao,) if pendente_acao else ("desligar", "fechar_navegador", "reiniciar")
             for alvo_chk in ("fusion", "ananuke"):
-                if ja_executado_recentemente(acao_conf_chk, alvo_chk):
-                    print(f"IPC: Confirmacao de {acao_conf_chk} para '{alvo_chk}' deduplicada (ja executada recentemente).", flush=True)
-                    return {
-                        "sucesso": True,
-                        "event_id": event_id,
-                        "acao": acao_conf_chk,
-                        "alvo": alvo_chk,
-                        "deduplicado": True,
-                        "active_session_id": None,
-                        "estado": "espera",
-                        "status": "concluido",
-                        "processado": True,
-                    }
+                for acao_conf_chk in acoes_a_checar:
+                    if ja_executado_recentemente(acao_conf_chk, alvo_chk):
+                        print(f"IPC: Confirmacao de {acao_conf_chk} para '{alvo_chk}' deduplicada (ja executada recentemente).", flush=True)
+                        return {
+                            "sucesso": True,
+                            "event_id": event_id,
+                            "acao": acao_conf_chk,
+                            "alvo": alvo_chk,
+                            "deduplicado": True,
+                            "active_session_id": None,
+                            "estado": "espera",
+                            "status": "concluido",
+                            "processado": True,
+                        }
             print(f"IPC descartado: confirmacao recebida fora do estado 'confirmacao' (estado atual: {estado}).", flush=True)
             return {
                 "sucesso": False,

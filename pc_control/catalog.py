@@ -25,6 +25,7 @@ ENERGY_COMMANDS: Dict[str, Tuple[str, str]] = {
 }
 
 # 11 Comandos Obrigatórios do PC Control V1 para Fusion (Windows)
+# Inclui aliases "computador um" e variações naturais
 FUSION_PC_CONTROL_COMMANDS: Dict[str, Tuple[str, str]] = {
     # 1. Abrir navegador
     "abrir navegador no fusion": ("abrir_navegador", "fusion"),
@@ -32,56 +33,110 @@ FUSION_PC_CONTROL_COMMANDS: Dict[str, Tuple[str, str]] = {
     "abrir navegador fusion": ("abrir_navegador", "fusion"),
     "abrir o navegador fusion": ("abrir_navegador", "fusion"),
     "abrir navegador no computador fusion": ("abrir_navegador", "fusion"),
+    "abrir navegador no computador um": ("abrir_navegador", "fusion"),
+    "abrir o navegador no computador um": ("abrir_navegador", "fusion"),
+    "abrir navegador computador um": ("abrir_navegador", "fusion"),
+    "abrir o navegador computador um": ("abrir_navegador", "fusion"),
     # 2. Abrir YouTube
     "abrir youtube no fusion": ("abrir_youtube", "fusion"),
     "abrir o youtube no fusion": ("abrir_youtube", "fusion"),
     "abrir youtube fusion": ("abrir_youtube", "fusion"),
     "abrir o youtube fusion": ("abrir_youtube", "fusion"),
+    "abrir youtube no computador um": ("abrir_youtube", "fusion"),
+    "abrir o youtube no computador um": ("abrir_youtube", "fusion"),
+    "abrir youtube computador um": ("abrir_youtube", "fusion"),
+    "abrir o youtube computador um": ("abrir_youtube", "fusion"),
     # 3. Bloquear computador
     "bloquear computador fusion": ("bloquear", "fusion"),
     "bloquear o computador fusion": ("bloquear", "fusion"),
+    "bloquear computador no fusion": ("bloquear", "fusion"),
+    "bloquear o computador no fusion": ("bloquear", "fusion"),
     "bloquear fusion": ("bloquear", "fusion"),
+    "bloquear o fusion": ("bloquear", "fusion"),
+    "bloquear no fusion": ("bloquear", "fusion"),
+    "bloquear computador um": ("bloquear", "fusion"),
+    "bloquear o computador um": ("bloquear", "fusion"),
+    "bloquear computador no computador um": ("bloquear", "fusion"),
+    "bloquear no computador um": ("bloquear", "fusion"),
     # 4. Aumentar volume
     "aumentar volume no fusion": ("aumentar_volume", "fusion"),
     "aumentar o volume no fusion": ("aumentar_volume", "fusion"),
     "aumentar volume fusion": ("aumentar_volume", "fusion"),
     "aumentar o volume fusion": ("aumentar_volume", "fusion"),
+    "aumentar volume no computador um": ("aumentar_volume", "fusion"),
+    "aumentar o volume no computador um": ("aumentar_volume", "fusion"),
+    "aumentar volume computador um": ("aumentar_volume", "fusion"),
+    "aumentar o volume computador um": ("aumentar_volume", "fusion"),
     # 5. Diminuir volume
     "diminuir volume no fusion": ("diminuir_volume", "fusion"),
     "diminuir o volume no fusion": ("diminuir_volume", "fusion"),
     "diminuir volume fusion": ("diminuir_volume", "fusion"),
     "diminuir o volume fusion": ("diminuir_volume", "fusion"),
+    "diminuir volume no computador um": ("diminuir_volume", "fusion"),
+    "diminuir o volume no computador um": ("diminuir_volume", "fusion"),
+    "diminuir volume computador um": ("diminuir_volume", "fusion"),
+    "diminuir o volume computador um": ("diminuir_volume", "fusion"),
     # 6. Silenciar áudio
     "silenciar audio no fusion": ("silenciar_audio", "fusion"),
     "silenciar o audio no fusion": ("silenciar_audio", "fusion"),
     "silenciar audio fusion": ("silenciar_audio", "fusion"),
     "silenciar o audio fusion": ("silenciar_audio", "fusion"),
+    "silenciar audio no computador um": ("silenciar_audio", "fusion"),
+    "silenciar o audio no computador um": ("silenciar_audio", "fusion"),
+    "silenciar audio computador um": ("silenciar_audio", "fusion"),
+    "silenciar o audio computador um": ("silenciar_audio", "fusion"),
     "mutar audio no fusion": ("silenciar_audio", "fusion"),
     "mutar audio fusion": ("silenciar_audio", "fusion"),
+    "mutar audio no computador um": ("silenciar_audio", "fusion"),
+    "mutar audio computador um": ("silenciar_audio", "fusion"),
     # 7. Informar status do computador
     "informar status do fusion": ("status_computador", "fusion"),
     "informar status do computador fusion": ("status_computador", "fusion"),
+    "informar status fusion": ("status_computador", "fusion"),
     "status do fusion": ("status_computador", "fusion"),
     "status do computador fusion": ("status_computador", "fusion"),
     "status fusion": ("status_computador", "fusion"),
+    "informar status do computador um": ("status_computador", "fusion"),
+    "informar status computador um": ("status_computador", "fusion"),
+    "status do computador um": ("status_computador", "fusion"),
+    "status computador um": ("status_computador", "fusion"),
     # 8. Abrir terminal
     "abrir terminal no fusion": ("abrir_terminal", "fusion"),
     "abrir o terminal no fusion": ("abrir_terminal", "fusion"),
     "abrir terminal fusion": ("abrir_terminal", "fusion"),
     "abrir o terminal fusion": ("abrir_terminal", "fusion"),
+    "abrir terminal no computador um": ("abrir_terminal", "fusion"),
+    "abrir o terminal no computador um": ("abrir_terminal", "fusion"),
+    "abrir terminal computador um": ("abrir_terminal", "fusion"),
+    "abrir o terminal computador um": ("abrir_terminal", "fusion"),
     # 9. Fechar navegador (requer confirmação)
     "fechar navegador no fusion": ("fechar_navegador", "fusion"),
     "fechar o navegador no fusion": ("fechar_navegador", "fusion"),
     "fechar navegador fusion": ("fechar_navegador", "fusion"),
     "fechar o navegador fusion": ("fechar_navegador", "fusion"),
+    "fechar navegador no computador um": ("fechar_navegador", "fusion"),
+    "fechar o navegador no computador um": ("fechar_navegador", "fusion"),
+    "fechar navegador computador um": ("fechar_navegador", "fusion"),
+    "fechar o navegador computador um": ("fechar_navegador", "fusion"),
     # 10. Reiniciar computador (requer confirmação)
     "reiniciar fusion": ("reiniciar", "fusion"),
     "reiniciar o fusion": ("reiniciar", "fusion"),
     "reiniciar computador fusion": ("reiniciar", "fusion"),
+    "reiniciar o computador fusion": ("reiniciar", "fusion"),
+    "reiniciar computador no fusion": ("reiniciar", "fusion"),
+    "reiniciar o computador no fusion": ("reiniciar", "fusion"),
+    "reiniciar no fusion": ("reiniciar", "fusion"),
+    "reiniciar computador um": ("reiniciar", "fusion"),
+    "reiniciar o computador um": ("reiniciar", "fusion"),
+    "reiniciar computador no computador um": ("reiniciar", "fusion"),
+    "reiniciar no computador um": ("reiniciar", "fusion"),
     # 11. Mostrar área de trabalho
     "mostrar area de trabalho no fusion": ("mostrar_area_de_trabalho", "fusion"),
     "mostrar a area de trabalho no fusion": ("mostrar_area_de_trabalho", "fusion"),
     "mostrar area de trabalho fusion": ("mostrar_area_de_trabalho", "fusion"),
+    "mostrar area de trabalho no computador um": ("mostrar_area_de_trabalho", "fusion"),
+    "mostrar a area de trabalho no computador um": ("mostrar_area_de_trabalho", "fusion"),
+    "mostrar area de trabalho computador um": ("mostrar_area_de_trabalho", "fusion"),
 }
 
 # 11 Comandos Obrigatórios do PC Control V1 para Ananuke (Debian 13 com Xfce)
@@ -105,10 +160,17 @@ ANANUKE_PC_CONTROL_COMMANDS: Dict[str, Tuple[str, str]] = {
     "abrir youtube no ana no que": ("abrir_youtube", "ananuke"),
     # 3. Bloquear computador
     "bloquear computador ananuke": ("bloquear", "ananuke"),
+    "bloquear o computador ananuke": ("bloquear", "ananuke"),
+    "bloquear computador no ananuke": ("bloquear", "ananuke"),
+    "bloquear o computador no ananuke": ("bloquear", "ananuke"),
     "bloquear ananuke": ("bloquear", "ananuke"),
+    "bloquear o ananuke": ("bloquear", "ananuke"),
+    "bloquear no ananuke": ("bloquear", "ananuke"),
     "bloquear computador dois": ("bloquear", "ananuke"),
     "bloquear o computador dois": ("bloquear", "ananuke"),
+    "bloquear no computador dois": ("bloquear", "ananuke"),
     "bloquear ana no que": ("bloquear", "ananuke"),
+    "bloquear no ana no que": ("bloquear", "ananuke"),
     # 4. Aumentar volume
     "aumentar volume no ananuke": ("aumentar_volume", "ananuke"),
     "aumentar o volume no ananuke": ("aumentar_volume", "ananuke"),
@@ -137,12 +199,17 @@ ANANUKE_PC_CONTROL_COMMANDS: Dict[str, Tuple[str, str]] = {
     "mutar audio ananuke": ("silenciar_audio", "ananuke"),
     # 7. Informar status do computador
     "informar status do ananuke": ("status_computador", "ananuke"),
+    "informar status ananuke": ("status_computador", "ananuke"),
     "informar status do computador dois": ("status_computador", "ananuke"),
+    "informar status computador dois": ("status_computador", "ananuke"),
     "informar status do ana no que": ("status_computador", "ananuke"),
+    "informar status ana no que": ("status_computador", "ananuke"),
     "status do ananuke": ("status_computador", "ananuke"),
     "status do computador dois": ("status_computador", "ananuke"),
     "status do ana no que": ("status_computador", "ananuke"),
     "status ananuke": ("status_computador", "ananuke"),
+    "status computador dois": ("status_computador", "ananuke"),
+    "status ana no que": ("status_computador", "ananuke"),
     # 8. Abrir terminal
     "abrir terminal no ananuke": ("abrir_terminal", "ananuke"),
     "abrir o terminal no ananuke": ("abrir_terminal", "ananuke"),
@@ -165,7 +232,13 @@ ANANUKE_PC_CONTROL_COMMANDS: Dict[str, Tuple[str, str]] = {
     "reiniciar computador dois": ("reiniciar", "ananuke"),
     "reiniciar o computador dois": ("reiniciar", "ananuke"),
     "reiniciar computador ananuke": ("reiniciar", "ananuke"),
+    "reiniciar o computador ananuke": ("reiniciar", "ananuke"),
+    "reiniciar computador no ananuke": ("reiniciar", "ananuke"),
+    "reiniciar o computador no ananuke": ("reiniciar", "ananuke"),
+    "reiniciar no ananuke": ("reiniciar", "ananuke"),
+    "reiniciar no computador dois": ("reiniciar", "ananuke"),
     "reiniciar ana no que": ("reiniciar", "ananuke"),
+    "reiniciar no ana no que": ("reiniciar", "ananuke"),
     # 11. Mostrar área de trabalho
     "mostrar area de trabalho no ananuke": ("mostrar_area_de_trabalho", "ananuke"),
     "mostrar a area de trabalho no ananuke": ("mostrar_area_de_trabalho", "ananuke"),
@@ -224,8 +297,11 @@ CONFIRMATION_PHRASES: List[str] = [
     "confirmar desligar",
     "confirmar desligamento",
     "confirmar fechar navegador",
+    "confirmar fechar o navegador",
+    "confirmar fechar",
     "confirmar reinicio",
     "confirmar reinicializacao",
+    "confirmar reiniciar",
 ]
 
 # Frases de cancelamento
@@ -287,9 +363,19 @@ def is_valid_confirmation(text: str, pending_action: Optional[str] = None) -> bo
         return True
     if pending_action == "desligar" and t in ("confirmar desligar", "confirmar desligamento"):
         return True
-    if pending_action == "fechar_navegador" and t in ("confirmar fechar navegador", "confirmar"):
+    if pending_action == "fechar_navegador" and t in (
+        "confirmar fechar navegador",
+        "confirmar fechar o navegador",
+        "confirmar fechar",
+        "confirmar",
+    ):
         return True
-    if pending_action == "reiniciar" and t in ("confirmar reinicio", "confirmar reinicializacao", "confirmar"):
+    if pending_action == "reiniciar" and t in (
+        "confirmar reinicio",
+        "confirmar reinicializacao",
+        "confirmar reiniciar",
+        "confirmar",
+    ):
         return True
     # Se nenhuma ação foi informada para filtrar, aceita qualquer confirmação do catálogo
     if pending_action is None and t in CONFIRMATION_PHRASES:
