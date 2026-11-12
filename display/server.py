@@ -374,6 +374,49 @@ class JarvisLogMonitor:
             )
             return
 
+        # 6b. Confirmação de PC Control (reiniciar e fechar navegador)
+        if "Confirme reinicialização de" in linha or "Confirme reinicializacao de" in linha:
+            alvo_match = re.search(r"Confirme reinicializa[çc][ãa]o de ([^:]+):", linha)
+            alvo = alvo_match.group(1).strip() if alvo_match else "Computador"
+            self.state.atualizar(
+                status="confirming",
+                mensagem=f"Confirme a reinicialização de {alvo}",
+                detalhe='Diga "confirmar" ou "cancelar"',
+                alvo=alvo,
+                acao="reiniciar",
+                auto_reset_s=22.0,
+            )
+            return
+
+        if "Confirme fechar navegador em" in linha:
+            alvo_match = re.search(r"Confirme fechar navegador em ([^:]+):", linha)
+            alvo = alvo_match.group(1).strip() if alvo_match else "Computador"
+            self.state.atualizar(
+                status="confirming",
+                mensagem=f"Confirme fechar navegador em {alvo}",
+                detalhe='Diga "confirmar" ou "cancelar"',
+                alvo=alvo,
+                acao="fechar_navegador",
+                auto_reset_s=22.0,
+            )
+            return
+
+        # 6c. Eventos concluídos do PC Control
+        if "PC Control:" in linha:
+            msg = linha.split("PC Control:", 1)[1].strip()
+            msg_lower = msg.lower()
+            is_sucesso_bloqueio = "bloqueado com sucesso" in msg_lower
+            is_falha = (not is_sucesso_bloqueio) and any(
+                term in msg_lower for term in ("falha", "erro", "offline", "desativado", "bloqueado por", "falha ao bloquear")
+            )
+            self.state.atualizar(
+                status="error" if is_falha else "success",
+                mensagem=msg,
+                detalhe="Jarvis PC Control V1",
+                auto_reset_s=6.0,
+            )
+            return
+
         # 7. Desligamento realizado via SSH
         if (
             "SSH: código de retorno 0" in linha

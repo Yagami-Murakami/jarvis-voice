@@ -45,28 +45,56 @@ MAGIC_DATA = b"DATA"
 DEFAULT_TOKEN = ""  # Sem segredo embutido; configure JARVIS_AUDIO_TOKEN localmente
 DEFAULT_MODEL = "/opt/jarvis-voice/vosk-model-small-pt-0.3"
 
-COMANDOS = {
-    "ligar fusion": ("ligar", "fusion"),
-    "ligar o fusion": ("ligar", "fusion"),
-    "desligar fusion": ("desligar", "fusion"),
-    "desligar o fusion": ("desligar", "fusion"),
-    "ligar computador dois": ("ligar", "ananuke"),
-    "ligar ana no que": ("ligar", "ananuke"),
-    "ligar o computador dois": ("ligar", "ananuke"),
-    "desligar computador dois": ("desligar", "ananuke"),
-    "desligar ana no que": ("desligar", "ananuke"),
-    "desligar o computador dois": ("desligar", "ananuke"),
-}
+try:
+    from pc_control.catalog import (
+        ALL_COMMANDS,
+        CONFIRMATION_PHRASES,
+        CANCELLATION_PHRASES,
+        VOSK_GRAMMAR,
+        requires_confirmation,
+        is_pc_control_action,
+    )
+    COMANDOS = ALL_COMMANDS
+    GRAMATICA = VOSK_GRAMMAR
+except ImportError:
+    try:
+        from ..pc_control.catalog import (
+            ALL_COMMANDS,
+            CONFIRMATION_PHRASES,
+            CANCELLATION_PHRASES,
+            VOSK_GRAMMAR,
+            requires_confirmation,
+            is_pc_control_action,
+        )
+        COMANDOS = ALL_COMMANDS
+        GRAMATICA = VOSK_GRAMMAR
+    except ImportError:
+        COMANDOS = {
+            "ligar fusion": ("ligar", "fusion"),
+            "ligar o fusion": ("ligar", "fusion"),
+            "desligar fusion": ("desligar", "fusion"),
+            "desligar o fusion": ("desligar", "fusion"),
+            "ligar computador dois": ("ligar", "ananuke"),
+            "ligar ana no que": ("ligar", "ananuke"),
+            "ligar o computador dois": ("ligar", "ananuke"),
+            "desligar computador dois": ("desligar", "ananuke"),
+            "desligar ana no que": ("desligar", "ananuke"),
+            "desligar o computador dois": ("desligar", "ananuke"),
+        }
+        GRAMATICA = [
+            "assistente",
+            "confirmar",
+            "confirmar desligar",
+            "confirmar desligamento",
+            "cancelar",
+            *COMANDOS.keys(),
+            "[unk]",
+        ]
+        def requires_confirmation(act: str) -> bool:
+            return act == "desligar"
+        def is_pc_control_action(act: str) -> bool:
+            return False
 
-GRAMATICA = [
-    "assistente",
-    "confirmar",
-    "confirmar desligar",
-    "confirmar desligamento",
-    "cancelar",
-    *COMANDOS.keys(),
-    "[unk]",
-]
 
 
 class SessionArbitrator:
@@ -268,25 +296,71 @@ class SessionArbitrator:
                     "simulacao": True,
                 }
 
-            if acao == "desligar":
+            if acao == "desligar" or requires_confirmation(acao):
                 # Entra em confirmação obrigatória
                 self.state = "confirmacao"
                 self.expires_at = now + 20.0
                 sid = self.session_id
-                self._registrar_evento("command_shutdown_pending", source, alvo=alvo, session_id=sid)
+                self._registrar_evento(f"command_{acao}_pending", source, acao=acao, alvo=alvo, session_id=sid)
                 logger.info(
-                    "Confirmação de desligamento necessária para '%s' via %s (sessão %s)",
+                    "Confirmação de %s necessária para '%s' via %s (sessão %s)",
+                    acao,
                     alvo,
                     source,
                     sid,
                 )
                 return {
                     "valido": True,
-                    "acao": "desligar",
+                    "acao": acao,
                     "alvo": alvo,
                     "confirmacao_necessaria": True,
                     "status": "confirmacao_pendente",
                     "session_id": sid,
+                }
+
+            if is_pc_control_action(acao):
+                # Deduplicação na camada de ação (idempotência do PC Control)
+                delta_action = now - self._recent_actions.get((acao, alvo), 0.0)
+                if delta_action <= self.action_dedup_window_s:
+                    self.deduplicated_count += 1
+                    logger.info(
+                        "Deduplicação de ação: '%s' para '%s' descartado (ação idêntica executada há %.2fs)",
+                        acao,
+                        alvo,
+                        delta_action,
+                    )
+                    sid = self.session_id
+                    self.state = "espera"
+                    self.session_id = None
+                    self._registrar_evento("action_deduplicated", source, acao=acao, alvo=alvo, delta=delta_action)
+                    return {
+                        "valido": False,
+                        "motivo": f"Ação '{acao} {alvo}' recentemente executada (idempotência)",
+                        "session_id": sid,
+                        "deduplicado": True,
+                        "acao": acao,
+                        "alvo": alvo,
+                    }
+                self._recent_actions[(acao, alvo)] = now
+
+                # Conclui sessão com reconhecimento local
+                sid = self.session_id
+                self.state = "espera"
+                self.session_id = None
+                self._registrar_evento("command_pc_control_local", source, acao=acao, alvo=alvo, session_id=sid)
+                logger.info(
+                    "Comando PC Control reconhecido localmente: %s para '%s' via %s (sessão %s)",
+                    acao,
+                    alvo,
+                    source,
+                    sid,
+                )
+                return {
+                    "valido": True,
+                    "acao": acao,
+                    "alvo": alvo,
+                    "session_id": sid,
+                    "status": "aceito",
                 }
 
             return {"valido": False, "motivo": "Ação desconhecida"}
@@ -319,67 +393,81 @@ class SessionArbitrator:
         with self._lock:
             if self.state != "confirmacao":
                 # Verifica se confirmação já foi realizada recentemente (deduplicação entre microfones)
+                acoes_conf = ("desligar", "fechar_navegador", "reiniciar")
                 for alvo_cand in (self.target_computer, "fusion", "ananuke"):
                     if alvo_cand:
-                        delta_action = now - self._recent_actions.get(("desligar", alvo_cand), 0.0)
-                        if delta_action <= self.action_dedup_window_s:
-                            self.deduplicated_count += 1
-                            logger.info(
-                                "Deduplicação de confirmação: 'desligar %s' via %s descartada (ação idêntica confirmada há %.2fs)",
-                                alvo_cand,
-                                source,
-                                delta_action,
-                            )
-                            return {
-                                "valido": False,
-                                "acao": "desligar_confirmado",
-                                "alvo": alvo_cand,
-                                "deduplicado": True,
-                                "session_id": self.session_id,
-                                "motivo": f"Ação 'desligar {alvo_cand}' recentemente confirmada (idempotência)",
-                            }
+                        for acao_cand in acoes_conf:
+                            delta_action = now - self._recent_actions.get((acao_cand, alvo_cand), 0.0)
+                            if delta_action <= self.action_dedup_window_s:
+                                self.deduplicated_count += 1
+                                nome_ret = "desligar_confirmado" if acao_cand == "desligar" else f"{acao_cand}_confirmado"
+                                logger.info(
+                                    "Deduplicação de confirmação: '%s %s' via %s descartada (ação idêntica confirmada há %.2fs)",
+                                    acao_cand,
+                                    alvo_cand,
+                                    source,
+                                    delta_action,
+                                )
+                                return {
+                                    "valido": False,
+                                    "acao": nome_ret,
+                                    "alvo": alvo_cand,
+                                    "deduplicado": True,
+                                    "session_id": self.session_id,
+                                    "motivo": f"Ação '{acao_cand} {alvo_cand}' recentemente confirmada (idempotência)",
+                                }
                 return {"valido": False, "motivo": "Nenhuma confirmação pendente"}
 
             if now > self.expires_at:
                 self.state = "espera"
                 self.session_id = None
+                self.target_action = None
+                self.target_computer = None
                 return {"valido": False, "motivo": "Tempo de confirmação esgotado"}
 
             sid = self.session_id
             alvo = self.target_computer
+            acao_pend = self.target_action or "desligar"
 
-            # Deduplicação na camada de ação (idempotência no desligamento)
-            delta_action = now - self._recent_actions.get(("desligar", alvo), 0.0)
+            # Deduplicação na camada de ação (idempotência na confirmação)
+            delta_action = now - self._recent_actions.get((acao_pend, alvo), 0.0)
             if delta_action <= self.action_dedup_window_s:
                 self.deduplicated_count += 1
                 logger.info(
-                    "Deduplicação de ação: Desligamento de '%s' descartado (ação idêntica confirmada há %.2fs)",
+                    "Deduplicação de ação: Confirmação de '%s' para '%s' descartada (ação idêntica confirmada há %.2fs)",
+                    acao_pend,
                     alvo,
                     delta_action,
                 )
                 self.state = "espera"
                 self.session_id = None
-                self._registrar_evento("action_deduplicated", source, acao="desligar", alvo=alvo, delta=delta_action)
+                self.target_action = None
+                self.target_computer = None
+                self._registrar_evento("action_deduplicated", source, acao=acao_pend, alvo=alvo, delta=delta_action)
                 return {
                     "valido": False,
-                    "motivo": f"Ação 'desligar {alvo}' recentemente confirmada (idempotência)",
+                    "motivo": f"Ação '{acao_pend} {alvo}' recentemente confirmada (idempotência)",
                     "session_id": sid,
                     "deduplicado": True,
                 }
-            self._recent_actions[("desligar", alvo)] = now
+            self._recent_actions[(acao_pend, alvo)] = now
 
             self.state = "espera"
             self.session_id = None
-            self._registrar_evento("confirmation_recognized_local", source, alvo=alvo, session_id=sid)
+            self.target_action = None
+            self.target_computer = None
+            self._registrar_evento("confirmation_recognized_local", source, acao=acao_pend, alvo=alvo, session_id=sid)
             logger.info(
-                "Confirmação de desligamento reconhecida localmente para '%s' via %s (sessão %s)",
+                "Confirmação de %s reconhecida localmente para '%s' via %s (sessão %s)",
+                acao_pend,
                 alvo,
                 source,
                 sid,
             )
+            nome_ret = "desligar_confirmado" if acao_pend == "desligar" else f"{acao_pend}_confirmado"
             return {
                 "valido": True,
-                "acao": "desligar_confirmado",
+                "acao": nome_ret,
                 "alvo": alvo,
                 "session_id": sid,
                 "status": "concluido",
@@ -464,9 +552,13 @@ def _registrar_log_ack_gateway(
                 st = "aceito"
 
         if st == "confirmacao_pendente" or (st != "concluido" and ack.get("estado") == "confirmacao" and tipo_acao == "desligar"):
+            desc_acao = "Desligamento SSH" if tipo_acao == "desligar" else nome_acao
             logger.info(
-                "[AGUARDANDO CONFIRMAÇÃO] [SIMULAÇÃO] Desligamento SSH para '%s' via %s aguardando confirmação do operador (sessão %s, status=confirmacao_pendente)",
-                alvo_str, fonte, sid_str
+                "[AGUARDANDO CONFIRMAÇÃO] [SIMULAÇÃO] %s para '%s' via %s aguardando confirmação do operador (sessão %s, status=confirmacao_pendente)",
+                desc_acao,
+                alvo_str,
+                fonte,
+                sid_str,
             )
         elif st == "cancelado" or tipo_acao == "cancelar":
             logger.info(

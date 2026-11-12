@@ -1,0 +1,16 @@
+[Unit]
+Description=Jarvis PC Control Local Agent (Ananuke)
+After=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/jarvis-pc-control
+Environment="JARVIS_PC_AGENT_TOKEN=TOKEN_SEGURO_ANANUKE_MIN_16_CHARS"
+Environment="JARVIS_PC_ALLOWED_IPS=192.168.0.126,127.0.0.1"
+Environment="DISPLAY=:0"
+ExecStart=/usr/bin/python3 -m pc_control.agents.linux_agent --port 8092 --allowed-ips 192.168.0.126,127.0.0.1
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
