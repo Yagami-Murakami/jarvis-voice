@@ -247,16 +247,54 @@ class PcAgentServer(ThreadingHTTPServer):
         self.certfile = certfile or os.getenv("JARVIS_PC_TLS_CERT")
         self.keyfile = keyfile or os.getenv("JARVIS_PC_TLS_KEY")
         self.start_time = time.time()
+        # Determina se TLS foi explicitamente configurado via argumentos ou ambiente
+        tls_configurado = bool(
+            certfile
+            or keyfile
+            or os.getenv("JARVIS_PC_TLS_CERT")
+            or os.getenv("JARVIS_PC_TLS_KEY")
+            or os.getenv("JARVIS_PC_TLS_ENABLED") in ("1", "true", "True")
+            or os.getenv("JARVIS_PC_ENABLE_TLS") in ("1", "true", "True")
+        )
+
         super().__init__((host, port), PcAgentHandler)
 
-        # Envoltório TLS 1.2+ estrito caso certificados tenham sido fornecidos
-        if self.certfile and self.keyfile and os.path.exists(self.certfile) and os.path.exists(self.keyfile):
-            import ssl
-            ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-            ssl_ctx.load_cert_chain(certfile=self.certfile, keyfile=self.keyfile)
-            ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-            self.socket = ssl_ctx.wrap_socket(self.socket, server_side=True)
-            logger.info("TLS 1.2+ ativo no agente local [%s]", self.target_id)
+        # Se TLS estiver configurado, validação estrita (fail-closed, sem fallback silencioso para HTTP)
+        if tls_configurado:
+            if not self.certfile or not self.keyfile:
+                self.server_close()
+                msg = f"Configuração TLS incompleta no agente [{self.target_id}]: certfile e keyfile são ambos obrigatórios."
+                logger.error(msg)
+                raise ValueError(msg)
+
+            if not os.path.exists(self.certfile):
+                self.server_close()
+                msg = f"Certificado TLS não encontrado no agente [{self.target_id}]: {self.certfile}"
+                logger.error(msg)
+                raise FileNotFoundError(msg)
+
+            if not os.path.exists(self.keyfile):
+                self.server_close()
+                msg = f"Chave privada TLS não encontrada no agente [{self.target_id}]: {self.keyfile}"
+                logger.error(msg)
+                raise FileNotFoundError(msg)
+
+            try:
+                import ssl
+                ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+                ssl_ctx.load_cert_chain(certfile=self.certfile, keyfile=self.keyfile)
+                if hasattr(ssl, "TLSVersion"):
+                    ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+                self.socket = ssl_ctx.wrap_socket(self.socket, server_side=True)
+                logger.info("TLS 1.2+ ativo no agente local [%s]", self.target_id)
+            except Exception as e:
+                self.server_close()
+                logger.critical(
+                    "Falha ao carregar certificados TLS no agente [%s]: %s. Falha na inicialização sem fallback para HTTP.",
+                    self.target_id,
+                    e,
+                )
+                raise
 
     def executar_acao(
         self,

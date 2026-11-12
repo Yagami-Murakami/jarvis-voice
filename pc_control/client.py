@@ -141,10 +141,29 @@ class PcControlClient:
         ssl_ctx = None
         if endpoint.lower().startswith("https://"):
             import ssl
-            if os.getenv("JARVIS_PC_TLS_INSECURE_SKIP_VERIFY") == "1":
-                ssl_ctx = ssl._create_unverified_context()
-            elif self.ca_cert and os.path.exists(self.ca_cert):
+            if self.ca_cert:
+                if not os.path.exists(self.ca_cert):
+                    return {
+                        "event_id": event_id,
+                        "session_id": session_id,
+                        "origem": fonte,
+                        "computador_alvo": alvo_normalizado,
+                        "acao": acao,
+                        "estado": "falha",
+                        "status": "falha",
+                        "resultado": {},
+                        "erro": f"ca_cert_nao_encontrado: {self.ca_cert}",
+                        "mensagem_amigavel": f"Falha de segurança TLS: Certificado CA não encontrado para {nome_alvo}.",
+                        "timestamp": time.time(),
+                    }
                 ssl_ctx = ssl.create_default_context(cafile=self.ca_cert)
+            elif os.getenv("JARVIS_PC_TLS_INSECURE_SKIP_VERIFY") == "1":
+                logger.warning(
+                    "ALERTA DE SEGURANÇA: JARVIS_PC_TLS_INSECURE_SKIP_VERIFY=1 ativo. "
+                    "Verificação de certificado HTTPS desativada temporariamente. "
+                    "NÃO utilizar em produção!"
+                )
+                ssl_ctx = ssl._create_unverified_context()
             else:
                 ssl_ctx = ssl.create_default_context()
 

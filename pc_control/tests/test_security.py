@@ -27,10 +27,15 @@ from pc_control.client import PcControlClient
 from pc_control.agents.base_agent import PcAgentHandler, PcAgentServer
 import http.server
 import json
+import os
 import socket
+import ssl
+import subprocess
+import tempfile
 import threading
 import urllib.request
 import urllib.error
+from unittest.mock import patch
 
 
 class TestPcControlSecurity(unittest.TestCase):
@@ -332,6 +337,133 @@ class TestPcControlSecurity(unittest.TestCase):
         fake_inst = FakeHandler()
         self.assertTrue(handler_unbound(fake_inst))
         agent.server_close()
+
+    def test_17_tls_incomplete_config_fails_initialization(self):
+        """Valida que o agente falha ao inicializar se TLS estiver incompleto (apenas cert ou key)."""
+        # Apenas certfile informado
+        with self.assertRaises(ValueError) as ctx1:
+            PcAgentServer(
+                host="127.0.0.1",
+                port=0,
+                target_id="fusion",
+                auth_token="segredo-forte-de-teste-12345",
+                certfile="/caminho/cert.pem",
+                keyfile=None,
+            )
+        self.assertIn("incompleta", str(ctx1.exception).lower())
+
+        # Apenas keyfile informado
+        with self.assertRaises(ValueError) as ctx2:
+            PcAgentServer(
+                host="127.0.0.1",
+                port=0,
+                target_id="fusion",
+                auth_token="segredo-forte-de-teste-12345",
+                certfile=None,
+                keyfile="/caminho/key.pem",
+            )
+        self.assertIn("incompleta", str(ctx2.exception).lower())
+
+        # TLS ativado por variável de ambiente sem fornecer cert/key
+        with patch.dict(os.environ, {"JARVIS_PC_TLS_ENABLED": "1"}):
+            with self.assertRaises(ValueError) as ctx3:
+                PcAgentServer(
+                    host="127.0.0.1",
+                    port=0,
+                    target_id="fusion",
+                    auth_token="segredo-forte-de-teste-12345",
+                )
+            self.assertIn("incompleta", str(ctx3.exception).lower())
+
+    def test_18_tls_missing_cert_files_fails_initialization(self):
+        """Valida que o agente falha com FileNotFoundError se arquivos de certificado/chave não existirem."""
+        with self.assertRaises(FileNotFoundError) as ctx:
+            PcAgentServer(
+                host="127.0.0.1",
+                port=0,
+                target_id="fusion",
+                auth_token="segredo-forte-de-teste-12345",
+                certfile="/tmp/arquivo_cert_inexistente_xyz_123.crt",
+                keyfile="/tmp/arquivo_key_inexistente_xyz_123.key",
+            )
+        self.assertIn("não encontrado", str(ctx.exception).lower())
+
+    def test_19_tls_invalid_cert_content_fails_initialization(self):
+        """Valida que certificados corrompidos ou inválidos impedem inicialização e não fazem fallback para HTTP."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bad_cert = os.path.join(tmpdir, "bad_cert.pem")
+            bad_key = os.path.join(tmpdir, "bad_key.pem")
+            with open(bad_cert, "w", encoding="utf-8") as f:
+                f.write("-----BEGIN CERTIFICATE-----\nCONTEUDO_INVALIDO\n-----END CERTIFICATE-----\n")
+            with open(bad_key, "w", encoding="utf-8") as f:
+                f.write("-----BEGIN PRIVATE KEY-----\nCONTEUDO_INVALIDO\n-----END PRIVATE KEY-----\n")
+
+            with self.assertRaises(Exception) as ctx:
+                PcAgentServer(
+                    host="127.0.0.1",
+                    port=0,
+                    target_id="fusion",
+                    auth_token="segredo-forte-de-teste-12345",
+                    certfile=bad_cert,
+                    keyfile=bad_key,
+                )
+            self.assertTrue(issubclass(type(ctx.exception), (ssl.SSLError, Exception)))
+
+    def test_20_tls_valid_cert_initializes_tls_socket(self):
+        """Valida que certificados válidos envelopam o socket do servidor em SSLSocket com TLS 1.2+."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cert_path = os.path.join(tmpdir, "test_cert.pem")
+            key_path = os.path.join(tmpdir, "test_key.pem")
+            cmd = [
+                "openssl",
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-keyout",
+                key_path,
+                "-out",
+                cert_path,
+                "-days",
+                "1",
+                "-nodes",
+                "-subj",
+                "/CN=127.0.0.1",
+            ]
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            server = PcAgentServer(
+                host="127.0.0.1",
+                port=0,
+                target_id="fusion",
+                auth_token="segredo-forte-de-teste-12345",
+                certfile=cert_path,
+                keyfile=key_path,
+            )
+            try:
+                self.assertIsInstance(server.socket, ssl.SSLSocket)
+            finally:
+                server.server_close()
+
+    def test_21_client_fails_closed_when_ca_cert_missing(self):
+        """Valida que PcControlClient falha com erro seguro se o CA especificado não existir."""
+        client = PcControlClient(
+            token="segredo-forte-de-teste-12345",
+            ca_cert="/tmp/ca_inexistente_98765.pem",
+            url_overrides={"fusion": "https://127.0.0.1:8092"},
+        )
+        resp = client.enviar_comando("fusion", "abrir_navegador", "ev-ca-missing")
+        self.assertEqual(resp["status"], "falha")
+        self.assertIn("ca_cert_nao_encontrado", resp["erro"])
+
+    def test_22_client_default_https_creates_verified_context(self):
+        """Valida que por padrão conexões HTTPS utilizam contexto verificado (CERT_REQUIRED)."""
+        client = PcControlClient(token="segredo-forte-de-teste-12345")
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("JARVIS_PC_TLS_INSECURE_SKIP_VERIFY", None)
+            ctx = ssl.create_default_context()
+            self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+            self.assertTrue(ctx.check_hostname)
 
 
 if __name__ == "__main__":
