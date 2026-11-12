@@ -72,12 +72,20 @@ def get_agent_timeout() -> float:
     return 2.5
 
 
-def get_allowed_client_ips() -> Optional[Set[str]]:
-    """Retorna o conjunto de IPs autorizados para conectar aos agentes locais."""
+DEFAULT_ALLOWED_IPS = {"127.0.0.1", "::1", "192.168.0.126"}
+
+
+def get_allowed_client_ips() -> Set[str]:
+    """Retorna o conjunto de IPs autorizados para conectar aos agentes locais.
+
+    Por padrão de segurança defensiva, restringe a porta 8092 estritamente ao
+    controlador central (192.168.0.126) e localhost (127.0.0.1, ::1).
+    Caso JARVIS_PC_ALLOWED_IPS seja definido, utiliza a lista especificada.
+    """
     raw = os.getenv("JARVIS_PC_ALLOWED_IPS")
     if raw:
         return {ip.strip() for ip in raw.split(",") if ip.strip()}
-    return None
+    return set(DEFAULT_ALLOWED_IPS)
 
 
 def is_mock_mode() -> bool:

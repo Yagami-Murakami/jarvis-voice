@@ -42,8 +42,12 @@ class PcAgentHandler(BaseHTTPRequestHandler):
 
     def _verificar_ip_autorizado(self) -> bool:
         """Restringe a exposição validando o IP de origem contra a allowlist configurada."""
-        if self.server.allowed_ips:
+        if self.server.allowed_ips is not None:
+            if "*" in self.server.allowed_ips or "all" in self.server.allowed_ips:
+                return True
             client_ip = self.client_address[0]
+            if client_ip.startswith("::ffff:"):
+                client_ip = client_ip.replace("::ffff:", "")
             if client_ip not in self.server.allowed_ips:
                 logger.warning(
                     "Conexão rejeitada de IP não autorizado: %s (Alvo: %s)",
@@ -239,7 +243,7 @@ class PcAgentServer(ThreadingHTTPServer):
         self.target_id = target_id.lower()
         self.auth_token = auth_token or ""
         self.nonce_cache = nonce_cache or NonceCache()
-        self.allowed_ips = allowed_ips or get_allowed_client_ips()
+        self.allowed_ips = allowed_ips if allowed_ips is not None else get_allowed_client_ips()
         self.certfile = certfile or os.getenv("JARVIS_PC_TLS_CERT")
         self.keyfile = keyfile or os.getenv("JARVIS_PC_TLS_KEY")
         self.start_time = time.time()

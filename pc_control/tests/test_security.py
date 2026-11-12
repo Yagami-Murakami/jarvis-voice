@@ -24,7 +24,7 @@ from pc_control.security import (
     verificar_assinatura,
 )
 from pc_control.client import PcControlClient
-from pc_control.agents.base_agent import PcAgentServer
+from pc_control.agents.base_agent import PcAgentHandler, PcAgentServer
 import http.server
 import json
 import socket
@@ -286,6 +286,51 @@ class TestPcControlSecurity(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             urllib.request.urlopen(req, timeout=2.0)
         self.assertEqual(ctx.exception.code, 403)
+        agent.server_close()
+
+    def test_15_agent_default_allowed_ips_accepts_localhost(self):
+        """Valida que sem JARVIS_PC_ALLOWED_IPS configurado, o agente aceita localhost por padrão."""
+        class DummyAgent(PcAgentServer):
+            def executar_acao(self, action: str, params=None, event_id="", session_id=None):
+                return True, {}, None, "ok"
+
+        agent = DummyAgent(
+            host="127.0.0.1",
+            port=0,
+            target_id="fusion",
+            auth_token="segredo-forte-de-teste-12345",
+        )
+        port = agent.server_address[1]
+        th = threading.Thread(target=agent.handle_request, daemon=True)
+        th.start()
+
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/health")
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            self.assertEqual(resp.status, 200)
+        agent.server_close()
+
+    def test_16_agent_handles_ipv4_mapped_ipv6(self):
+        """Valida que endereço IPv4 mapeado sobre IPv6 (::ffff:127.0.0.1) é devidamente autorizado."""
+        class DummyAgent(PcAgentServer):
+            def executar_acao(self, action: str, params=None, event_id="", session_id=None):
+                return True, {}, None, "ok"
+
+        agent = DummyAgent(
+            host="127.0.0.1",
+            port=0,
+            target_id="fusion",
+            auth_token="segredo-forte-de-teste-12345",
+            allowed_ips={"127.0.0.1"},
+        )
+
+        class FakeHandler:
+            client_address = ("::ffff:127.0.0.1", 12345)
+            server = agent
+
+        # Chama a rotina interna _verificar_ip_autorizado com o client IPv4 mapeado
+        handler_unbound = PcAgentHandler._verificar_ip_autorizado
+        fake_inst = FakeHandler()
+        self.assertTrue(handler_unbound(fake_inst))
         agent.server_close()
 
 
