@@ -23,7 +23,7 @@ class TestWindowsPcAgent(unittest.TestCase):
     """Testes unitários para o agente Windows (Fusion)."""
 
     def setUp(self):
-        self.agent = WindowsPcAgent(host="127.0.0.1", port=0, auth_token="test-token-win", mock_mode=True)
+        self.agent = WindowsPcAgent(host="127.0.0.1", port=0, auth_token="test-token-win-12345", mock_mode=True)
 
     def tearDown(self):
         try:
@@ -95,12 +95,20 @@ class TestWindowsPcAgent(unittest.TestCase):
         self.assertTrue(res.get("simulado"))
         self.assertTrue(res.get("reiniciando"))
 
+    def test_06_fechar_navegador_falha_se_nenhum_aberto(self):
+        """Valida que fechar_navegador retorna sucesso=False quando nenhum navegador está ativo."""
+        ok, res, erro, msg = self.agent.executar_acao("fechar_navegador", {"simular_nenhum": True}, "ev-close-none")
+        self.assertFalse(ok)
+        self.assertEqual(erro, "nenhum_navegador_encontrado")
+        self.assertEqual(res.get("navegadores_fechados"), [])
+        self.assertIn("Nenhum navegador", msg)
+
 
 class TestLinuxPcAgent(unittest.TestCase):
     """Testes unitários para o agente Linux (Ananuke - Debian 13 / Xfce)."""
 
     def setUp(self):
-        self.agent = LinuxPcAgent(host="127.0.0.1", port=0, auth_token="test-token-lin", mock_mode=True)
+        self.agent = LinuxPcAgent(host="127.0.0.1", port=0, auth_token="test-token-lin-12345", mock_mode=True)
 
     def tearDown(self):
         try:
@@ -172,6 +180,14 @@ class TestLinuxPcAgent(unittest.TestCase):
         self.assertTrue(ok)
         self.assertTrue(res.get("simulado"))
         self.assertTrue(res.get("reiniciando"))
+
+    def test_06_fechar_navegador_falha_se_nenhum_aberto(self):
+        """Valida que fechar_navegador retorna sucesso=False quando nenhum navegador está ativo."""
+        ok, res, erro, msg = self.agent.executar_acao("fechar_navegador", {"simular_nenhum": True}, "ev-close-none-lin")
+        self.assertFalse(ok)
+        self.assertEqual(erro, "nenhum_navegador_encontrado")
+        self.assertEqual(res.get("processos_fechados"), [])
+        self.assertIn("Nenhum navegador", msg)
 
 
 if __name__ == "__main__":

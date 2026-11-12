@@ -235,7 +235,7 @@ class TestClientAndDispatcher(unittest.TestCase):
         """Valida que PcControlClient trata host offline com erro amigável sem travar."""
         # Usa porta inexistente/fechada no localhost para simular máquina inacessível
         real_client = PcControlClient(
-            token="segredo",
+            token="segredo-forte-valido-12345",
             timeout=0.2,
             url_overrides={"fusion": "http://127.0.0.1:59999"},
         )
@@ -249,6 +249,81 @@ class TestClientAndDispatcher(unittest.TestCase):
         self.assertEqual(res.get("status"), "falha")
         self.assertIn("computador_offline_ou_inacessivel", res.get("erro", ""))
         self.assertIn("desligado ou com agente inacessível", res.get("mensagem_amigavel", ""))
+
+    def test_10_orphan_confirmation_rejected(self):
+        """Valida que confirmação órfã (sem ação pendente prévia) é rejeitada com erro específico."""
+        with patch.dict(os.environ, {"JARVIS_PC_CONTROL_ENABLED": "1"}, clear=False):
+            self.dispatcher.pending_confirmation = None
+            res = self.dispatcher.processar_comando_ou_confirmacao(
+                acao="confirmar",
+                alvo="fusion",
+                texto_falado="confirmar",
+                session_id="sess-orphan-1",
+                event_id="ev-orphan-1",
+            )
+            self.assertFalse(res.get("sucesso"))
+            self.assertEqual(res.get("erro"), "nenhuma_confirmacao_pendente")
+            self.assertIn("Nenhuma operação pendente", res.get("mensagem_amigavel", ""))
+            self.mock_client.enviar_comando.assert_not_called()
+
+    def test_11_target_divergent_confirmation_rejected(self):
+        """Valida que confirmação com computador-alvo conflitante com o pendente é rejeitada."""
+        with patch.dict(os.environ, {"JARVIS_PC_CONTROL_ENABLED": "1"}, clear=False):
+            # Registra confirmação para Fusion
+            self.dispatcher.processar_comando_ou_confirmacao(
+                acao="fechar_navegador",
+                alvo="fusion",
+                texto_falado="fechar navegador no fusion",
+                session_id="sess-match-1",
+                event_id="ev-match-1",
+            )
+            # Tenta confirmar apontando para Ananuke
+            res = self.dispatcher.processar_comando_ou_confirmacao(
+                acao="confirmar",
+                alvo="ananuke",
+                texto_falado="confirmar ananuke",
+                session_id="sess-match-1",
+                event_id="ev-match-2",
+            )
+            self.assertFalse(res.get("sucesso"))
+            self.assertEqual(res.get("erro"), "computador_alvo_divergente")
+            self.mock_client.enviar_comando.assert_not_called()
+
+    def test_12_action_divergent_confirmation_rejected(self):
+        """Valida que envio de ação divergente durante confirmação pendente é bloqueado."""
+        with patch.dict(os.environ, {"JARVIS_PC_CONTROL_ENABLED": "1"}, clear=False):
+            self.dispatcher.processar_comando_ou_confirmacao(
+                acao="fechar_navegador",
+                alvo="fusion",
+                texto_falado="fechar navegador no fusion",
+                session_id="sess-act-1",
+                event_id="ev-act-1",
+            )
+            # Tenta enviar outra ação de PC Control (ex: bloquear) em vez de confirmar/cancelar
+            res = self.dispatcher.processar_comando_ou_confirmacao(
+                acao="bloquear",
+                alvo="fusion",
+                texto_falado="bloquear fusion",
+                session_id="sess-act-1",
+                event_id="ev-act-2",
+            )
+            self.assertFalse(res.get("sucesso"))
+            self.assertEqual(res.get("erro"), "acao_divergente")
+            self.mock_client.enviar_comando.assert_not_called()
+
+    def test_13_requires_confirmation_without_session_id_rejected(self):
+        """Valida que ação destrutiva sem session_id é rejeitada em fail-closed."""
+        with patch.dict(os.environ, {"JARVIS_PC_CONTROL_ENABLED": "1"}, clear=False):
+            res = self.dispatcher.processar_comando_ou_confirmacao(
+                acao="reiniciar",
+                alvo="fusion",
+                texto_falado="reiniciar fusion",
+                session_id=None,
+                event_id="ev-nosess-1",
+            )
+            self.assertFalse(res.get("sucesso"))
+            self.assertEqual(res.get("erro"), "sessao_obrigatoria_para_confirmacao")
+            self.assertIsNone(self.dispatcher.pending_confirmation)
 
 
 if __name__ == "__main__":
