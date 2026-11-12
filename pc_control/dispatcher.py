@@ -214,6 +214,7 @@ class PcControlDispatcher:
                     return resp
                 else:
                     logger.warning("Confirmação incompatível para ação pendente '%s': '%s'", pend.get("acao"), texto_falado)
+                    self.pending_confirmation = None
                     return {
                         "sucesso": False,
                         "event_id": event_id,

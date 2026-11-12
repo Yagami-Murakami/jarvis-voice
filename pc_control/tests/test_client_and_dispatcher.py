@@ -325,6 +325,30 @@ class TestClientAndDispatcher(unittest.TestCase):
             self.assertEqual(res.get("erro"), "sessao_obrigatoria_para_confirmacao")
             self.assertIsNone(self.dispatcher.pending_confirmation)
 
+    def test_14_insufficient_confirmation_clears_pending_state(self):
+        """Valida que resposta inválida/insuficiente cancela e limpa a confirmação pendente."""
+        with patch.dict(os.environ, {"JARVIS_PC_CONTROL_ENABLED": "1"}, clear=False):
+            self.dispatcher.processar_comando_ou_confirmacao(
+                acao="fechar_navegador",
+                alvo="fusion",
+                texto_falado="fechar navegador no fusion",
+                session_id="sess-insuf-1",
+                event_id="ev-insuf-1",
+            )
+            self.assertIsNotNone(self.dispatcher.pending_confirmation)
+
+            # Usuário responde frase desconhecida/inválida
+            res = self.dispatcher.processar_comando_ou_confirmacao(
+                acao="confirmar",
+                alvo="fusion",
+                texto_falado="frase invalida qualquer",
+                session_id="sess-insuf-1",
+                event_id="ev-insuf-2",
+            )
+            self.assertFalse(res.get("sucesso"))
+            self.assertEqual(res.get("erro"), "confirmacao_insuficiente")
+            self.assertIsNone(self.dispatcher.pending_confirmation)
+
 
 if __name__ == "__main__":
     unittest.main()

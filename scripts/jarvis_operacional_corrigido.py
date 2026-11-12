@@ -566,6 +566,8 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
         pendente_acao = None
         fonte_ativa = None
         sessao_ativa_id = None
+        if pc_dispatcher:
+            pc_dispatcher.pending_confirmation = None
 
     # Preservação estrita do formato de log contratual para display/server.py e Me6sJournalMonitor
     if fonte != "me6s":
@@ -579,6 +581,8 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
         fonte_ativa = None
         sessao_ativa_id = None
         ultima_ativacao = 0.0
+        if pc_dispatcher:
+            pc_dispatcher.pending_confirmation = None
         print("Cancelado.", flush=True)
         return {
             "sucesso": True,
@@ -1043,6 +1047,8 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                 pendente_acao = None
                 fonte_ativa = None
                 sessao_ativa_id = None
+                if pc_dispatcher:
+                    pc_dispatcher.pending_confirmation = None
                 if event_id:
                     atualizar_status_acao(event_id, "falha", acao=acao_falha, alvo=alvo_falha, erro="confirmacao_insuficiente")
                 return {
@@ -1111,6 +1117,8 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                 pendente_acao = None
                 fonte_ativa = None
                 sessao_ativa_id = None
+                if pc_dispatcher:
+                    pc_dispatcher.pending_confirmation = None
                 if event_id:
                     atualizar_status_acao(event_id, "falha", acao="desligar", alvo=alvo_falha, erro="confirmacao_insuficiente")
                 return {
@@ -1817,8 +1825,11 @@ def iniciar_servicos(max_iteracoes=None):
                     print("Tempo esgotado.", flush=True)
                     estado = "espera"
                     pendente = None
+                    pendente_acao = None
                     fonte_ativa = None
                     sessao_ativa_id = None
+                    if pc_dispatcher:
+                        pc_dispatcher.pending_confirmation = None
     except KeyboardInterrupt:
         print("\nTeste encerrado.")
     finally:
