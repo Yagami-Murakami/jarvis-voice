@@ -67,8 +67,9 @@ def main() -> int:
         print(f"\n[ATENÇÃO] Solicitando bloqueio de tela para '{alvo}'...")
         ev_id = f"homolog-lock-{int(time.time()*1000)}"
         res = client.enviar_comando(alvo, "bloquear", ev_id, "sess-homolog-lock")
+        status_ok = res.get("status") == "concluido"
         print(f"Resultado: status={res.get('status')} | {res.get('mensagem_amigavel')}")
-        return 0 if res.get("sucesso") else 1
+        return 0 if status_ok else 1
 
     print(f"\n=======================================================")
     print(f" HOMOLOGAÇÃO FÍSICA SUPERVISIONADA — {alvo.upper()}")
@@ -86,7 +87,7 @@ def main() -> int:
         res = client.enviar_comando(alvo, acao, ev_id, f"sess-homolog-{alvo}", params=params)
         duracao = time.time() - t0
 
-        if res.get("sucesso"):
+        if res.get("status") == "concluido":
             sucessos += 1
             print(f"    -> [OK] ({duracao:.2f}s) {res.get('mensagem_amigavel')}")
         else:
