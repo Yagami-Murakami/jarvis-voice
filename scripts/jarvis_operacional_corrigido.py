@@ -1605,7 +1605,10 @@ def on_ipc_event(evento):
                 if "estado" not in resultado:
                     resultado["estado"] = estado
                 if "status" not in resultado:
-                    if resultado.get("estado") == "confirmacao" and resultado.get("acao") == "desligar_pendente":
+                    if resultado.get("estado") == "confirmacao" and (
+                        "pendente" in str(resultado.get("acao"))
+                        or resultado.get("acao") in ("desligar_pendente", "fechar_navegador_pendente", "reiniciar_pendente")
+                    ):
                         resultado["status"] = "confirmacao_pendente"
                     elif resultado.get("acao") == "cancelar":
                         resultado["status"] = "cancelado"
@@ -1642,7 +1645,7 @@ def on_ipc_event(evento):
                 "processado": False,
             }
         st_fallback = "aceito"
-        if tipo == "comando" and "desligar" in texto:
+        if tipo == "comando" and any(k in texto for k in ["desligar", "fechar", "reiniciar"]):
             st_fallback = "confirmacao_pendente"
         elif tipo == "cancelar":
             st_fallback = "cancelado"

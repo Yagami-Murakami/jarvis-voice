@@ -332,6 +332,10 @@ def normalizar_comando(texto: str) -> str:
     t = remover_acentos(texto)
     # Trata variações comuns
     t = " ".join(t.split())
+    # Normalização de grafia e números por extenso para consistência com Vosk
+    t = t.replace("ananuque", "ananuke")
+    t = t.replace("computador 1", "computador um")
+    t = t.replace("computador 2", "computador dois")
     return t
 
 
