@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Set, Tuple
 
-from pc_control.security import NonceCache, validar_requisicao
+from pc_control.config import get_allowed_client_ips
+from pc_control.security import NonceCache, is_strong_token, validar_requisicao
 
 logger = logging.getLogger("JarvisBaseAgent")
 
@@ -38,8 +40,28 @@ class PcAgentHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def _verificar_ip_autorizado(self) -> bool:
+        """Restringe a exposição validando o IP de origem contra a allowlist configurada."""
+        if self.server.allowed_ips:
+            client_ip = self.client_address[0]
+            if client_ip not in self.server.allowed_ips:
+                logger.warning(
+                    "Conexão rejeitada de IP não autorizado: %s (Alvo: %s)",
+                    client_ip,
+                    self.server.target_id,
+                )
+                self._responder_json(
+                    HTTPStatus.FORBIDDEN,
+                    {"erro": "ip_nao_autorizado", "status": "falha"},
+                )
+                return False
+        return True
+
     def do_GET(self) -> None:
         """Endpoint de saúde e telemetria."""
+        if not self._verificar_ip_autorizado():
+            return
+
         if self.path in ("/health", "/status"):
             uptime = time.time() - self.server.start_time
             self._responder_json(
@@ -59,10 +81,26 @@ class PcAgentHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         """Recebe e processa comandos autenticados."""
+        if not self._verificar_ip_autorizado():
+            return
+
         if self.path != "/execute":
             self._responder_json(
                 HTTPStatus.NOT_FOUND,
                 {"erro": "endpoint_nao_encontrado"},
+            )
+            return
+
+        # Validação fail-closed de credencial forte no próprio servidor
+        if not is_strong_token(self.server.auth_token):
+            logger.error("Agente [%s] rejeitou comando: token do servidor é fraco ou ausente.", self.server.target_id)
+            self._responder_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {
+                    "status": "falha",
+                    "erro": "configuracao_incompleta_credencial_servidor_invalida",
+                    "mensagem_amigavel": "Falha de segurança: agente com configuração incompleta.",
+                },
             )
             return
 
@@ -194,12 +232,27 @@ class PcAgentServer(ThreadingHTTPServer):
         target_id: str,
         auth_token: str,
         nonce_cache: Optional[NonceCache] = None,
+        allowed_ips: Optional[Set[str]] = None,
+        certfile: Optional[str] = None,
+        keyfile: Optional[str] = None,
     ) -> None:
         self.target_id = target_id.lower()
-        self.auth_token = auth_token
+        self.auth_token = auth_token or ""
         self.nonce_cache = nonce_cache or NonceCache()
+        self.allowed_ips = allowed_ips or get_allowed_client_ips()
+        self.certfile = certfile or os.getenv("JARVIS_PC_TLS_CERT")
+        self.keyfile = keyfile or os.getenv("JARVIS_PC_TLS_KEY")
         self.start_time = time.time()
         super().__init__((host, port), PcAgentHandler)
+
+        # Envoltório TLS 1.2+ estrito caso certificados tenham sido fornecidos
+        if self.certfile and self.keyfile and os.path.exists(self.certfile) and os.path.exists(self.keyfile):
+            import ssl
+            ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+            ssl_ctx.load_cert_chain(certfile=self.certfile, keyfile=self.keyfile)
+            ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+            self.socket = ssl_ctx.wrap_socket(self.socket, server_side=True)
+            logger.info("TLS 1.2+ ativo no agente local [%s]", self.target_id)
 
     def executar_acao(
         self,

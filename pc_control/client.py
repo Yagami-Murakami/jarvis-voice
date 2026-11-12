@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import secrets
 import time
 import urllib.error
@@ -16,7 +17,7 @@ from typing import Any, Dict, Optional
 
 from pc_control.catalog import get_friendly_action_name, get_friendly_target_name
 from pc_control.config import get_agent_timeout, get_agent_token, get_agent_url
-from pc_control.security import calcular_assinatura
+from pc_control.security import calcular_assinatura, is_strong_token
 
 logger = logging.getLogger("JarvisPcClient")
 
@@ -27,12 +28,24 @@ class PcControlClient:
     def __init__(
         self,
         token: Optional[str] = None,
+        tokens_por_alvo: Optional[Dict[str, str]] = None,
         timeout: Optional[float] = None,
         url_overrides: Optional[Dict[str, str]] = None,
+        ca_cert: Optional[str] = None,
     ) -> None:
-        self.token = token or get_agent_token()
+        self.token = token
+        self.tokens_por_alvo = {k.lower(): v for k, v in (tokens_por_alvo or {}).items()}
         self.timeout = timeout or get_agent_timeout()
         self.url_overrides = url_overrides or {}
+        self.ca_cert = ca_cert or os.getenv("JARVIS_PC_CA_CERT")
+
+    def _obter_token(self, alvo: str) -> str:
+        alvo_lower = alvo.lower()
+        if alvo_lower in self.tokens_por_alvo:
+            return self.tokens_por_alvo[alvo_lower]
+        if self.token:
+            return self.token
+        return get_agent_token(alvo_lower)
 
     def _obter_url(self, alvo: str) -> str:
         alvo_lower = alvo.lower()
@@ -53,6 +66,24 @@ class PcControlClient:
         alvo_normalizado = alvo.lower()
         nome_alvo = get_friendly_target_name(alvo_normalizado)
         nome_acao = get_friendly_action_name(acao)
+
+        # 1. Validação de credencial forte obrigatória (fail-closed)
+        token_efetivo = self._obter_token(alvo_normalizado)
+        if not token_efetivo or not is_strong_token(token_efetivo):
+            logger.warning("Falha de configuração de segurança: credencial forte ausente ou inválida para alvo %s", alvo_normalizado)
+            return {
+                "event_id": event_id,
+                "session_id": session_id,
+                "origem": fonte,
+                "computador_alvo": alvo_normalizado,
+                "acao": acao,
+                "estado": "falha",
+                "status": "falha",
+                "resultado": {},
+                "erro": "configuracao_incompleta_credencial_invalida_ou_ausente",
+                "mensagem_amigavel": f"Configuração de segurança incompleta para {nome_alvo}.",
+                "timestamp": time.time(),
+            }
 
         try:
             base_url = self._obter_url(alvo_normalizado)
@@ -87,7 +118,7 @@ class PcControlClient:
         body_bytes = json.dumps(payload_dict, ensure_ascii=False).encode("utf-8")
 
         assinatura = calcular_assinatura(
-            token=self.token,
+            token=token_efetivo,
             timestamp=agora,
             nonce=nonce,
             target=alvo_normalizado,
@@ -95,9 +126,9 @@ class PcControlClient:
             body_bytes=body_bytes,
         )
 
+        # Cabeçalhos estritos: JAMAIS transmitir o segredo em cabeçalhos HTTP
         headers = {
             "Content-Type": "application/json; charset=utf-8",
-            "X-Jarvis-Token": self.token,
             "X-Jarvis-Signature": assinatura,
             "X-Jarvis-Timestamp": f"{agora:.4f}",
             "X-Jarvis-Nonce": nonce,
@@ -106,8 +137,19 @@ class PcControlClient:
 
         req = urllib.request.Request(endpoint, data=body_bytes, headers=headers, method="POST")
 
+        # Contexto SSL para conexões HTTPS com verificação de certificados
+        ssl_ctx = None
+        if endpoint.lower().startswith("https://"):
+            import ssl
+            if os.getenv("JARVIS_PC_TLS_INSECURE_SKIP_VERIFY") == "1":
+                ssl_ctx = ssl._create_unverified_context()
+            elif self.ca_cert and os.path.exists(self.ca_cert):
+                ssl_ctx = ssl.create_default_context(cafile=self.ca_cert)
+            else:
+                ssl_ctx = ssl.create_default_context()
+
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(req, timeout=self.timeout, context=ssl_ctx) as resp:
                 status_http = resp.status
                 resp_bytes = resp.read()
                 dados_resp = json.loads(resp_bytes.decode("utf-8"))

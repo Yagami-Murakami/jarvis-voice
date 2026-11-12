@@ -23,6 +23,31 @@ logger = logging.getLogger("JarvisPCSecurity")
 
 MAX_TIMESTAMP_DRIFT_S = 5.0
 NONCE_EXPIRY_S = 60.0
+MIN_TOKEN_LENGTH = 16
+
+WEAK_DEFAULT_TOKENS = {
+    "jarvis-pc-control-secret-v1-dev",
+    "chave_compartilhada_secreta_aqui",
+    "chave-compartilhada-secreta-aqui",
+    "secret",
+    "password",
+    "12345678",
+    "1234567890",
+    "admin",
+    "token",
+}
+
+
+def is_strong_token(token: Optional[str]) -> bool:
+    """Verifica se o token atende aos critérios mínimos de segurança e entropia."""
+    if not token or not isinstance(token, str):
+        return False
+    tok = token.strip()
+    if len(tok) < MIN_TOKEN_LENGTH:
+        return False
+    if tok.lower() in WEAK_DEFAULT_TOKENS:
+        return False
+    return True
 
 
 def calcular_assinatura(
@@ -107,6 +132,10 @@ def validar_requisicao(
 ) -> Tuple[bool, str]:
     """Realiza a validação completa de segurança para uma requisição de comando."""
     cache = nonce_cache or _GLOBAL_NONCE_CACHE
+
+    # 0. Validação de credencial forte no agente (fail-closed)
+    if not is_strong_token(token_esperado):
+        return False, "configuracao_incompleta_credencial_invalida_ou_fraca"
 
     # 1. Validação estrita de computador-alvo
     if target_recebido not in ALLOWED_TARGETS:
