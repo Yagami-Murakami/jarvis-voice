@@ -207,6 +207,8 @@ class WindowsPcAgent(PcAgentServer):
         if self.mock_mode or not IS_WINDOWS:
             if params.get("simular_nenhum"):
                 return False, {"navegadores_fechados": [], "simulado": True}, "nenhum_navegador_encontrado", "Nenhum navegador aberto para fechar no Fusion."
+            if params.get("simular_nao_confirmado"):
+                return False, {"navegadores_fechados": [], "simulado": True}, "fechamento_nao_confirmado", "Nenhum navegador foi fechado ou confirmado no Fusion."
             return True, {"navegadores_fechados": ["msedge.exe (simulado)"], "simulado": True}, None, "Navegador fechado no Fusion."
 
         fechados: List[str] = []
@@ -230,19 +232,32 @@ class WindowsPcAgent(PcAgentServer):
         # 2. Fechamento gracioso: envia WM_CLOSE via taskkill SEM /F (nunca força término nem descarta trabalho não salvo)
         for exe in processos_ativos:
             try:
-                res = subprocess.run(["taskkill.exe", "/IM", exe], capture_output=True, text=True, timeout=5)
-                if res.returncode == 0:
-                    fechados.append(exe)
-                else:
-                    logger.debug("taskkill /IM %s retornou codigo %d: %s", exe, res.returncode, res.stdout or res.stderr)
+                subprocess.run(["taskkill.exe", "/IM", exe], capture_output=True, text=True, timeout=3)
             except Exception as e:
-                logger.debug("Erro ao fechar %s: %s", exe, e)
+                logger.debug("Erro ao solicitar fechamento gracioso de %s: %s", exe, e)
 
-        # 3. Confirmação do resultado: nunca reporta sucesso se nada foi fechado
+        # 3. Confirmação do resultado: aguarda até 1.5s e valida se os processos realmente encerraram
+        t_limite = time.time() + 1.5
+        while time.time() < t_limite:
+            time.sleep(0.3)
+            try:
+                cmd_check = ["tasklist.exe", "/FO", "CSV", "/NH"]
+                res_tl = subprocess.run(cmd_check, capture_output=True, text=True, timeout=3)
+                if res_tl.returncode == 0:
+                    saida_tl = res_tl.stdout.lower()
+                    ainda_vivos = [exe for exe in processos_ativos if f'"{exe.lower()}"' in saida_tl or exe.lower() in saida_tl]
+                    fechados = [exe for exe in processos_ativos if exe not in ainda_vivos]
+                    if fechados:
+                        break
+            except Exception:
+                pass
+
+        # Se nenhum processo foi confirmado como encerrado, não reporta falso positivo
         if not fechados:
             return False, {"navegadores_fechados": []}, "fechamento_nao_confirmado", "Nenhum navegador foi fechado ou confirmado no Fusion."
 
-        return True, {"navegadores_fechados": fechados, "simulado": False}, None, f"Navegador fechado no Fusion ({', '.join(fechados)})."
+        fechados_unicos = list(dict.fromkeys(fechados))
+        return True, {"navegadores_fechados": fechados_unicos, "simulado": False}, None, f"Navegador fechado no Fusion ({', '.join(fechados_unicos)})."
 
     # 10. Reiniciar computador (executado após confirmação explícita)
     def _acao_reiniciar(self, params: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], Optional[str], str]:

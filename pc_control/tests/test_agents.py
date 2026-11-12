@@ -103,6 +103,14 @@ class TestWindowsPcAgent(unittest.TestCase):
         self.assertEqual(res.get("navegadores_fechados"), [])
         self.assertIn("Nenhum navegador", msg)
 
+    def test_07_fechar_navegador_falha_se_nao_confirmado(self):
+        """Valida que fechar_navegador retorna sucesso=False quando fechamento não é confirmado."""
+        ok, res, erro, msg = self.agent.executar_acao("fechar_navegador", {"simular_nao_confirmado": True}, "ev-close-unconfirmed")
+        self.assertFalse(ok)
+        self.assertEqual(erro, "fechamento_nao_confirmado")
+        self.assertEqual(res.get("navegadores_fechados"), [])
+        self.assertIn("foi fechado ou confirmado", msg)
+
 
 class TestLinuxPcAgent(unittest.TestCase):
     """Testes unitários para o agente Linux (Ananuke - Debian 13 / Xfce)."""
@@ -188,6 +196,14 @@ class TestLinuxPcAgent(unittest.TestCase):
         self.assertEqual(erro, "nenhum_navegador_encontrado")
         self.assertEqual(res.get("processos_fechados"), [])
         self.assertIn("Nenhum navegador", msg)
+
+    def test_07_fechar_navegador_falha_se_nao_confirmado(self):
+        """Valida que fechar_navegador retorna sucesso=False quando fechamento não é confirmado no Linux."""
+        ok, res, erro, msg = self.agent.executar_acao("fechar_navegador", {"simular_nao_confirmado": True}, "ev-close-unconfirmed-lin")
+        self.assertFalse(ok)
+        self.assertEqual(erro, "fechamento_nao_confirmado")
+        self.assertEqual(res.get("processos_fechados"), [])
+        self.assertIn("foi fechado ou confirmado", msg)
 
 
 if __name__ == "__main__":

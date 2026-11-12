@@ -223,21 +223,36 @@ class LinuxPcAgent(PcAgentServer):
         if self.mock_mode:
             if params.get("simular_nenhum"):
                 return False, {"processos_fechados": [], "simulado": True}, "nenhum_navegador_encontrado", "Nenhum navegador aberto para fechar no Ananuke."
+            if params.get("simular_nao_confirmado"):
+                return False, {"processos_fechados": [], "simulado": True}, "fechamento_nao_confirmado", "Nenhum navegador foi fechado ou confirmado no Ananuke."
             return True, {"processos_fechados": ["firefox (simulado)"], "simulado": True}, None, "Navegador fechado no Ananuke."
 
         env = self._obter_env_sessao()
         fechados: List[str] = []
 
         # 1. Detectar janelas de navegadores via wmctrl ou processos ativos do usuário
-        janelas_encontradas: List[str] = []
+        janelas_encontradas: List[Tuple[str, str]] = []  # (win_id, canonical_name)
+        browser_patterns = [
+            ("Mozilla Firefox", "Firefox"),
+            ("Google Chrome", "Google Chrome"),
+            ("Chromium", "Chromium"),
+            ("Brave", "Brave"),
+            ("Firefox", "Firefox"),
+            ("Chrome", "Google Chrome"),
+        ]
         if shutil.which("wmctrl"):
             try:
                 res_list = subprocess.run(["wmctrl", "-l"], env=env, capture_output=True, text=True, timeout=2)
                 if res_list.returncode == 0:
                     for linha in res_list.stdout.splitlines():
-                        for b_name in ("Mozilla Firefox", "Firefox", "Chromium", "Google Chrome", "Chrome", "Brave"):
-                            if b_name.lower() in linha.lower():
-                                janelas_encontradas.append(b_name)
+                        tokens = linha.split(None, 3)
+                        if len(tokens) >= 4:
+                            win_id = tokens[0]
+                            title = tokens[3]
+                            for pattern, canonical in browser_patterns:
+                                if pattern.lower() in title.lower():
+                                    janelas_encontradas.append((win_id, canonical))
+                                    break
             except Exception as e:
                 logger.debug("Falha ao listar janelas com wmctrl: %s", e)
 
@@ -259,29 +274,59 @@ class LinuxPcAgent(PcAgentServer):
         # 2. Fechamento gracioso prioritário via wmctrl (envia _NET_CLOSE_WINDOW, permitindo salvar estado e abas)
         # NÃO invocar pkill em seguida para evitar encerramento indiscriminado de processos com trabalho não salvo!
         if shutil.which("wmctrl") and janelas_encontradas:
-            for titulo in set(janelas_encontradas):
+            for win_id, canonical in janelas_encontradas:
                 try:
-                    res_close = subprocess.run(["wmctrl", "-c", titulo], env=env, capture_output=True, timeout=3)
-                    if res_close.returncode == 0:
-                        fechados.append(titulo)
+                    subprocess.run(["wmctrl", "-i", "-c", win_id], env=env, capture_output=True, timeout=2)
                 except Exception as e:
-                    logger.debug("Falha ao solicitar fechamento gracioso via wmctrl (%s): %s", titulo, e)
+                    logger.debug("Falha ao solicitar fechamento gracioso via wmctrl (%s): %s", win_id, e)
+
+            # Confirmação pós-fechamento: aguarda até 1.5s verificando se as janelas realmente fecharam
+            t_limite = time.time() + 1.5
+            janelas_alvo_ids = {w[0] for w in janelas_encontradas}
+            while time.time() < t_limite:
+                time.sleep(0.3)
+                try:
+                    res_chk = subprocess.run(["wmctrl", "-l"], env=env, capture_output=True, text=True, timeout=2)
+                    if res_chk.returncode == 0:
+                        janelas_restantes = {l.split(None, 3)[0] for l in res_chk.stdout.splitlines() if len(l.split(None, 3)) >= 4}
+                        fechados_ids = janelas_alvo_ids - janelas_restantes
+                        if fechados_ids:
+                            fechados = [w[1] for w in janelas_encontradas if w[0] in fechados_ids]
+                            if len(fechados) == len(janelas_encontradas):
+                                break
+                except Exception:
+                    pass
 
         # 3. Fallback: somente se wmctrl NÃO estiver disponível na sessão, envia SIGTERM (-15, nunca -9)
         elif not shutil.which("wmctrl") and processos_ativos:
             for proc in processos_ativos:
                 try:
-                    res_term = subprocess.run(["pkill", "-15", "-u", uid_str, "-x", proc], capture_output=True, timeout=3)
-                    if res_term.returncode == 0:
-                        fechados.append(proc)
+                    subprocess.run(["pkill", "-15", "-u", uid_str, "-x", proc], capture_output=True, timeout=2)
                 except Exception:
                     pass
+
+            # Confirmação pós-fechamento: aguarda até 1.5s verificando se processos encerraram
+            t_limite = time.time() + 1.5
+            while time.time() < t_limite:
+                time.sleep(0.3)
+                ainda_ativos = []
+                for proc in processos_ativos:
+                    try:
+                        res_chk = subprocess.run(["pgrep", "-u", uid_str, "-x", proc], capture_output=True, text=True, timeout=2)
+                        if res_chk.returncode == 0 and res_chk.stdout.strip():
+                            ainda_ativos.append(proc)
+                    except Exception:
+                        pass
+                fechados = [p for p in processos_ativos if p not in ainda_ativos]
+                if fechados:
+                    break
 
         # 4. Validação de confirmação: nunca reporta sucesso se nada foi fechado
         if not fechados:
             return False, {"processos_fechados": []}, "fechamento_nao_confirmado", "Nenhum navegador foi fechado ou confirmado no Ananuke."
 
-        return True, {"processos_fechados": fechados, "simulado": False}, None, f"Navegador fechado no Ananuke ({', '.join(fechados)})."
+        fechados_unicos = list(dict.fromkeys(fechados))
+        return True, {"processos_fechados": fechados_unicos, "simulado": False}, None, f"Navegador fechado no Ananuke ({', '.join(fechados_unicos)})."
 
     # 10. Reiniciar computador (após confirmação explícita)
     def _acao_reiniciar(self, params: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], Optional[str], str]:
