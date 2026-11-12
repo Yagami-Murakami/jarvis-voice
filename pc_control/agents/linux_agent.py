@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -28,22 +29,34 @@ from pc_control.config import get_agent_token, is_mock_mode
 logger = logging.getLogger("JarvisLinuxAgent")
 
 # Processos comuns de navegadores no Debian para fechamento gracioso (SIGTERM / wmctrl)
+# Inclui versões completas e truncadas a 15 caracteres (limite de comm em /proc/<pid>/stat no kernel Linux)
 LINUX_BROWSER_PROCESSES = [
     "firefox-esr",
     "firefox-bin",
     "firefox",
     "chromium",
     "chromium-browser",
+    "chromium-browse",
     "chrome",
     "google-chrome",
     "google-chrome-stable",
+    "google-chrome-s",
     "brave",
     "brave-browser",
     "msedge",
     "microsoft-edge",
+    "microsoft-edge-stable",
+    "microsoft-edge-",
     "opera",
+    "opera-browser",
     "vivaldi-bin",
     "vivaldi",
+    "vivaldi-stable",
+    "epiphany",
+    "epiphany-browser",
+    "epiphany-browse",
+    "falkon",
+    "midori",
 ]
 
 
@@ -323,22 +336,43 @@ class LinuxPcAgent(PcAgentServer):
                         ("Brave", "Brave"),
                         ("Microsoft Edge", "Microsoft Edge"),
                         ("Edge", "Microsoft Edge"),
+                        ("Opera", "Opera"),
+                        ("Vivaldi", "Vivaldi"),
+                        ("Epiphany", "Epiphany"),
+                        ("GNOME Web", "Epiphany"),
+                        ("Falkon", "Falkon"),
+                        ("Midori", "Midori"),
                     ]
                     if candidato_binario:
                         patterns.append((candidato_binario.lower(), candidato_binario))
 
-                    stdout_lower = res_wm.stdout.lower()
-                    for pattern, name in patterns:
-                        if pattern.lower() in stdout_lower:
-                            return True, f"janela:{name}"
+                    for linha in res_wm.stdout.splitlines():
+                        tokens = linha.strip().split(None, 3)
+                        # wmctrl -l format: <win_id> <desktop_id> <client_machine> <window_title>
+                        if len(tokens) >= 4:
+                            title = tokens[3]
+                            title_lower = title.lower()
+                            for pattern, name in patterns:
+                                pat_lower = pattern.lower()
+                                if pat_lower in title_lower:
+                                    # Padrões curtos (<= 5 caracteres) exigem limite de palavra para prevenir falsos positivos
+                                    if len(pat_lower) <= 5:
+                                        if re.search(r"\b" + re.escape(pat_lower) + r"\b", title_lower):
+                                            return True, f"janela:{name}"
+                                    else:
+                                        return True, f"janela:{name}"
             except Exception as e:
                 logger.debug("Falha ao checar wmctrl -l: %s", e)
 
         # 2. Checagem de processos do usuário atual via pgrep se disponível
         if shutil.which("pgrep"):
             procs_to_check: List[str] = list(LINUX_BROWSER_PROCESSES)
-            if candidato_binario and candidato_binario not in procs_to_check:
-                procs_to_check.insert(0, candidato_binario)
+            if candidato_binario:
+                if candidato_binario not in procs_to_check:
+                    procs_to_check.insert(0, candidato_binario)
+                # Inclui também a versão truncada a 15 caracteres (limite de comm em /proc/<pid>/stat no kernel Linux)
+                if len(candidato_binario) > 15 and candidato_binario[:15] not in procs_to_check:
+                    procs_to_check.insert(1, candidato_binario[:15])
 
             uid_str = str(os.getuid())
             for proc_name in procs_to_check:
@@ -445,6 +479,13 @@ class LinuxPcAgent(PcAgentServer):
             bin_cand = (
                 clean_default[:-8] if clean_default and clean_default.endswith(".desktop") else clean_default
             )
+            # Normalização de nomes reverse-DNS freedesktop (ex: org.gnome.Epiphany -> epiphany)
+            if bin_cand and "." in bin_cand:
+                prefix_cand = bin_cand.split(".")[-1].lower()
+                if shutil.which(prefix_cand):
+                    bin_cand = prefix_cand
+                elif shutil.which(f"{prefix_cand}-browser"):
+                    bin_cand = f"{prefix_cand}-browser"
 
             if self.desktop_env == "xfce":
                 # No Xfce, prioriza exo-open

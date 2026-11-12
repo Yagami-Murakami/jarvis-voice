@@ -1236,6 +1236,121 @@ class TestLinuxPcAgent(unittest.TestCase):
         finally:
             self.agent.mock_mode = True
 
+    def test_36_browser_launch_wmctrl_hostname_not_confused_with_browser_window(self):
+        """Valida que o hostname do computador em wmctrl -l não é confundido com o título da janela.
+        Garante que falsos positivos não ocorram caso o hostname contenha 'edge', 'chrome', etc."""
+        self.agent.mock_mode = False
+        try:
+            self.agent.desktop_env = "gnome"
+            which_map = {
+                "gtk-launch": "/usr/bin/gtk-launch",
+                "xdg-settings": "/usr/bin/xdg-settings",
+                "wmctrl": "/usr/bin/wmctrl",
+                "firefox-esr": "/usr/bin/firefox-esr",
+            }
+
+            def fake_run(cmd, **kwargs):
+                if cmd[:2] == ["xdg-settings", "get"]:
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="firefox-esr.desktop\n")
+                if cmd[0] == "wmctrl":
+                    # Hostname contém 'edge-workstation', mas a janela é apenas um Terminal bash
+                    return subprocess.CompletedProcess(
+                        cmd, returncode=0, stdout="0x01200001  0 edge-workstation Terminal - bash\n"
+                    )
+                return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+
+            def fake_popen(cmd, **kwargs):
+                proc = MagicMock()
+                if cmd[0] == "gtk-launch":
+                    proc.returncode = 2
+                    proc.communicate.return_value = ("", "erro desktop inexistente")
+                elif cmd[0] == "firefox-esr":
+                    proc.returncode = 0
+                    proc.wait.return_value = 0
+                return proc
+
+            with patch("shutil.which", side_effect=lambda x: which_map.get(x)):
+                with patch("subprocess.run", side_effect=fake_run):
+                    with patch("subprocess.Popen", side_effect=fake_popen) as mock_popen:
+                        ok, res, erro, msg = self.agent.executar_acao("abrir_navegador", {}, "ev-wmctrl-host")
+                        self.assertTrue(ok)
+                        self.assertIsNone(erro)
+                        # Como o hostname 'edge-workstation' não foi confundido com um navegador ativo,
+                        # o fallback seguro foi devidamente autorizado e executado
+                        self.assertEqual(mock_popen.call_count, 2)
+                        self.assertEqual(res.get("comando"), ["firefox-esr"])
+        finally:
+            self.agent.mock_mode = True
+
+    def test_37_browser_launch_pgrep_truncated_comm_detected_safely(self):
+        """Valida detecção de processos com nomes truncados a 15 caracteres no kernel Linux (ex: google-chrome-s)."""
+        self.agent.mock_mode = False
+        try:
+            self.agent.desktop_env = "gnome"
+            which_map = {
+                "gtk-launch": "/usr/bin/gtk-launch",
+                "xdg-settings": "/usr/bin/xdg-settings",
+                "pgrep": "/usr/bin/pgrep",
+                "google-chrome": "/usr/bin/google-chrome",
+            }
+
+            def fake_run(cmd, **kwargs):
+                if cmd[:2] == ["xdg-settings", "get"]:
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="google-chrome.desktop\n")
+                # Simula pgrep encontrando o processo truncado a 15 caracteres 'google-chrome-s'
+                if cmd[0] == "pgrep" and any("google-chrome-s" in str(arg) for arg in cmd):
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="44332\n")
+                return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+
+            mock_proc = MagicMock()
+            mock_proc.returncode = 1
+            mock_proc.communicate.return_value = ("", "aviso launcher")
+
+            with patch("shutil.which", side_effect=lambda x: which_map.get(x)):
+                with patch("subprocess.run", side_effect=fake_run):
+                    with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+                        ok, res, erro, msg = self.agent.executar_acao("abrir_navegador", {}, "ev-pgrep-trunc")
+                        self.assertTrue(ok)
+                        self.assertIsNone(erro)
+                        self.assertEqual(res.get("comando"), ["gtk-launch", "google-chrome.desktop"])
+                        # Processo ativo detectado via comm truncado: fallback abortado
+                        self.assertEqual(mock_popen.call_count, 1)
+        finally:
+            self.agent.mock_mode = True
+
+    def test_38_browser_launch_epiphany_desktop_normalized_and_supported(self):
+        """Valida que org.gnome.Epiphany.desktop (GNOME Web) é normalizado para binário epiphany e suportado."""
+        self.agent.mock_mode = False
+        try:
+            self.agent.desktop_env = "gnome"
+            which_map = {
+                "gtk-launch": "/usr/bin/gtk-launch",
+                "xdg-settings": "/usr/bin/xdg-settings",
+                "pgrep": "/usr/bin/pgrep",
+                "epiphany": "/usr/bin/epiphany",
+            }
+
+            def fake_run(cmd, **kwargs):
+                if cmd[:2] == ["xdg-settings", "get"]:
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="org.gnome.Epiphany.desktop\n")
+                if cmd[0] == "pgrep" and any("epiphany" in str(arg) for arg in cmd):
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="6789\n")
+                return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+
+            mock_proc = MagicMock()
+            mock_proc.communicate.side_effect = subprocess.TimeoutExpired(cmd=["gtk-launch"], timeout=2.0)
+
+            with patch("shutil.which", side_effect=lambda x: which_map.get(x)):
+                with patch("subprocess.run", side_effect=fake_run):
+                    with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+                        ok, res, erro, msg = self.agent.executar_acao("abrir_navegador", {}, "ev-epiphany")
+                        self.assertTrue(ok)
+                        self.assertIsNone(erro)
+                        self.assertEqual(res.get("comando"), ["gtk-launch", "org.gnome.Epiphany.desktop"])
+                        self.assertEqual(mock_popen.call_count, 1)
+        finally:
+            self.agent.mock_mode = True
+
 
 class TestAgentStartupCommands(unittest.TestCase):
     """Valida a inicialização correta dos agentes via python -m e scripts diretos."""
