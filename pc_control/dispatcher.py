@@ -85,7 +85,7 @@ class PcControlDispatcher:
                 pend = self.pending_confirmation
                 agora = time.monotonic()
 
-                # Verificação de timeout da confirmação
+                # 2.1 Verificação de timeout da confirmação
                 if agora > pend.get("limite", 0.0):
                     self.pending_confirmation = None
                     return {
@@ -103,12 +103,12 @@ class PcControlDispatcher:
                         "processado": True,
                     }
 
-                # Verificação de sessão (rejeição de confirmações de outra sessão)
-                if session_id and pend.get("session_id") and session_id != pend["session_id"]:
+                # 2.2 Verificação estrita de session_id (sessão obrigatória e idêntica)
+                if not session_id or not pend.get("session_id") or session_id != pend["session_id"]:
                     logger.warning(
                         "Confirmação rejeitada por divergência de sessão: recebido %s, esperado %s",
                         session_id,
-                        pend["session_id"],
+                        pend.get("session_id"),
                     )
                     return {
                         "sucesso": False,
@@ -125,7 +125,29 @@ class PcControlDispatcher:
                         "processado": False,
                     }
 
-                # Cancelamento explícito
+                # 2.3 Verificação estrita de computador-alvo (se informado na confirmação)
+                if alvo and alvo.lower() != pend.get("alvo", "").lower():
+                    logger.warning(
+                        "Confirmação rejeitada por divergência de computador-alvo: recebido %s, esperado %s",
+                        alvo,
+                        pend.get("alvo"),
+                    )
+                    return {
+                        "sucesso": False,
+                        "event_id": event_id,
+                        "session_id": session_id,
+                        "origem": fonte,
+                        "computador_alvo": pend.get("alvo"),
+                        "acao": pend.get("acao"),
+                        "estado": "falha",
+                        "status": "falha",
+                        "erro": "computador_alvo_divergente",
+                        "resultado": {},
+                        "mensagem_amigavel": "Computador-alvo incompatível com a confirmação pendente.",
+                        "processado": False,
+                    }
+
+                # 2.4 Cancelamento explícito
                 if texto_falado == "cancelar":
                     self.pending_confirmation = None
                     nome_alvo = get_friendly_target_name(pend.get("alvo", ""))
@@ -143,7 +165,29 @@ class PcControlDispatcher:
                         "processado": True,
                     }
 
-                # Confirmação válida
+                # 2.5 Verificação estrita de ação na confirmação
+                if acao != "confirmar" and is_pc_control_action(acao) and acao != pend.get("acao"):
+                    logger.warning(
+                        "Confirmação rejeitada por divergência de ação: recebido %s, esperado %s",
+                        acao,
+                        pend.get("acao"),
+                    )
+                    return {
+                        "sucesso": False,
+                        "event_id": event_id,
+                        "session_id": session_id,
+                        "origem": fonte,
+                        "computador_alvo": pend.get("alvo"),
+                        "acao": pend.get("acao"),
+                        "estado": "falha",
+                        "status": "falha",
+                        "erro": "acao_divergente",
+                        "resultado": {},
+                        "mensagem_amigavel": "Ação incompatível com a confirmação pendente.",
+                        "processado": False,
+                    }
+
+                # 2.6 Confirmação válida para a ação pendente
                 if is_valid_confirmation(texto_falado, pend.get("acao")):
                     acao_confirmada = pend["acao"]
                     alvo_confirmado = pend["alvo"]
@@ -168,10 +212,62 @@ class PcControlDispatcher:
                     resp["sucesso"] = resp.get("status") == "concluido"
                     resp["processado"] = True
                     return resp
+                else:
+                    logger.warning("Confirmação incompatível para ação pendente '%s': '%s'", pend.get("acao"), texto_falado)
+                    return {
+                        "sucesso": False,
+                        "event_id": event_id,
+                        "session_id": session_id,
+                        "origem": fonte,
+                        "computador_alvo": pend.get("alvo"),
+                        "acao": pend.get("acao"),
+                        "estado": "falha",
+                        "status": "falha",
+                        "erro": "confirmacao_insuficiente",
+                        "resultado": {},
+                        "mensagem_amigavel": "Confirmação incompatível com a operação pendente.",
+                        "processado": False,
+                    }
+
+            # Se for tentativa de confirmação mas NÃO há confirmação pendente válida (rejeitar confirmação sem sessão)
+            if acao == "confirmar" or (texto_falado and is_valid_confirmation(texto_falado)):
+                logger.warning("Tentativa de confirmação sem sessão pendente válida: '%s'", texto_falado)
+                return {
+                    "sucesso": False,
+                    "event_id": event_id,
+                    "session_id": session_id,
+                    "origem": fonte,
+                    "computador_alvo": alvo,
+                    "acao": acao,
+                    "estado": "falha",
+                    "status": "falha",
+                    "erro": "nenhuma_confirmacao_pendente",
+                    "resultado": {},
+                    "mensagem_amigavel": "Nenhuma operação pendente para confirmação.",
+                    "processado": False,
+                }
 
             # 3. Tratamento de nova ação
             if requires_confirmation(acao):
-                # Armazena estado de confirmação pendente vinculado à sessão e alvo
+                # Rejeitar comandos que requerem confirmação sem session_id válido
+                if not session_id:
+                    logger.warning("Comando que requer confirmação rejeitado por ausência de session_id: %s em %s", acao, alvo)
+                    return {
+                        "sucesso": False,
+                        "event_id": event_id,
+                        "session_id": None,
+                        "origem": fonte,
+                        "computador_alvo": alvo,
+                        "acao": acao,
+                        "estado": "falha",
+                        "status": "falha",
+                        "erro": "sessao_obrigatoria_para_confirmacao",
+                        "resultado": {},
+                        "mensagem_amigavel": "Comando rejeitado: sessão de voz necessária para confirmação.",
+                        "processado": False,
+                    }
+
+                # Armazena estado de confirmação pendente vinculado estritamente à sessão, computador e ação
                 self.pending_confirmation = {
                     "acao": acao,
                     "alvo": alvo,

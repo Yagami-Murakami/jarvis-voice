@@ -707,6 +707,15 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                 pendente = alvo
                 pendente_acao = acao
                 limite = time.monotonic() + 20
+                if pc_dispatcher:
+                    pc_dispatcher.pending_confirmation = {
+                        "acao": acao,
+                        "alvo": alvo,
+                        "session_id": session_id or sessao_ativa_id,
+                        "event_id": event_id,
+                        "fonte": fonte,
+                        "limite": limite,
+                    }
                 if acao == "fechar_navegador":
                     msg_aviso = f'Confirme fechar navegador em {srv["nome"]}: diga "confirmar" ou "cancelar".'
                 else:
@@ -1046,6 +1055,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                     "processado": True,
                 }
 
+            salvo_sid = session_id or sessao_ativa_id
             alvo_confirmado = pendente
             acao_confirmada = pendente_acao
             estado = "espera"
@@ -1053,6 +1063,8 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
             pendente_acao = None
             fonte_ativa = None
             sessao_ativa_id = None
+            if pc_dispatcher:
+                pc_dispatcher.pending_confirmation = None
 
             registrar_acao(acao_confirmada, alvo_confirmado)
             if event_id:
@@ -1062,7 +1074,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                 alvo=alvo_confirmado,
                 acao=acao_confirmada,
                 event_id=event_id or f"ev-pc-{int(time.time()*1000)}",
-                session_id=session_id,
+                session_id=salvo_sid,
                 fonte=fonte,
             ) if pc_dispatcher else {"sucesso": False, "status": "falha", "erro": "dispatcher_indisponivel"}
 
