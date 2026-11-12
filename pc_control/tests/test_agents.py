@@ -264,6 +264,245 @@ class TestLinuxPcAgent(unittest.TestCase):
         finally:
             self.agent.mock_mode = True
 
+    def test_10_desktop_auto_detection(self):
+        """Valida detecção automática do desktop (GNOME e Xfce) via variáveis de ambiente, processos e overrides."""
+        # 1. Detecção GNOME via XDG_CURRENT_DESKTOP
+        with patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "GNOME", "DESKTOP_SESSION": "", "GDMSESSION": ""}, clear=True):
+            self.assertEqual(self.agent._detectar_ambiente_desktop(), "gnome")
+
+        # 2. Detecção GNOME via DESKTOP_SESSION (gnome-xorg)
+        with patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "", "DESKTOP_SESSION": "gnome-xorg", "GDMSESSION": ""}, clear=True):
+            self.assertEqual(self.agent._detectar_ambiente_desktop(), "gnome")
+
+        # 3. Detecção GNOME via processo ativo gnome-shell
+        with patch.dict(os.environ, {}, clear=True):
+            def fake_pgrep_gnome(cmd, *args, **kwargs):
+                if cmd[0] == "pgrep" and "gnome-shell" in cmd:
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="2690\n")
+                return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+
+            with patch("subprocess.run", side_effect=fake_pgrep_gnome):
+                self.assertEqual(self.agent._detectar_ambiente_desktop(), "gnome")
+
+        # 4. Detecção Xfce via XDG_CURRENT_DESKTOP
+        with patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "XFCE", "DESKTOP_SESSION": "", "GDMSESSION": ""}, clear=True):
+            self.assertEqual(self.agent._detectar_ambiente_desktop(), "xfce")
+
+        # 5. Detecção Xfce via processo ativo xfce4-session
+        with patch.dict(os.environ, {}, clear=True):
+            def fake_pgrep_xfce(cmd, *args, **kwargs):
+                if cmd[0] == "pgrep" and "xfce4-session" in cmd:
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="1122\n")
+                return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+
+            with patch("subprocess.run", side_effect=fake_pgrep_xfce):
+                self.assertEqual(self.agent._detectar_ambiente_desktop(), "xfce")
+
+        # 6. Override explícito via JARVIS_DESKTOP_ENV
+        with patch.dict(os.environ, {"JARVIS_DESKTOP_ENV": "xfce", "XDG_CURRENT_DESKTOP": "GNOME"}, clear=True):
+            self.assertEqual(self.agent._detectar_ambiente_desktop(), "xfce")
+
+        with patch.dict(os.environ, {"JARVIS_DESKTOP_ENV": "gnome", "XDG_CURRENT_DESKTOP": "XFCE"}, clear=True):
+            self.assertEqual(self.agent._detectar_ambiente_desktop(), "gnome")
+
+        # 7. Ambiente desconhecido quando nada é localizado
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("subprocess.run", return_value=subprocess.CompletedProcess([], returncode=1, stdout="")):
+                with patch("shutil.which", return_value=None):
+                    self.assertEqual(self.agent._detectar_ambiente_desktop(), "desconhecido")
+
+    def test_11_gnome_terminal_prioritized(self):
+        """Valida que no GNOME o terminal gnome-terminal é estritamente priorizado."""
+        # 1. Modo simulado
+        self.agent.desktop_env = "gnome"
+        ok, res, erro, msg = self.agent.executar_acao("abrir_terminal", {}, "ev-term-gnome-sim")
+        self.assertTrue(ok)
+        self.assertEqual(res.get("terminal"), "gnome-terminal")
+        self.assertEqual(res.get("desktop"), "gnome")
+
+        # 2. Modo real com gnome-terminal presente
+        self.agent.mock_mode = False
+        try:
+            with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x in ("gnome-terminal", "xfce4-terminal") else None):
+                with patch("subprocess.Popen") as mock_popen:
+                    ok_real, res_real, erro_real, msg_real = self.agent.executar_acao("abrir_terminal", {}, "ev-term-gnome-real")
+                    self.assertTrue(ok_real)
+                    self.assertEqual(res_real.get("terminal"), "gnome-terminal")
+                    mock_popen.assert_called_once()
+                    self.assertEqual(mock_popen.call_args[0][0], ["gnome-terminal"])
+
+            # 3. Modo real: fallback para x-terminal-emulator se gnome-terminal ausente
+            with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x == "x-terminal-emulator" else None):
+                with patch("subprocess.Popen") as mock_popen:
+                    ok_fb, res_fb, erro_fb, msg_fb = self.agent.executar_acao("abrir_terminal", {}, "ev-term-gnome-fb")
+                    self.assertTrue(ok_fb)
+                    self.assertEqual(res_fb.get("terminal"), "x-terminal-emulator")
+                    mock_popen.assert_called_once()
+                    self.assertEqual(mock_popen.call_args[0][0], ["x-terminal-emulator"])
+
+            # 4. Modo real: falha quando nenhum terminal é encontrado
+            with patch("shutil.which", return_value=None):
+                ok_none, res_none, erro_none, msg_none = self.agent.executar_acao("abrir_terminal", {}, "ev-term-gnome-none")
+                self.assertFalse(ok_none)
+                self.assertEqual(erro_none, "terminal_nao_encontrado")
+        finally:
+            self.agent.mock_mode = True
+
+    def test_12_xfce_terminal_prioritized(self):
+        """Valida que no Xfce o terminal xfce4-terminal é estritamente priorizado."""
+        # 1. Modo simulado
+        self.agent.desktop_env = "xfce"
+        ok, res, erro, msg = self.agent.executar_acao("abrir_terminal", {}, "ev-term-xfce-sim")
+        self.assertTrue(ok)
+        self.assertEqual(res.get("terminal"), "xfce4-terminal")
+        self.assertEqual(res.get("desktop"), "xfce")
+
+        # 2. Modo real com xfce4-terminal presente
+        self.agent.mock_mode = False
+        try:
+            with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x in ("xfce4-terminal", "gnome-terminal") else None):
+                with patch("subprocess.Popen") as mock_popen:
+                    ok_real, res_real, erro_real, msg_real = self.agent.executar_acao("abrir_terminal", {}, "ev-term-xfce-real")
+                    self.assertTrue(ok_real)
+                    self.assertEqual(res_real.get("terminal"), "xfce4-terminal")
+                    mock_popen.assert_called_once()
+                    self.assertEqual(mock_popen.call_args[0][0], ["xfce4-terminal"])
+        finally:
+            self.agent.mock_mode = True
+
+    def test_13_gnome_session_lock_mechanisms(self):
+        """Valida que no GNOME os mecanismos confiáveis de bloqueio (dbus-send, loginctl, etc.) são invocados."""
+        self.agent.desktop_env = "gnome"
+        self.agent.mock_mode = False
+        try:
+            # 1. Prioridade dbus-send (org.gnome.ScreenSaver)
+            with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x in ("dbus-send", "loginctl") else None):
+                with patch("subprocess.Popen") as mock_popen:
+                    ok, res, erro, msg = self.agent.executar_acao("bloquear", {}, "ev-lock-gnome-dbus")
+                    self.assertTrue(ok)
+                    mock_popen.assert_called_once()
+                    chamada_cmd = mock_popen.call_args[0][0]
+                    self.assertEqual(chamada_cmd[0], "dbus-send")
+                    self.assertIn("org.gnome.ScreenSaver", " ".join(chamada_cmd))
+
+            # 2. Fallback loginctl lock-session quando dbus-send ausente
+            with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x == "loginctl" else None):
+                with patch("subprocess.Popen") as mock_popen:
+                    ok_login, res_login, erro_login, msg_login = self.agent.executar_acao("bloquear", {}, "ev-lock-gnome-loginctl")
+                    self.assertTrue(ok_login)
+                    mock_popen.assert_called_once()
+                    self.assertEqual(mock_popen.call_args[0][0], ["loginctl", "lock-session"])
+
+            # 3. Fallback gnome-screensaver-command -l
+            with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x == "gnome-screensaver-command" else None):
+                with patch("subprocess.Popen") as mock_popen:
+                    ok_gsc, res_gsc, erro_gsc, msg_gsc = self.agent.executar_acao("bloquear", {}, "ev-lock-gnome-gsc")
+                    self.assertTrue(ok_gsc)
+                    mock_popen.assert_called_once()
+                    self.assertEqual(mock_popen.call_args[0][0], ["gnome-screensaver-command", "-l"])
+
+            # 4. Falha segura se nenhuma ferramenta de bloqueio existir
+            with patch("shutil.which", return_value=None):
+                ok_none, res_none, erro_none, msg_none = self.agent.executar_acao("bloquear", {}, "ev-lock-none")
+                self.assertFalse(ok_none)
+                self.assertEqual(erro_none, "bloqueador_nao_encontrado")
+        finally:
+            self.agent.mock_mode = True
+
+    def test_14_xfce_session_lock_mechanisms(self):
+        """Valida que no Xfce os mecanismos nativos de bloqueio (xflock4, xfce4-screensaver-command) são invocados."""
+        self.agent.desktop_env = "xfce"
+        self.agent.mock_mode = False
+        try:
+            # 1. Prioridade xflock4
+            with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x in ("xflock4", "loginctl") else None):
+                with patch("subprocess.Popen") as mock_popen:
+                    ok, res, erro, msg = self.agent.executar_acao("bloquear", {}, "ev-lock-xfce-xflock4")
+                    self.assertTrue(ok)
+                    mock_popen.assert_called_once()
+                    self.assertEqual(mock_popen.call_args[0][0], ["xflock4"])
+
+            # 2. Fallback xfce4-screensaver-command -l
+            with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x == "xfce4-screensaver-command" else None):
+                with patch("subprocess.Popen") as mock_popen:
+                    ok_xf, res_xf, erro_xf, msg_xf = self.agent.executar_acao("bloquear", {}, "ev-lock-xfce-screensaver")
+                    self.assertTrue(ok_xf)
+                    mock_popen.assert_called_once()
+                    self.assertEqual(mock_popen.call_args[0][0], ["xfce4-screensaver-command", "-l"])
+        finally:
+            self.agent.mock_mode = True
+
+    def test_15_mostrar_area_de_trabalho_gnome_x11(self):
+        """Valida execução de mostrar área de trabalho no GNOME Shell sobre X11 (wmctrl, xdotool e fallback libX11)."""
+        self.agent.desktop_env = "gnome"
+        self.agent.mock_mode = False
+        try:
+            # 1. Execução via wmctrl -k on
+            with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x == "wmctrl" else None):
+                with patch("subprocess.run") as mock_run:
+                    mock_run.return_value = subprocess.CompletedProcess(["wmctrl", "-k", "on"], returncode=0)
+                    ok, res, erro, msg = self.agent.executar_acao("mostrar_area_de_trabalho", {}, "ev-desk-wmctrl")
+                    self.assertTrue(ok)
+                    self.assertTrue(res.get("area_de_trabalho"))
+                    mock_run.assert_called_once()
+                    self.assertEqual(mock_run.call_args[0][0], ["wmctrl", "-k", "on"])
+
+            # 2. Fallback para xdotool quando wmctrl falha
+            with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x in ("wmctrl", "xdotool") else None):
+                def fake_run_fail_wmctrl(cmd, *args, **kwargs):
+                    if cmd[0] == "wmctrl":
+                        raise subprocess.SubprocessError("wmctrl failed")
+                    if cmd[0] == "xdotool":
+                        return subprocess.CompletedProcess(cmd, returncode=0)
+                    return subprocess.CompletedProcess(cmd, returncode=1)
+
+                with patch("subprocess.run", side_effect=fake_run_fail_wmctrl) as mock_run:
+                    ok_xd, res_xd, erro_xd, msg_xd = self.agent.executar_acao("mostrar_area_de_trabalho", {}, "ev-desk-xdotool")
+                    self.assertTrue(ok_xd)
+
+            # 3. Fallback nativo libX11 quando wmctrl e xdotool estão ausentes
+            with patch("shutil.which", return_value=None):
+                with patch.object(self.agent, "_mostrar_desktop_x11", return_value=True) as mock_x11:
+                    ok_x11, res_x11, erro_x11, msg_x11 = self.agent.executar_acao("mostrar_area_de_trabalho", {}, "ev-desk-x11")
+                    self.assertTrue(ok_x11)
+                    mock_x11.assert_called_once()
+        finally:
+            self.agent.mock_mode = True
+
+    def test_16_fechar_navegador_detects_and_closes_edge(self):
+        """Valida que janelas do Microsoft Edge no Linux são detectadas e fechadas graciosamente via wmctrl."""
+        self.agent.mock_mode = False
+        try:
+            with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x in ("wmctrl", "pgrep") else None):
+                wmctrl_output_edge = (
+                    "0x01c00003 -1 Ananuke Controle por voz Arduino - Pessoal — Microsoft Edge\n"
+                    "0x0520000a  0 Ananuke anakin@Ananuke: ~/jarvis-voice\n"
+                )
+
+                chamadas_run = []
+
+                def fake_run_edge(cmd, *args, **kwargs):
+                    chamadas_run.append(cmd)
+                    if cmd[0] == "wmctrl" and cmd[1] == "-l":
+                        # Na segunda chamada (confirmação pós-fechamento), janela já fechou
+                        if any(c[0] == "wmctrl" and c[1:3] == ["-i", "-c"] for c in chamadas_run):
+                            return subprocess.CompletedProcess(cmd, returncode=0, stdout="0x0520000a 0 Ananuke bash\n")
+                        return subprocess.CompletedProcess(cmd, returncode=0, stdout=wmctrl_output_edge)
+                    if cmd[0] == "wmctrl" and cmd[1:3] == ["-i", "-c"]:
+                        return subprocess.CompletedProcess(cmd, returncode=0, stdout="")
+                    if cmd[0] == "pgrep":
+                        return subprocess.CompletedProcess(cmd, returncode=0, stdout="9999\n")
+                    return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+
+                with patch("subprocess.run", side_effect=fake_run_edge):
+                    with patch("time.sleep", return_value=None):
+                        ok, res, erro, msg = self.agent.executar_acao("fechar_navegador", {}, "ev-close-edge")
+                        self.assertTrue(ok)
+                        self.assertEqual(res.get("processos_fechados"), ["Microsoft Edge"])
+                        self.assertIn("Microsoft Edge", msg)
+        finally:
+            self.agent.mock_mode = True
+
 
 class TestAgentStartupCommands(unittest.TestCase):
     """Valida a inicialização correta dos agentes via python -m e scripts diretos."""

@@ -13,7 +13,7 @@
 O **Jarvis PC Control V1** expande as capacidades do ecossistema de voz Jarvis, permitindo que comandos de controle operacional e multimídia sejam executados diretamente em duas estações de trabalho de bancada a partir dos microfones **Fifine ME6S** (microfone USB principal) e **LG-X230DSV** (microfone secundário sem fio via TCP):
 
 1. **Fusion (Windows 10/11 - IP `192.168.0.128`):** Computador principal para desenvolvimento e produtividade.
-2. **Ananuke (Debian 13 / Xfce - IP `192.168.0.131`):** Computador local para testes, bancada e instrumentação eletrônica.
+2. **Ananuke (Debian 13 — GNOME Shell e Xfce - IP `192.168.0.131`):** Computador local para testes, bancada e instrumentação eletrônica (com detecção automática entre GNOME Shell sobre X11 e Xfce).
 
 ### 1.1 Diagrama de Arquitetura
 
@@ -45,7 +45,7 @@ O **Jarvis PC Control V1** expande as capacidades do ecossistema de voz Jarvis, 
 +-----------------------+   +-----------------------+
 |  Fusion (Windows)     |   |  Ananuke (Debian 13)  |
 |  WindowsPcAgent       |   |  LinuxPcAgent         |
-|  (Sessão Interativa)  |   |  (Sessão Xfce Usuário)|
+|  (Sessão Interativa)  |   |  (Sessão Gráfica)     |
 +-----------------------+   +-----------------------+
 ```
 
@@ -61,7 +61,7 @@ O módulo foi projetado sob rigoroso padrão de segurança defensiva:
 4. **Janela Temporal Restrita (Timestamp Drift):** O timestamp da requisição não pode divergir mais do que 5,0 segundos do relógio local do agente.
 5. **Comunicação Segura TLS e Restrição de IP:** Os agentes suportam terminação TLS/HTTPS nativa (`--cert`/`--key` ou `JARVIS_PC_TLS_CERT`/`JARVIS_PC_TLS_KEY`) e validação de certificado de CA no cliente (`JARVIS_PC_CA_CERT`). Quando TLS está configurado, o agente exige certificados completos e válidos, falhando na inicialização caso estejam ausentes ou corrompidos, impedindo estritamente qualquer fallback silencioso para HTTP. Para o ambiente de produção, a comunicação opera em HTTPS com verificação estrita de certificados e sem bypass (proibido o uso de `JARVIS_PC_TLS_INSECURE_SKIP_VERIFY`). Adicionalmente, os agentes implementam filtragem de origem por IP (`--allowed-ips` ou `JARVIS_PC_ALLOWED_IPS`), rejeitando com 403 Forbidden qualquer chamada externa a IPs autorizados (ex: IP do controlador LXC 110 `192.168.0.126`).
 6. **Confirmação em Duas Etapas e Correspondência Estrita:** Comandos destrutivos ou de interrupção operacional (`fechar_navegador` e `reiniciar`, assim como o já existente `desligar`) exigem obrigatoriamente confirmação explícita de voz do operador. A confirmação exige estrita correspondência de `session_id`, ação e computador-alvo; confirmações sem sessão válida ou órfãs são rejeitadas.
-7. **Fechamento Gracioso de Navegadores:** O encerramento de navegadores no Windows e Linux é realizado de modo estritamente gracioso (`WM_CLOSE` no Windows via taskkill sem `/F`; `wmctrl -i -c` no Linux enviando `_NET_CLOSE_WINDOW`), preservando abas, sessões e trabalho do usuário sem perda de dados. No Linux, caso `wmctrl` não esteja disponível, o agente NÃO recorre a encerramento por sinal (`pkill`/`kill`) e retorna erro seguro fail-closed (`fechamento_gracioso_indisponivel`), garantindo integridade dos processos. Além disso, retorna falha segura caso nenhum navegador esteja em execução.
+7. **Fechamento Gracioso de Navegadores:** O encerramento de navegadores no Windows e Linux é realizado de modo estritamente gracioso (`WM_CLOSE` no Windows via taskkill sem `/F`; `wmctrl -i -c` no Linux enviando `_NET_CLOSE_WINDOW`), preservando abas, sessões e trabalho do usuário sem perda de dados. Suporta Firefox, Chrome, Chromium, Brave e Microsoft Edge. No Linux, caso `wmctrl` não esteja disponível, o agente NÃO recorre a encerramento por sinal (`pkill`/`kill`) e retorna erro seguro fail-closed (`fechamento_gracioso_indisponivel`), garantindo integridade dos processos. Além disso, retorna falha segura caso nenhum navegador esteja em execução.
 8. **Feature Flag Segura:** O recurso é governado pela variável de ambiente `JARVIS_PC_CONTROL_ENABLED`. O valor padrão é estritamente `0` (desativado). Em caso de ausência ou valor diferente de `1`, nenhum comando de PC Control é emitido.
 9. **Isolamento de Produção:** Nenhuma modificação foi ou será realizada no container de produção LXC 110 (192.168.0.126) sem autorização expressa e checklist prévio.
 
@@ -69,19 +69,19 @@ O módulo foi projetado sob rigoroso padrão de segurança defensiva:
 
 ## 3. Matriz dos 11 Comandos por Plataforma (22 Combinações)
 
-| # | Ação | Computador Fusion (Windows) | Computador Ananuke (Debian 13 / Xfce) | Requer Confirmação? |
-|---|------|-----------------------------|---------------------------------------|:-------------------:|
-| 1 | **Abrir navegador** | Lança navegador padrão via `os.startfile("about:blank")` ou `webbrowser.open` | Lança navegador via `exo-open --launch WebBrowser` ou `xdg-open` | Não |
-| 2 | **Abrir YouTube** | Abre URL fixa `https://www.youtube.com` no navegador padrão | Abre URL fixa `https://www.youtube.com` no navegador padrão | Não |
-| 3 | **Bloquear** | Bloqueia a estação com `user32.LockWorkStation()` | Bloqueia sessão com `xflock4` ou `xdg-screensaver lock` | Não |
+| # | Ação | Computador Fusion (Windows) | Computador Ananuke (Debian 13 — GNOME / Xfce) | Requer Confirmação? |
+|---|------|-----------------------------|-----------------------------------------------|:-------------------:|
+| 1 | **Abrir navegador** | Lança navegador padrão via `os.startfile("about:blank")` ou `webbrowser.open` | Lança navegador via `xdg-open` (GNOME) ou `exo-open` (Xfce) | Não |
+| 2 | **Abrir YouTube** | Abre URL fixa `https://www.youtube.com` no navegador padrão | Abre URL fixa `https://www.youtube.com` via `xdg-open` ou `exo-open` | Não |
+| 3 | **Bloquear** | Bloqueia a estação com `user32.LockWorkStation()` | Bloqueia sessão com `dbus-send` (GNOME), `xflock4` (Xfce) ou `loginctl` | Não |
 | 4 | **Aumentar volume** | Aumenta volume em +5% via `pycaw` (limitado rigidamente a 100%) | Aumenta volume em +5% via `wpctl`/`pactl`/`amixer` (teto 100%) | Não |
 | 5 | **Diminuir volume** | Reduz volume em -5% via `pycaw` (piso delimitado em 0%) | Reduz volume em -5% via `wpctl`/`pactl`/`amixer` (piso 0%) | Não |
 | 6 | **Silenciar áudio** | Muta o áudio (`mute = True`, estritamente idempotente, não inverte) | Muta o áudio (`mute 1`, estritamente idempotente, não inverte) | Não |
 | 7 | **Status computador** | Coleta % CPU, % RAM e uptime via WMI / Win32 APIs | Coleta % CPU, % RAM e uptime via `/proc/stat`, `/proc/meminfo`, `/proc/uptime` | Não |
-| 8 | **Abrir terminal** | Inicia `wt.exe` (Windows Terminal) ou `powershell.exe` na sessão gráfica | Inicia `xfce4-terminal` na sessão do usuário (`DISPLAY=:0`) | Não |
+| 8 | **Abrir terminal** | Inicia `wt.exe` (Windows Terminal) ou `powershell.exe` na sessão gráfica | Inicia `gnome-terminal` (GNOME) ou `xfce4-terminal` (Xfce) na sessão do usuário (`DISPLAY=:0`) | Não |
 | 9 | **Fechar navegador** | Envia sinal normal de fechamento (`WM_CLOSE`) aos navegadores ativos | Encerra graciosamente via `wmctrl -c` navegadores com janela ativa | **Sim (2 etapas)** |
 | 10 | **Reiniciar** | Executa reinicialização limpa via `shutdown.exe /r /t 5` | Executa reinicialização do sistema via `systemctl reboot` | **Sim (2 etapas)** |
-| 11 | **Mostrar área de trabalho** | Minimiza janelas via COM `Shell.Application.MinimizeAll()` | Alterna área de trabalho via `wmctrl -k on` ou atalho Xfce | Não |
+| 11 | **Mostrar área de trabalho** | Minimiza janelas via COM `Shell.Application.MinimizeAll()` | Alterna área de trabalho via `wmctrl -k on` (EWMH no GNOME X11 e Xfce), `xdotool` ou libX11 | Não |
 
 ---
 
@@ -126,9 +126,9 @@ O agente deve rodar no contexto da **sessão interativa** do usuário logado (pa
    - *Argumentos:* `-m pc_control.agents.windows_agent --port 8092 --allowed-ips 192.168.0.126,127.0.0.1`
    *(Nota: O agente também suporta execução direta como script através de resolução automática de `sys.path`).*
 
-### 5.2 No Linux (Ananuke - Debian 13 / Xfce - 192.168.0.131)
+### 5.2 No Linux (Ananuke - Debian 13 — GNOME Shell / Xfce - 192.168.0.131)
 
-O agente deve rodar como um serviço systemd no nível de usuário (`systemd --user`):
+O agente detecta automaticamente o ambiente de desktop ativo (GNOME Shell sobre X11 ou Xfce) e deve rodar na sessão do usuário (`systemd --user` ou inicialização de sessão gráfica):
 
 1. **Pré-requisitos:**
    ```bash

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Agente Local do Jarvis PC Control para Linux (Computador Ananuke - Debian 13 / Xfce - 192.168.0.131).
+"""Agente Local do Jarvis PC Control para Linux (Computador Ananuke - Debian 13 / GNOME e Xfce - 192.168.0.131).
 
-Projetado para rodar na sessão de usuário do Xfce (não executa como root para GUI).
-Verifica automaticamente se o backend de áudio é PipeWire (wpctl), PulseAudio (pactl) ou ALSA (amixer).
+Projetado para rodar na sessão de usuário gráfica (GNOME Shell sobre X11 ou Xfce, não executa como root).
+Detecta automaticamente o ambiente de desktop (priorizando ferramentas nativas: gnome-terminal e D-Bus ScreenSaver no GNOME;
+xfce4-terminal e xflock4 no Xfce) e o backend de áudio (PipeWire wpctl, PulseAudio pactl ou ALSA amixer).
 Permite apenas os 11 comandos autorizados na allowlist estrita.
 """
 from __future__ import annotations
@@ -26,12 +27,12 @@ from pc_control.config import get_agent_token, is_mock_mode
 
 logger = logging.getLogger("JarvisLinuxAgent")
 
-# Processos comuns de navegadores no Debian para fechamento normal (SIGTERM)
-LINUX_BROWSER_PROCESSES = ["firefox-bin", "firefox", "chromium", "chrome", "brave"]
+# Processos comuns de navegadores no Debian para fechamento gracioso (SIGTERM / wmctrl)
+LINUX_BROWSER_PROCESSES = ["firefox-bin", "firefox", "chromium", "chrome", "brave", "msedge"]
 
 
 class LinuxPcAgent(PcAgentServer):
-    """Agente de controle local para Debian 13 com Xfce (Ananuke)."""
+    """Agente de controle local para Debian 13 com detecção automática GNOME / Xfce (Ananuke)."""
 
     def __init__(
         self,
@@ -42,10 +43,12 @@ class LinuxPcAgent(PcAgentServer):
         allowed_ips: Optional[Set[str]] = None,
         certfile: Optional[str] = None,
         keyfile: Optional[str] = None,
+        desktop_env: Optional[str] = None,
     ) -> None:
         token = auth_token or get_agent_token("ananuke")
         self.mock_mode = mock_mode or is_mock_mode()
         self.audio_backend = self._detectar_backend_audio()
+        self.desktop_env = (desktop_env or self._detectar_ambiente_desktop()).lower()
         # Nível de volume simulado em testes (0.0 a 1.0)
         self._sim_volume = 0.50
         self._sim_muted = False
@@ -58,6 +61,60 @@ class LinuxPcAgent(PcAgentServer):
             certfile=certfile,
             keyfile=keyfile,
         )
+
+    def _detectar_ambiente_desktop(self) -> str:
+        """Detecta automaticamente se o ambiente gráfico é GNOME ou Xfce (ou desconhecido)."""
+        # 1. Variável de override explícita
+        env_override = os.getenv("JARVIS_DESKTOP_ENV", "").strip().lower()
+        if env_override in ("gnome", "xfce"):
+            return env_override
+
+        # 2. Variáveis de sessão do freedesktop / gerenciador de display
+        sess_vars = [
+            os.getenv("XDG_CURRENT_DESKTOP", ""),
+            os.getenv("DESKTOP_SESSION", ""),
+            os.getenv("GDMSESSION", ""),
+        ]
+        sess_str = " ".join(sess_vars).lower()
+        if "gnome" in sess_str:
+            return "gnome"
+        if "xfce" in sess_str:
+            return "xfce"
+
+        # 3. Processos ativos da sessão gráfica do usuário atual
+        uid_str = str(os.getuid())
+        try:
+            res_gnome = subprocess.run(
+                ["pgrep", "-u", uid_str, "-x", "gnome-shell"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if res_gnome.returncode == 0 and res_gnome.stdout.strip():
+                return "gnome"
+        except Exception:
+            pass
+
+        try:
+            for xfce_proc in ("xfce4-session", "xfwm4"):
+                res_xfce = subprocess.run(
+                    ["pgrep", "-u", uid_str, "-x", xfce_proc],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+                if res_xfce.returncode == 0 and res_xfce.stdout.strip():
+                    return "xfce"
+        except Exception:
+            pass
+
+        # 4. Binários instalados no sistema como heurística final
+        if shutil.which("gnome-shell") and not shutil.which("xfce4-session"):
+            return "gnome"
+        if shutil.which("xfce4-session") and not shutil.which("gnome-shell"):
+            return "xfce"
+
+        return "desconhecido"
 
     def _detectar_backend_audio(self) -> str:
         """Detecta o backend de áudio instalado no Debian 13."""
@@ -119,10 +176,14 @@ class LinuxPcAgent(PcAgentServer):
         if not self.mock_mode:
             env = self._obter_env_sessao()
             cmd = None
-            if shutil.which("exo-open"):
+            if self.desktop_env == "xfce" and shutil.which("exo-open"):
                 cmd = ["exo-open", "--launch", "WebBrowser", url]
             elif shutil.which("xdg-open"):
                 cmd = ["xdg-open", url]
+            elif shutil.which("gio"):
+                cmd = ["gio", "open", url]
+            elif shutil.which("exo-open"):
+                cmd = ["exo-open", "--launch", "WebBrowser", url]
             elif shutil.which("x-www-browser"):
                 cmd = ["x-www-browser", url]
 
@@ -141,7 +202,21 @@ class LinuxPcAgent(PcAgentServer):
         url = "https://www.youtube.com"
         if not self.mock_mode:
             env = self._obter_env_sessao()
-            cmd = ["xdg-open", url] if shutil.which("xdg-open") else ["exo-open", "--launch", "WebBrowser", url]
+            cmd = None
+            if self.desktop_env == "xfce" and shutil.which("exo-open"):
+                cmd = ["exo-open", "--launch", "WebBrowser", url]
+            elif shutil.which("xdg-open"):
+                cmd = ["xdg-open", url]
+            elif shutil.which("gio"):
+                cmd = ["gio", "open", url]
+            elif shutil.which("exo-open"):
+                cmd = ["exo-open", "--launch", "WebBrowser", url]
+            elif shutil.which("x-www-browser"):
+                cmd = ["x-www-browser", url]
+
+            if not cmd:
+                return False, {}, "navegador_nao_encontrado", "Nenhum navegador encontrado no sistema para abrir YouTube."
+
             try:
                 subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception as e:
@@ -149,19 +224,56 @@ class LinuxPcAgent(PcAgentServer):
 
         return True, {"url": url, "simulado": self.mock_mode}, None, "YouTube aberto no Ananuke."
 
-    # 3. Bloquear computador (sessão Xfce)
+    # 3. Bloquear computador (GNOME Shell / Xfce / loginctl)
     def _acao_bloquear(self, params: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], Optional[str], str]:
         if not self.mock_mode:
             env = self._obter_env_sessao()
-            cmd = None
-            if shutil.which("xflock4"):
-                cmd = ["xflock4"]
-            elif shutil.which("xfce4-screensaver-command"):
-                cmd = ["xfce4-screensaver-command", "-l"]
-            elif shutil.which("xdg-screensaver"):
-                cmd = ["xdg-screensaver", "lock"]
-            elif shutil.which("loginctl"):
-                cmd = ["loginctl", "lock-session"]
+            cmd: Optional[List[str]] = None
+
+            if self.desktop_env == "gnome":
+                # Mecanismos de bloqueio confiáveis para GNOME Shell
+                if shutil.which("dbus-send"):
+                    cmd = [
+                        "dbus-send",
+                        "--session",
+                        "--type=method_call",
+                        "--dest=org.gnome.ScreenSaver",
+                        "/org/gnome/ScreenSaver",
+                        "org.gnome.ScreenSaver.Lock",
+                    ]
+                elif shutil.which("loginctl"):
+                    cmd = ["loginctl", "lock-session"]
+                elif shutil.which("gnome-screensaver-command"):
+                    cmd = ["gnome-screensaver-command", "-l"]
+                elif shutil.which("xdg-screensaver"):
+                    cmd = ["xdg-screensaver", "lock"]
+            elif self.desktop_env == "xfce":
+                # Mecanismos de bloqueio para Xfce
+                if shutil.which("xflock4"):
+                    cmd = ["xflock4"]
+                elif shutil.which("xfce4-screensaver-command"):
+                    cmd = ["xfce4-screensaver-command", "-l"]
+                elif shutil.which("xdg-screensaver"):
+                    cmd = ["xdg-screensaver", "lock"]
+                elif shutil.which("loginctl"):
+                    cmd = ["loginctl", "lock-session"]
+            else:
+                # Fallback genérico para outros ambientes
+                if shutil.which("loginctl"):
+                    cmd = ["loginctl", "lock-session"]
+                elif shutil.which("dbus-send"):
+                    cmd = [
+                        "dbus-send",
+                        "--session",
+                        "--type=method_call",
+                        "--dest=org.gnome.ScreenSaver",
+                        "/org/gnome/ScreenSaver",
+                        "org.gnome.ScreenSaver.Lock",
+                    ]
+                elif shutil.which("xflock4"):
+                    cmd = ["xflock4"]
+                elif shutil.which("xdg-screensaver"):
+                    cmd = ["xdg-screensaver", "lock"]
 
             if not cmd:
                 return False, {}, "bloqueador_nao_encontrado", "Nenhuma ferramenta de bloqueio de sessão encontrada."
@@ -171,7 +283,12 @@ class LinuxPcAgent(PcAgentServer):
             except Exception as e:
                 return False, {}, f"erro_bloqueio: {e}", "Falha ao bloquear a sessão no Ananuke."
 
-        return True, {"bloqueado": True, "simulado": self.mock_mode}, None, "Computador Ananuke bloqueado com sucesso."
+        return (
+            True,
+            {"bloqueado": True, "desktop": self.desktop_env, "simulado": self.mock_mode},
+            None,
+            "Computador Ananuke bloqueado com sucesso.",
+        )
 
     # 4. Aumentar volume
     def _acao_aumentar_volume(self, params: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], Optional[str], str]:
@@ -209,18 +326,45 @@ class LinuxPcAgent(PcAgentServer):
             msg,
         )
 
-    # 8. Abrir terminal (xfce4-terminal)
+    # 8. Abrir terminal (gnome-terminal no GNOME, xfce4-terminal no Xfce)
     def _acao_abrir_terminal(self, params: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], Optional[str], str]:
-        terminal_cmd = "xfce4-terminal"
-        if not self.mock_mode:
-            env = self._obter_env_sessao()
-            cmd = ["xfce4-terminal"] if shutil.which("xfce4-terminal") else ["x-terminal-emulator"]
-            try:
-                subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception as e:
-                return False, {}, f"erro_terminal: {e}", "Falha ao abrir xfce4-terminal no Ananuke."
+        if self.desktop_env == "gnome":
+            candidatos = ["gnome-terminal", "x-terminal-emulator", "xfce4-terminal"]
+        elif self.desktop_env == "xfce":
+            candidatos = ["xfce4-terminal", "x-terminal-emulator", "gnome-terminal"]
+        else:
+            candidatos = ["gnome-terminal", "xfce4-terminal", "x-terminal-emulator"]
 
-        return True, {"terminal": terminal_cmd, "simulado": self.mock_mode}, None, "Terminal aberto no Ananuke."
+        if self.mock_mode:
+            terminal_cmd = candidatos[0]
+            return (
+                True,
+                {"terminal": terminal_cmd, "desktop": self.desktop_env, "simulado": True},
+                None,
+                "Terminal aberto no Ananuke.",
+            )
+
+        env = self._obter_env_sessao()
+        terminal_cmd = None
+        for cand in candidatos:
+            if shutil.which(cand):
+                terminal_cmd = cand
+                break
+
+        if not terminal_cmd:
+            return False, {}, "terminal_nao_encontrado", "Nenhum emulador de terminal encontrado no Ananuke."
+
+        try:
+            subprocess.Popen([terminal_cmd], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            return False, {}, f"erro_terminal: {e}", f"Falha ao abrir {terminal_cmd} no Ananuke."
+
+        return (
+            True,
+            {"terminal": terminal_cmd, "desktop": self.desktop_env, "simulado": False},
+            None,
+            "Terminal aberto no Ananuke.",
+        )
 
     # 9. Fechar navegador (após confirmação)
     def _acao_fechar_navegador(self, params: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], Optional[str], str]:
@@ -243,6 +387,8 @@ class LinuxPcAgent(PcAgentServer):
             ("Google Chrome", "Google Chrome"),
             ("Chromium", "Chromium"),
             ("Brave", "Brave"),
+            ("Microsoft Edge", "Microsoft Edge"),
+            ("Edge", "Microsoft Edge"),
             ("Firefox", "Firefox"),
             ("Chrome", "Google Chrome"),
         ]
@@ -399,13 +545,14 @@ class LinuxPcAgent(PcAgentServer):
             logger.debug("Falha no método EWMH libX11: %s", e)
             return False
 
-    # 11. Mostrar área de trabalho (Xfce / EWMH)
+    # 11. Mostrar área de trabalho (GNOME Shell / Xfce / EWMH sobre X11)
     def _acao_mostrar_area_de_trabalho(self, params: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], Optional[str], str]:
         if not self.mock_mode:
             env = self._obter_env_sessao()
             executou = False
 
-            # 1. wmctrl -k on ativa o modo "Mostrar Área de Trabalho" no Xfce
+            # 1. wmctrl -k on ativa o modo "Mostrar Área de Trabalho" via EWMH (_NET_SHOWING_DESKTOP)
+            # Suportado nativamente pelo Mutter (GNOME Shell sobre X11) e Xfwm4 (Xfce)
             if shutil.which("wmctrl"):
                 try:
                     subprocess.run(["wmctrl", "-k", "on"], env=env, check=True, timeout=3)
@@ -421,14 +568,19 @@ class LinuxPcAgent(PcAgentServer):
                 except Exception:
                     pass
 
-            # 3. Fallback nativo via EWMH libX11 (sem necessidade de pacotes externos)
+            # 3. Fallback nativo via EWMH libX11 (envio direto do ClientMessage _NET_SHOWING_DESKTOP)
             if not executou:
                 executou = self._mostrar_desktop_x11()
 
             if not executou:
                 return False, {}, "ferramenta_desktop_ausente", "Ferramenta para alternar desktop não encontrada."
 
-        return True, {"area_de_trabalho": True, "simulado": self.mock_mode}, None, "Área de trabalho exibida no Ananuke."
+        return (
+            True,
+            {"area_de_trabalho": True, "desktop": self.desktop_env, "simulado": self.mock_mode},
+            None,
+            "Área de trabalho exibida no Ananuke.",
+        )
 
     # Métodos auxiliares de áudio e telemetria Linux
     def _ajustar_volume(self, delta: float) -> Tuple[float, bool]:
@@ -550,7 +702,12 @@ def main() -> None:
     parser.add_argument("--allowed-ips", default=None, help="IPs autorizados separados por vírgula (ex: 192.168.0.126,127.0.0.1)")
     parser.add_argument("--cert", default=None, help="Caminho do certificado TLS (.crt)")
     parser.add_argument("--key", default=None, help="Caminho da chave privada TLS (.key)")
-    parser.add_argument("--mock", action="store_true", help="Forçar modo simulado de ações")
+    parser.add_argument(
+        "--desktop",
+        choices=["auto", "gnome", "xfce"],
+        default="auto",
+        help="Ambiente de desktop (padrão: auto-detecção entre GNOME e Xfce)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -558,6 +715,7 @@ def main() -> None:
         format="[%(asctime)s] [%(levelname)s] [LinuxAgent] %(message)s",
     )
     allowed_ips = {ip.strip() for ip in args.allowed_ips.split(",") if ip.strip()} if args.allowed_ips else None
+    desktop_env = None if args.desktop == "auto" else args.desktop
     server = LinuxPcAgent(
         host=args.host,
         port=args.port,
@@ -566,8 +724,17 @@ def main() -> None:
         allowed_ips=allowed_ips,
         certfile=args.cert,
         keyfile=args.key,
+        desktop_env=desktop_env,
     )
-    logger.info("Agente Linux (Ananuke) iniciado em %s:%d (Backend: %s, Mock: %s, TLS: %s)", args.host, args.port, server.audio_backend, server.mock_mode, bool(server.certfile))
+    logger.info(
+        "Agente Linux (Ananuke) iniciado em %s:%d (Desktop: %s, Backend: %s, Mock: %s, TLS: %s)",
+        args.host,
+        args.port,
+        server.desktop_env,
+        server.audio_backend,
+        server.mock_mode,
+        bool(server.certfile),
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:
