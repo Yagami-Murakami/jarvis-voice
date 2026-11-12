@@ -604,7 +604,7 @@ def _registrar_log_ack_gateway(
 
 
 class LgMicServer(threading.Thread):
-    """Servidor TCP de recepção de áudio bruto PCM do smartphone LG-X230DSV."""
+    """Servidor TCP de recepção de áudio bruto PCM do smartphone LG-X230DSV e dispositivos móveis Jarvis."""
 
     def __init__(
         self,
@@ -616,6 +616,7 @@ class LgMicServer(threading.Thread):
         tls_cert: Optional[str] = None,
         tls_key: Optional[str] = None,
         ipc_broadcaster: Optional[IpcEventBroadcaster] = None,
+        allowed_tokens: Optional[Dict[str, str]] = None,
     ):
         super().__init__(name="LgMicServer", daemon=True)
         self.host = host
@@ -631,6 +632,17 @@ class LgMicServer(threading.Thread):
         self.server_socket: Optional[socket.socket] = None
         self.ssl_context = None
 
+        # Tokens permitidos por dispositivo (token -> device_id)
+        self.allowed_tokens: Dict[str, str] = dict(allowed_tokens or {})
+        env_tokens = os.getenv("JARVIS_AUDIO_TOKENS")
+        if env_tokens:
+            try:
+                parsed = json.loads(env_tokens)
+                if isinstance(parsed, dict):
+                    self.allowed_tokens.update(parsed)
+            except Exception as e:
+                logger.warning("Falha ao analisar JARVIS_AUDIO_TOKENS: %s", e)
+
         if self.tls_cert and self.tls_key and Path(self.tls_cert).is_file() and Path(self.tls_key).is_file():
             import ssl
             self.ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -639,7 +651,11 @@ class LgMicServer(threading.Thread):
                 self.ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
             logger.info("TLS 1.2+ ativado no Gateway com certificado: %s", self.tls_cert)
 
-        # Métricas do microfone LG
+        # Gestão multi-cliente thread-safe
+        self._clients_lock = threading.Lock()
+        self.active_clients: Dict[str, Dict[str, Any]] = {}
+
+        # Métricas legadas para retrocompatibilidade
         self.connected = False
         self.client_ip: Optional[str] = None
         self.last_packet_time: float = 0.0
@@ -649,7 +665,7 @@ class LgMicServer(threading.Thread):
         self.echo_guard_active: bool = False
         self.last_transcript: str = ""
 
-        # Instância Vosk se disponível
+        # Instância Vosk compartilhada se disponível
         self.vosk_model = None
         self.vosk_rec = None
         self._inicializar_vosk()
@@ -673,33 +689,40 @@ class LgMicServer(threading.Thread):
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server_socket.bind((self.host, self.port))
-        self.server_socket.listen(2)
-        logger.info("Servidor TCP LG Mic ouvindo em %s:%d (TLS=%s)", self.host, self.port, bool(self.ssl_context))
+        self.server_socket.listen(10)
+        logger.info("Servidor TCP Multi-Mic ouvindo em %s:%d (TLS=%s)", self.host, self.port, bool(self.ssl_context))
 
         while self._running:
             try:
                 client_sock, client_addr = self.server_socket.accept()
-                logger.info("Cliente LG conectado de %s:%d", client_addr[0], client_addr[1])
-                self._atender_cliente(client_sock, client_addr[0])
+                logger.info("Cliente conectado de %s:%d", client_addr[0], client_addr[1])
+                t = threading.Thread(
+                    target=self._atender_cliente,
+                    args=(client_sock, client_addr[0], client_addr[1]),
+                    name=f"AudioClient-{client_addr[0]}:{client_addr[1]}",
+                    daemon=True,
+                )
+                t.start()
             except Exception as e:
                 if self._running:
                     logger.warning("Exceção no loop accept: %s", e)
 
-    def _atender_cliente(self, sock: socket.socket, ip: str) -> None:
+    def _atender_cliente(self, sock: socket.socket, ip: str, port: int) -> None:
         sock.settimeout(12.0)
         if self.ssl_context:
             try:
                 sock = self.ssl_context.wrap_socket(sock, server_side=True)
             except Exception as e:
-                logger.warning("Falha no handshake TLS com cliente %s: %s", ip, e)
+                logger.warning("Falha no handshake TLS com cliente %s:%d: %s", ip, port, e)
                 try:
                     sock.close()
                 except Exception:
                     pass
                 return
 
-        self.connected = True
-        self.client_ip = ip
+        client_key = f"{ip}:{port}"
+        device_id = "lg_mic"
+        client_vosk_rec = None
 
         try:
             # 1. Validação de Handshake
@@ -710,33 +733,124 @@ class LgMicServer(threading.Thread):
                 return
 
             versao = struct.unpack(">B", self._ler_exato(sock, 1))[0]
-            token_len = struct.unpack(">H", self._ler_exato(sock, 2))[0]
-            if token_len < 32 or token_len > 256:
-                logger.warning("Handshake rejeitado: comprimento de token inválido para %s", ip)
-                return
-            token_bytes = self._ler_exato(sock, token_len)
-            # Comparação de bytes em tempo constante; rejeita tokens inválidos.
-            if not hmac.compare_digest(token_bytes, self.auth_token.encode("utf-8")):
-                logger.warning("Autenticação rejeitada para cliente %s: token incorreto", ip)
+            if versao == 1:
+                # Versão 1: Legado (LG-X230DSV e clientes compatíveis)
+                token_len = struct.unpack(">H", self._ler_exato(sock, 2))[0]
+                if token_len < 32 or token_len > 256:
+                    logger.warning("Handshake rejeitado: comprimento de token inválido para %s", ip)
+                    sock.close()
+                    return
+                token_bytes = self._ler_exato(sock, token_len)
+                token_str = token_bytes.decode("utf-8", errors="replace")
+
+                autenticado = False
+                # Permite formato "device_id:token" ou token puro
+                if ":" in token_str:
+                    dev_part, tok_part = token_str.split(":", 1)
+                    if tok_part in self.allowed_tokens:
+                        device_id = self.allowed_tokens[tok_part] or dev_part
+                        autenticado = True
+                    elif self.auth_token and hmac.compare_digest(tok_part.encode("utf-8"), self.auth_token.encode("utf-8")):
+                        device_id = dev_part
+                        autenticado = True
+                elif token_str in self.allowed_tokens:
+                    device_id = self.allowed_tokens[token_str]
+                    autenticado = True
+                elif self.auth_token and hmac.compare_digest(token_bytes, self.auth_token.encode("utf-8")):
+                    device_id = "lg_mic"
+                    autenticado = True
+
+                if not autenticado:
+                    logger.warning("Autenticação rejeitada para cliente %s: token incorreto", ip)
+                    sock.close()
+                    return
+
+                sample_rate = struct.unpack(">I", self._ler_exato(sock, 4))[0]
+                channels = struct.unpack(">B", self._ler_exato(sock, 1))[0]
+                bit_depth = struct.unpack(">B", self._ler_exato(sock, 1))[0]
+
+            elif versao == 2:
+                # Versão 2: Suporte explícito a múltiplos terminais móveis (device_id + token)
+                dev_len = struct.unpack(">B", self._ler_exato(sock, 1))[0]
+                if dev_len < 1 or dev_len > 64:
+                    logger.warning("Handshake rejeitado: tamanho de device_id inválido (%d) de %s", dev_len, ip)
+                    sock.close()
+                    return
+                device_id = self._ler_exato(sock, dev_len).decode("utf-8", errors="replace").strip()
+
+                token_len = struct.unpack(">H", self._ler_exato(sock, 2))[0]
+                if token_len < 32 or token_len > 256:
+                    logger.warning("Handshake rejeitado: comprimento de token inválido para %s", ip)
+                    sock.close()
+                    return
+                token_bytes = self._ler_exato(sock, token_len)
+                token_str = token_bytes.decode("utf-8", errors="replace")
+
+                autenticado = False
+                if token_str in self.allowed_tokens:
+                    autenticado = True
+                    # Se o token estiver associado a um device_id específico, valida
+                    esperado = self.allowed_tokens[token_str]
+                    if esperado and esperado != device_id:
+                        logger.warning("Dispositivo %s tentou usar token reservado para %s", device_id, esperado)
+                        autenticado = False
+                elif self.auth_token and hmac.compare_digest(token_bytes, self.auth_token.encode("utf-8")):
+                    autenticado = True
+
+                if not autenticado:
+                    logger.warning("Autenticação rejeitada para cliente %s (%s): token incorreto", ip, device_id)
+                    sock.close()
+                    return
+
+                sample_rate = struct.unpack(">I", self._ler_exato(sock, 4))[0]
+                channels = struct.unpack(">B", self._ler_exato(sock, 1))[0]
+                bit_depth = struct.unpack(">B", self._ler_exato(sock, 1))[0]
+
+            else:
+                logger.warning("Versão de handshake não suportada (%d) de %s", versao, ip)
                 sock.close()
                 return
 
-            sample_rate = struct.unpack(">I", self._ler_exato(sock, 4))[0]
-            channels = struct.unpack(">B", self._ler_exato(sock, 1))[0]
-            bit_depth = struct.unpack(">B", self._ler_exato(sock, 1))[0]
-
-            if versao != 1 or sample_rate != 16000 or channels != 1 or bit_depth != 16:
-                logger.warning("Formato de áudio não suportado pelo cliente %s", ip)
+            if sample_rate != 16000 or channels != 1 or bit_depth != 16:
+                logger.warning("Formato de áudio não suportado pelo cliente %s (%s)", ip, device_id)
+                sock.close()
                 return
 
             logger.info(
-                "Handshake autenticado de %s: v%d, %d Hz, %d ch, %d bits",
+                "Handshake autenticado de %s (%s): v%d, %d Hz, %d ch, %d bits",
                 ip,
+                device_id,
                 versao,
                 sample_rate,
                 channels,
                 bit_depth,
             )
+
+            # Instância Vosk dedicada por cliente conectado
+            client_vosk_rec = None
+            if self.vosk_model is not None:
+                try:
+                    from vosk import KaldiRecognizer
+                    client_vosk_rec = KaldiRecognizer(self.vosk_model, 16000, json.dumps(GRAMATICA, ensure_ascii=False))
+                except Exception as e:
+                    logger.warning("Falha ao instanciar VoskRecognizer para %s: %s", device_id, e)
+
+            client_info = {
+                "device_id": device_id,
+                "ip": ip,
+                "port": port,
+                "connected_at": time.time(),
+                "last_packet_time": time.time(),
+                "packets_received": 0,
+                "packets_dropped": 0,
+                "current_rms": 0.0,
+                "echo_guard": False,
+            }
+
+            with self._clients_lock:
+                self.active_clients[client_key] = client_info
+                self.connected = True
+                self.client_ip = ip
 
             # 2. Loop de recepção de frames
             last_seq = -1
@@ -745,7 +859,7 @@ class LgMicServer(threading.Thread):
                 if not data_magic:
                     break
                 if data_magic != MAGIC_DATA:
-                    logger.warning("Frame corrompido ou fora de alinhamento: %s", data_magic)
+                    logger.warning("Frame corrompido ou fora de alinhamento de %s: %s", device_id, data_magic)
                     break
 
                 seq = struct.unpack(">I", self._ler_exato(sock, 4))[0]
@@ -753,66 +867,80 @@ class LgMicServer(threading.Thread):
                 flags = struct.unpack(">B", self._ler_exato(sock, 1))[0]
                 payload_len = struct.unpack(">H", self._ler_exato(sock, 2))[0]
                 if payload_len != 1280:
-                    logger.warning("Frame com tamanho inesperado recebido de %s", ip)
+                    logger.warning("Frame com tamanho inesperado recebido de %s (%s)", ip, device_id)
                     break
 
                 payload = self._ler_exato(sock, payload_len)
                 if len(payload) < payload_len:
                     break
 
-                # Diagnóstico de pacotes
+                # Diagnóstico de pacotes por cliente
                 if last_seq >= 0 and seq != last_seq + 1:
                     delta_loss = seq - (last_seq + 1)
                     if delta_loss > 0:
+                        client_info["packets_dropped"] += delta_loss
                         self.packets_dropped += delta_loss
                 last_seq = seq
+                client_info["packets_received"] += 1
                 self.packets_received += 1
-                self.last_packet_time = time.time()
+                now = time.time()
+                client_info["last_packet_time"] = now
+                self.last_packet_time = now
 
                 echo_guard = (flags & 0x01) != 0
+                client_info["echo_guard"] = echo_guard
                 self.echo_guard_active = echo_guard
 
                 # Cálculo de RMS para métricas
-                self.current_rms = self._calcular_rms(payload)
+                rms = self._calcular_rms(payload)
+                client_info["current_rms"] = rms
+                self.current_rms = rms
 
-                # Processa áudio no Vosk somente se Echo Guard NÃO estiver ativo
-                if not echo_guard and self.vosk_rec is not None:
-                    if self.vosk_rec.AcceptWaveform(payload):
-                        res = json.loads(self.vosk_rec.Result())
+                # Processa áudio no Vosk dedicado do cliente se Echo Guard NÃO estiver ativo
+                rec_to_use = client_vosk_rec or self.vosk_rec
+                if not echo_guard and rec_to_use is not None:
+                    if rec_to_use.AcceptWaveform(payload):
+                        res = json.loads(rec_to_use.Result())
                         texto = res.get("text", "").strip()
                         if texto:
-                            self._processar_texto_reconhecido(texto)
+                            self._processar_texto_reconhecido(texto, source=device_id)
 
         except (socket.timeout, socket.error, EOFError) as e:
-            logger.info("Cliente LG desconectado (%s): %s", ip, e)
+            logger.info("Cliente %s (%s) desconectado: %s", ip, device_id, e)
         finally:
-            if not self.echo_guard_active and self.vosk_rec is not None:
+            rec_to_use = client_vosk_rec or self.vosk_rec
+            if rec_to_use is not None:
                 try:
-                    res = json.loads(self.vosk_rec.FinalResult())
+                    res = json.loads(rec_to_use.FinalResult())
                     texto = res.get("text", "").strip()
                     if texto:
-                        self._processar_texto_reconhecido(texto)
+                        self._processar_texto_reconhecido(texto, source=device_id)
                 except Exception:
                     pass
-            self.connected = False
-            self.client_ip = None
+
+            with self._clients_lock:
+                self.active_clients.pop(client_key, None)
+                if not self.active_clients:
+                    self.connected = False
+                    self.client_ip = None
+
             try:
                 sock.close()
             except Exception:
                 pass
 
-    def _processar_texto_reconhecido(self, texto: str) -> None:
-        logger.info("[Vosk-LG] Transcrição detectada: '%s'", texto)
+    def _processar_texto_reconhecido(self, texto: str, source: str = "lg_mic") -> None:
+        logger.info("[Vosk-%s] Transcrição detectada: '%s'", source, texto)
         self.last_transcript = texto
 
         if "assistente" in texto:
-            is_new, sid = self.arbitrator.report_wake("lg_mic")
+            is_new, sid = self.arbitrator.report_wake(source)
             if not is_new:
-                logger.info("[Vosk-LG] Palavra 'assistente' deduplicada na sessão %s", sid)
+                logger.info("[Vosk-%s] Palavra 'assistente' deduplicada na sessão %s", source, sid)
             # Emite wake ao barramento IPC e reconcilia session_id com a resposta oficial do controlador
             if self.ipc_broadcaster:
                 ack = self.ipc_broadcaster.emit_event(
-                    source="lg_mic",
+                    source=source,
                     event_type="wake",
                     text="assistente",
                     session_id=sid,
@@ -821,7 +949,8 @@ class LgMicServer(threading.Thread):
                     official_sid = ack["active_session_id"]
                     if official_sid != self.arbitrator.session_id:
                         logger.info(
-                            "[Vosk-LG] Sincronizando session_id com autoridade central: %s -> %s",
+                            "[Vosk-%s] Sincronizando session_id com autoridade central: %s -> %s",
+                            source,
                             self.arbitrator.session_id,
                             official_sid,
                         )
@@ -829,10 +958,10 @@ class LgMicServer(threading.Thread):
             return
 
         if texto == "cancelar":
-            res = self.arbitrator.report_cancellation("lg_mic")
+            res = self.arbitrator.report_cancellation(source)
             if self.ipc_broadcaster:
                 ack = self.ipc_broadcaster.emit_event(
-                    source="lg_mic",
+                    source=source,
                     event_type="cancelar",
                     text="cancelar",
                     session_id=res.get("session_id"),
@@ -840,19 +969,19 @@ class LgMicServer(threading.Thread):
                 _registrar_log_ack_gateway(
                     tipo_acao="cancelar",
                     alvo=res.get("alvo"),
-                    fonte="lg_mic",
+                    fonte=source,
                     session_id=res.get("session_id"),
                     ack=ack,
                 )
             return
 
         if self.arbitrator.state == "comando":
-            res = self.arbitrator.report_command("lg_mic", texto)
-            logger.info("[Vosk-LG] Resultado do comando: %s", res)
+            res = self.arbitrator.report_command(source, texto)
+            logger.info("[Vosk-%s] Resultado do comando: %s", source, res)
             if self.ipc_broadcaster:
                 if res.get("valido"):
                     ack = self.ipc_broadcaster.emit_event(
-                        source="lg_mic",
+                        source=source,
                         event_type="comando",
                         text=texto,
                         session_id=res.get("session_id"),
@@ -863,13 +992,13 @@ class LgMicServer(threading.Thread):
                     _registrar_log_ack_gateway(
                         tipo_acao=res.get("acao", "comando"),
                         alvo=res.get("alvo"),
-                        fonte="lg_mic",
+                        fonte=source,
                         session_id=res.get("session_id"),
                         ack=ack,
                     )
                 elif res.get("deduplicado") and res.get("session_id"):
                     ack = self.ipc_broadcaster.emit_event(
-                        source="lg_mic",
+                        source=source,
                         event_type="comando",
                         text=texto,
                         session_id=res.get("session_id"),
@@ -879,11 +1008,11 @@ class LgMicServer(threading.Thread):
                         self.arbitrator.sync_session_id(ack["active_session_id"])
         elif self.arbitrator.state == "confirmacao":
             if "cancelar" in texto:
-                res = self.arbitrator.report_cancellation("lg_mic")
-                logger.info("[Vosk-LG] Cancelamento solicitado: %s", res)
+                res = self.arbitrator.report_cancellation(source)
+                logger.info("[Vosk-%s] Cancelamento solicitado: %s", source, res)
                 if self.ipc_broadcaster:
                     ack = self.ipc_broadcaster.emit_event(
-                        source="lg_mic",
+                        source=source,
                         event_type="cancelar",
                         text="cancelar",
                         session_id=res.get("session_id"),
@@ -891,20 +1020,20 @@ class LgMicServer(threading.Thread):
                     _registrar_log_ack_gateway(
                         tipo_acao="cancelar",
                         alvo=res.get("alvo"),
-                        fonte="lg_mic",
+                        fonte=source,
                         session_id=res.get("session_id"),
                         ack=ack,
                     )
                 return
             elif "confirmar" in texto:
-                res = self.arbitrator.report_confirmation("lg_mic")
-                logger.info("[Vosk-LG] Resultado da confirmação: %s", res)
+                res = self.arbitrator.report_confirmation(source)
+                logger.info("[Vosk-%s] Resultado da confirmação: %s", source, res)
                 if res.get("valido") and self.ipc_broadcaster:
                     if res.get("deduplicado"):
-                        logger.info("[Vosk-LG] Confirmação deduplicada localmente, nenhum evento IPC emitido.")
+                        logger.info("[Vosk-%s] Confirmação deduplicada localmente, nenhum evento IPC emitido.", source)
                         return
                     ack = self.ipc_broadcaster.emit_event(
-                        source="lg_mic",
+                        source=source,
                         event_type="confirmar",
                         text=texto,
                         session_id=res.get("session_id"),
@@ -915,7 +1044,7 @@ class LgMicServer(threading.Thread):
                     _registrar_log_ack_gateway(
                         tipo_acao="confirmar",
                         alvo=res.get("alvo"),
-                        fonte="lg_mic",
+                        fonte=source,
                         session_id=res.get("session_id"),
                         ack=ack,
                     )
@@ -951,18 +1080,37 @@ class LgMicServer(threading.Thread):
 
     def obter_status(self) -> Dict[str, Any]:
         now = time.time()
-        is_active = self.connected and (now - self.last_packet_time < 3.0)
-        return {
-            "connected": is_active,
-            "tls_active": bool(self.ssl_context),
-            "client_ip": self.client_ip if is_active else None,
-            "current_rms": round(self.current_rms, 3) if is_active else 0.0,
-            "packets_received": self.packets_received,
-            "packets_dropped": self.packets_dropped,
-            "echo_guard_active": self.echo_guard_active,
-            "last_transcript": self.last_transcript,
-            "sample_rate": 16000,
-        }
+        with self._clients_lock:
+            active = [c for c in self.active_clients.values() if (now - c.get("last_packet_time", 0.0) < 3.0)]
+            is_active = len(active) > 0 or (self.connected and (now - self.last_packet_time < 3.0))
+            total_packets = sum(c.get("packets_received", 0) for c in active) or self.packets_received
+            total_dropped = sum(c.get("packets_dropped", 0) for c in active) or self.packets_dropped
+            max_rms = max((c.get("current_rms", 0.0) for c in active), default=self.current_rms)
+            primary_ip = active[0]["ip"] if active else (self.client_ip if is_active else None)
+            devices_list = [
+                {
+                    "device_id": c["device_id"],
+                    "ip": c["ip"],
+                    "port": c["port"],
+                    "packets": c["packets_received"],
+                    "rms": round(c["current_rms"], 3),
+                }
+                for c in active
+            ]
+
+            return {
+                "connected": is_active,
+                "tls_active": bool(self.ssl_context),
+                "client_ip": primary_ip,
+                "current_rms": round(max_rms, 3) if is_active else 0.0,
+                "packets_received": total_packets,
+                "packets_dropped": total_dropped,
+                "echo_guard_active": self.echo_guard_active,
+                "last_transcript": self.last_transcript,
+                "sample_rate": 16000,
+                "connected_count": len(active),
+                "devices": devices_list,
+            }
 
 
 class Me6sJournalMonitor(threading.Thread):
@@ -1281,6 +1429,7 @@ class AudioGatewayApp:
         tls_cert: Optional[str] = None,
         tls_key: Optional[str] = None,
         ipc_socket: str = DEFAULT_IPC_SOCKET,
+        allowed_tokens: Optional[Dict[str, str]] = None,
     ):
         self.tcp_port = tcp_port
         self.http_port = http_port
@@ -1290,6 +1439,7 @@ class AudioGatewayApp:
         self.tls_cert = tls_cert
         self.tls_key = tls_key
         self.ipc_socket = ipc_socket
+        self.allowed_tokens = allowed_tokens or {}
 
         self.ipc_broadcaster = IpcEventBroadcaster(socket_path=ipc_socket) if ipc_socket else None
         self.arbitrator = SessionArbitrator(dedup_window_s=2.0)
@@ -1302,6 +1452,7 @@ class AudioGatewayApp:
             tls_cert=tls_cert,
             tls_key=tls_key,
             ipc_broadcaster=self.ipc_broadcaster,
+            allowed_tokens=self.allowed_tokens,
         )
         self.me6s_monitor = Me6sJournalMonitor(arbitrator=self.arbitrator)
 

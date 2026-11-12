@@ -1,6 +1,10 @@
 # Android build artifacts
 display/android/build/
 display/android/bin/
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/local.properties
 
 config.json
 .env

@@ -349,5 +349,114 @@ class TestTlsLgMicServerProtocol(unittest.TestCase):
         sock.close()
 
 
+class TestMultiClientLgMicServerProtocol(unittest.TestCase):
+    """Valida o suporte a múltiplos smartphones conectados simultaneamente com tokens individuais e handshake v1/v2."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.port = 18090
+        cls.default_token = "token-padrao-lg-mic-32-caracteres-ok"
+        cls.mobile1_token = "token-individual-celular-sala-32-chars"
+        cls.mobile2_token = "token-individual-celular-quarto-32-c"
+        cls.allowed_tokens = {
+            cls.mobile1_token: "celular_sala",
+            cls.mobile2_token: "celular_quarto",
+        }
+        cls.arbitrator = SessionArbitrator()
+        cls.server = LgMicServer(
+            host="127.0.0.1",
+            port=cls.port,
+            auth_token=cls.default_token,
+            arbitrator=cls.arbitrator,
+            model_path=None,
+            allowed_tokens=cls.allowed_tokens,
+        )
+        cls.server.start()
+        time.sleep(0.3)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+
+    def test_version_2_handshake_with_device_id(self):
+        """Valida conexão com handshake v2 contendo device_id explícito."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect(("127.0.0.1", self.port))
+
+        device_id = "celular_sala".encode("utf-8")
+        token_bytes = self.mobile1_token.encode("utf-8")
+
+        # Handshake v2: JMIC + \x02 + len(dev) + dev + len(tok) + tok + 16000 + 1 + 16
+        sock.sendall(MAGIC_HANDSHAKE)
+        sock.sendall(struct.pack(">BB", 2, len(device_id)))
+        sock.sendall(device_id)
+        sock.sendall(struct.pack(">H", len(token_bytes)))
+        sock.sendall(token_bytes)
+        sock.sendall(struct.pack(">IBB", 16000, 1, 16))
+
+        # Envia 2 frames de áudio
+        for seq in range(2):
+            payload = b"\x00" * 1280
+            header = MAGIC_DATA + struct.pack(">IQBH", seq, int(time.time() * 1000), 0, len(payload))
+            sock.sendall(header + payload)
+            time.sleep(0.04)
+
+        time.sleep(0.1)
+        status = self.server.obter_status()
+        self.assertTrue(status["connected"])
+        self.assertGreaterEqual(status["connected_count"], 1)
+
+        dev_names = [d["device_id"] for d in status.get("devices", [])]
+        self.assertIn("celular_sala", dev_names)
+
+        sock.close()
+
+    def test_multi_client_concurrent_streaming(self):
+        """Valida que dois clientes (LG legado v1 e Mobile v2) transmitem áudio em paralelo sem interferência."""
+        sock_lg = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock_lg.connect(("127.0.0.1", self.port))
+
+        sock_mobile = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock_mobile.connect(("127.0.0.1", self.port))
+
+        # 1. Handshake LG (v1)
+        lg_token = self.default_token.encode("utf-8")
+        sock_lg.sendall(MAGIC_HANDSHAKE)
+        sock_lg.sendall(struct.pack(">B", 1))
+        sock_lg.sendall(struct.pack(">H", len(lg_token)))
+        sock_lg.sendall(lg_token)
+        sock_lg.sendall(struct.pack(">IBB", 16000, 1, 16))
+
+        # 2. Handshake Mobile (v2)
+        dev_id = "celular_quarto".encode("utf-8")
+        mob_token = self.mobile2_token.encode("utf-8")
+        sock_mobile.sendall(MAGIC_HANDSHAKE)
+        sock_mobile.sendall(struct.pack(">BB", 2, len(dev_id)))
+        sock_mobile.sendall(dev_id)
+        sock_mobile.sendall(struct.pack(">H", len(mob_token)))
+        sock_mobile.sendall(mob_token)
+        sock_mobile.sendall(struct.pack(">IBB", 16000, 1, 16))
+
+        # 3. Transmissão concorrente
+        for seq in range(3):
+            header = MAGIC_DATA + struct.pack(">IQBH", seq, int(time.time() * 1000), 0, 1280)
+            sock_lg.sendall(header + b"\x00" * 1280)
+            sock_mobile.sendall(header + b"\x00" * 1280)
+            time.sleep(0.04)
+
+        time.sleep(0.15)
+        status = self.server.obter_status()
+        self.assertEqual(status["connected_count"], 2)
+
+        devs = {d["device_id"]: d for d in status.get("devices", [])}
+        self.assertIn("lg_mic", devs)
+        self.assertIn("celular_quarto", devs)
+        self.assertGreater(devs["lg_mic"]["packets"], 0)
+        self.assertGreater(devs["celular_quarto"]["packets"], 0)
+
+        sock_lg.close()
+        sock_mobile.close()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg_dark">#030712</color>
+    <color name="bg_surface">#090f1d</color>
+    <color name="bg_card">#0f172a</color>
+    <color name="bg_card_highlight">#172338</color>
+    <color name="card_border">#1e293b</color>
+    <color name="card_border_active">#00e5ff</color>
+
+    <color name="jarvis_cyan">#00e5ff</color>
+    <color name="jarvis_cyan_glow">#3300e5ff</color>
+    <color name="jarvis_blue">#0077ff</color>
+    <color name="jarvis_amber">#f59e0b</color>
+    <color name="jarvis_emerald">#10b981</color>
+    <color name="jarvis_red">#ef4444</color>
+    <color name="jarvis_purple">#a855f7</color>
+
+    <color name="text_primary">#f8fafc</color>
+    <color name="text_secondary">#94a3b8</color>
+    <color name="text_muted">#64748b</color>
+    <color name="text_accent">#38bdf8</color>
+
+    <color name="status_idle">#00e5ff</color>
+    <color name="status_listening">#f59e0b</color>
+    <color name="status_processing">#a855f7</color>
+    <color name="status_confirming">#f97316</color>
+    <color name="status_success">#10b981</color>
+    <color name="status_error">#ef4444</color>
+</resources>

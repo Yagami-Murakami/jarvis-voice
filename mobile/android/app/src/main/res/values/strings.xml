@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Jarvis Voice Mobile</string>
+    <string name="title_settings">Configurações &amp; Pareamento</string>
+
+    <!-- Cabeçalho e Conexão -->
+    <string name="brand_title">JARVIS</string>
+    <string name="brand_subtitle">VOICE MOBILE</string>
+    <string name="status_connected">Conectado</string>
+    <string name="status_connecting">Conectando...</string>
+    <string name="status_disconnected">Desconectado</string>
+
+    <!-- Estados do Reator Arc / Terminal -->
+    <string name="state_idle">Aguardando comando...</string>
+    <string name="state_listening">Ouvindo áudio...</string>
+    <string name="state_processing">Processando no Jarvis...</string>
+    <string name="state_confirming">Confirmação Pendente</string>
+    <string name="state_success">Comando Concluído</string>
+    <string name="state_error">Falha na Execução</string>
+
+    <string name="ptt_hint_press">Toque para Falar</string>
+    <string name="ptt_hint_recording">Gravando... Fale o comando</string>
+    <string name="listen_mode_title">Detecção por Voz ("Assistente")</string>
+    <string name="listen_mode_desc">Captura ativa enquanto o app estiver aberto</string>
+
+    <!-- Telemetria do Ananuke -->
+    <string name="telemetry_title">TELEMETRIA ANANUKE (DEBIAN)</string>
+    <string name="cpu_label">CPU</string>
+    <string name="ram_label">RAM</string>
+    <string name="uptime_label">UPTIME</string>
+    <string name="telemetry_waiting">Aguardando telemetria...</string>
+
+    <!-- Último Evento / Feedback -->
+    <string name="last_command_title">ÚLTIMO COMANDO EXECUTADO</string>
+    <string name="target_label">Destino:</string>
+    <string name="result_label">Resultado:</string>
+    <string name="none_command">Nenhum comando recente</string>
+
+    <!-- Configurações -->
+    <string name="pref_server_host_title">Endereço IP do Servidor</string>
+    <string name="pref_server_host_hint">192.168.0.126</string>
+    <string name="pref_audio_port_title">Porta TCP de Áudio</string>
+    <string name="pref_audio_port_hint">8088</string>
+    <string name="pref_display_port_title">Porta HTTP do Display / SSE</string>
+    <string name="pref_display_port_hint">8080</string>
+    <string name="pref_device_id_title">Identificador do Dispositivo (Device ID)</string>
+    <string name="pref_device_id_hint">celular_usuario</string>
+    <string name="pref_token_title">Token de Pareamento do Dispositivo</string>
+    <string name="pref_token_hint">Digite o token individual seguro</string>
+    <string name="pref_use_tls_title">Criptografia TLS 1.2+</string>
+    <string name="pref_use_tls_summary">Proteger tráfego TCP/TLS na rede local</string>
+    <string name="pref_fingerprint_title">Fingerprint SHA-256 do Certificado (Opcional)</string>
+    <string name="pref_fingerprint_hint">Deixe vazio para aceitar CA confiável</string>
+
+    <string name="btn_save">Salvar Configurações</string>
+    <string name="btn_test_conn">Testar Conexão</string>
+    <string name="btn_back">Voltar</string>
+
+    <string name="test_conn_success">Conexão realizada com sucesso!</string>
+    <string name="test_conn_failed">Falha ao conectar no servidor Jarvis.</string>
+    <string name="permission_mic_rationale">O Jarvis Voice Mobile precisa de permissão de gravação de áudio para enviar comandos por voz ao servidor.</string>
+</resources>
