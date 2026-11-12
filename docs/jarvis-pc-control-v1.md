@@ -59,9 +59,9 @@ O módulo foi projetado sob rigoroso padrão de segurança defensiva:
 2. **Autenticação HMAC-SHA256 sem Transmissão de Chaves:** Cada requisição HTTP enviada aos agentes é assinada digitalmente com token seguro individual ou compartilhado (`JARVIS_PC_FUSION_TOKEN`, `JARVIS_PC_ANANUKE_TOKEN` ou `JARVIS_PC_AGENT_TOKEN`). A assinatura engloba timestamp, nonce, target, action e o corpo da requisição. O cabeçalho `X-Jarvis-Token` não é transmitido (impedindo vazamento de segredos em trânsito) e tokens fracos/padrão são estritamente rejeitados em conformidade com fail-closed (mínimo de 16 caracteres).
 3. **Prevenção contra Ataques de Replay (NonceCache):** Cada requisição possui um `nonce` criptográfico único gerado via `secrets.token_hex(16)`. Os agentes mantêm um cache thread-safe com expiração de 60 segundos; se um nonce já foi processado, a requisição é sumariamente rejeitada com HTTP 409 Conflict.
 4. **Janela Temporal Restrita (Timestamp Drift):** O timestamp da requisição não pode divergir mais do que 5,0 segundos do relógio local do agente.
-5. **Comunicação Segura TLS e Restrição de IP:** Os agentes suportam terminação TLS/HTTPS nativa (`--cert`/`--key` ou `JARVIS_PC_TLS_CERT`/`JARVIS_PC_TLS_KEY`) e validação de certificado de CA no cliente (`JARVIS_PC_CA_CERT`). Adicionalmente, implementam filtragem de origem por IP (`--allowed-ips` ou `JARVIS_PC_ALLOWED_IPS`), rejeitando com 403 Forbidden qualquer chamada externa a IPs autorizados (ex: IP do controlador LXC 110 `192.168.0.126`).
+5. **Comunicação Segura TLS e Restrição de IP:** Os agentes suportam terminação TLS/HTTPS nativa (`--cert`/`--key` ou `JARVIS_PC_TLS_CERT`/`JARVIS_PC_TLS_KEY`) e validação de certificado de CA no cliente (`JARVIS_PC_CA_CERT`). Quando TLS está configurado, o agente exige certificados completos e válidos, falhando na inicialização caso estejam ausentes ou corrompidos, impedindo estritamente qualquer fallback silencioso para HTTP. Para o ambiente de produção, a comunicação opera em HTTPS com verificação estrita de certificados e sem bypass (proibido o uso de `JARVIS_PC_TLS_INSECURE_SKIP_VERIFY`). Adicionalmente, os agentes implementam filtragem de origem por IP (`--allowed-ips` ou `JARVIS_PC_ALLOWED_IPS`), rejeitando com 403 Forbidden qualquer chamada externa a IPs autorizados (ex: IP do controlador LXC 110 `192.168.0.126`).
 6. **Confirmação em Duas Etapas e Correspondência Estrita:** Comandos destrutivos ou de interrupção operacional (`fechar_navegador` e `reiniciar`, assim como o já existente `desligar`) exigem obrigatoriamente confirmação explícita de voz do operador. A confirmação exige estrita correspondência de `session_id`, ação e computador-alvo; confirmações sem sessão válida ou órfãs são rejeitadas.
-7. **Fechamento Gracioso de Navegadores:** O encerramento de navegadores no Windows e Linux é realizado de modo gracioso (tentativa de `WM_CLOSE` ou `wmctrl -c`), evitando fechamento abrupto com perda de dados, e retorna falha se nenhum navegador estiver em execução.
+7. **Fechamento Gracioso de Navegadores:** O encerramento de navegadores no Windows e Linux é realizado de modo estritamente gracioso (`WM_CLOSE` no Windows via taskkill sem `/F`; `wmctrl -i -c` no Linux enviando `_NET_CLOSE_WINDOW`), preservando abas, sessões e trabalho do usuário sem perda de dados. No Linux, caso `wmctrl` não esteja disponível, o agente NÃO recorre a encerramento por sinal (`pkill`/`kill`) e retorna erro seguro fail-closed (`fechamento_gracioso_indisponivel`), garantindo integridade dos processos. Além disso, retorna falha segura caso nenhum navegador esteja em execução.
 8. **Feature Flag Segura:** O recurso é governado pela variável de ambiente `JARVIS_PC_CONTROL_ENABLED`. O valor padrão é estritamente `0` (desativado). Em caso de ausência ou valor diferente de `1`, nenhum comando de PC Control é emitido.
 9. **Isolamento de Produção:** Nenhuma modificação foi ou será realizada no container de produção LXC 110 (192.168.0.126) sem autorização expressa e checklist prévio.
 
@@ -120,9 +120,11 @@ O agente deve rodar no contexto da **sessão interativa** do usuário logado (pa
    ```
 3. **Execução Automática no Logon (Inicializar ou Agendador de Tarefas):**
    Criar um atalho ou tarefa agendada configurada com:
-   - *Executar apenas quando o usuário estiver conectado.*
-   - Programa: `pythonw.exe`
-   - Argumentos: `C:\Jarvis\pc_control\agents\windows_agent.py --port 8092 --allowed-ips 192.168.0.126,127.0.0.1`
+   - *Executar apenas quando o usuário estiver conectado (sessão gráfica).*
+   - *Diretório de trabalho:* `C:\Jarvis` (diretório raiz do projeto contendo o pacote `pc_control`)
+   - *Programa:* `python.exe` (ou `pythonw.exe` para execução em segundo plano sem janela de console)
+   - *Argumentos:* `-m pc_control.agents.windows_agent --port 8092 --allowed-ips 192.168.0.126,127.0.0.1`
+   *(Nota: O agente também suporta execução direta como script através de resolução automática de `sys.path`).*
 
 ### 5.2 No Linux (Ananuke - Debian 13 / Xfce - 192.168.0.131)
 
@@ -140,10 +142,11 @@ O agente deve rodar como um serviço systemd no nível de usuário (`systemd --u
 
    [Service]
    Type=simple
+   WorkingDirectory=/opt/jarvis-pc-control
    Environment="JARVIS_PC_AGENT_TOKEN=TOKEN_SEGURO_ANANUKE_MIN_16_CHARS"
    Environment="JARVIS_PC_ALLOWED_IPS=192.168.0.126,127.0.0.1"
    Environment="DISPLAY=:0"
-   ExecStart=/usr/bin/python3 /opt/jarvis-pc-control/pc_control/agents/linux_agent.py --port 8092 --allowed-ips 192.168.0.126,127.0.0.1
+   ExecStart=/usr/bin/python3 -m pc_control.agents.linux_agent --port 8092 --allowed-ips 192.168.0.126,127.0.0.1
    Restart=always
    RestartSec=3
 
@@ -173,13 +176,18 @@ Environment="JARVIS_PC_ANANUKE_TOKEN=TOKEN_SEGURO_ANANUKE_MIN_16_CHARS"
 # Ou credencial única compartilhada (fallback suportado):
 # Environment="JARVIS_PC_AGENT_TOKEN=TOKEN_SEGURO_COMPARTILHADO_MIN_16_CHARS"
 
-# Endpoints e timeouts dos agentes:
+# Endpoints e timeouts dos agentes (modo HTTP para desenvolvimento/testes locais):
 Environment="JARVIS_PC_FUSION_URL=http://192.168.0.128:8092"
 Environment="JARVIS_PC_ANANUKE_URL=http://192.168.0.131:8092"
 Environment="JARVIS_PC_HTTP_TIMEOUT=2.5"
 
-# Parâmetros opcionais para suporte a HTTPS/TLS com certificado de CA:
+# Configuração para futura produção com HTTPS validado (sem bypass):
+# Para ambiente de produção com terminação TLS nos agentes:
+# Environment="JARVIS_PC_FUSION_URL=https://192.168.0.128:8092"
+# Environment="JARVIS_PC_ANANUKE_URL=https://192.168.0.131:8092"
 # Environment="JARVIS_PC_CA_CERT=/etc/ssl/certs/jarvis-ca.pem"
+# NOTA: Em produção, o uso de JARVIS_PC_TLS_INSECURE_SKIP_VERIFY é proibido;
+# todos os certificados devem ser estritamente validados contra a autoridade certificadora (CA).
 ```
 
 ---

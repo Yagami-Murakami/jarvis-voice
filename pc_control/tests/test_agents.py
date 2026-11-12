@@ -12,6 +12,9 @@ Valida:
 """
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -204,6 +207,82 @@ class TestLinuxPcAgent(unittest.TestCase):
         self.assertEqual(erro, "fechamento_nao_confirmado")
         self.assertEqual(res.get("processos_fechados"), [])
         self.assertIn("foi fechado ou confirmado", msg)
+
+    def test_08_fechar_navegador_falha_segura_quando_wmctrl_indisponivel_sem_pkill(self):
+        """Valida que quando wmctrl não está disponível, fechar_navegador falha com erro seguro sem invocar pkill."""
+        # 1. Modo simulado com parâmetro explícito
+        ok, res, erro, msg = self.agent.executar_acao(
+            "fechar_navegador", {"simular_sem_wmctrl": True}, "ev-no-wmctrl-sim"
+        )
+        self.assertFalse(ok)
+        self.assertEqual(erro, "fechamento_gracioso_indisponivel")
+        self.assertIn("wmctrl", msg)
+
+        # 2. Modo não-simulado com wmctrl ausente e processo de navegador ativo
+        self.agent.mock_mode = False
+        try:
+            with patch("shutil.which", return_value=None):
+                # Simula pgrep encontrando firefox ativo
+                def fake_run(cmd, *args, **kwargs):
+                    if cmd[0] == "pgrep" and "firefox" in cmd:
+                        return subprocess.CompletedProcess(cmd, returncode=0, stdout="12345\n", stderr="")
+                    return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="")
+
+                with patch("subprocess.run", side_effect=fake_run) as mock_run:
+                    ok_real, res_real, erro_real, msg_real = self.agent.executar_acao(
+                        "fechar_navegador", {}, "ev-no-wmctrl-real"
+                    )
+                    self.assertFalse(ok_real)
+                    self.assertEqual(erro_real, "fechamento_gracioso_indisponivel")
+                    self.assertIn("wmctrl", msg_real)
+
+                    # Garante formalmente que NENHUMA chamada a pkill foi realizada
+                    for chamada in mock_run.call_args_list:
+                        cmd_exec = chamada[0][0]
+                        self.assertNotEqual(cmd_exec[0], "pkill", "pkill jamais deve ser chamado quando wmctrl está ausente")
+        finally:
+            self.agent.mock_mode = True
+
+
+class TestAgentStartupCommands(unittest.TestCase):
+    """Valida a inicialização correta dos agentes via python -m e scripts diretos."""
+
+    @classmethod
+    def setUpClass(cls):
+        # Determina a raiz do repositório jarvis-voice
+        cls.repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+    def test_01_linux_agent_module_startup(self):
+        """Valida inicialização recomendada do agente Linux via python3 -m pc_control.agents.linux_agent."""
+        cmd = [sys.executable, "-m", "pc_control.agents.linux_agent", "--help"]
+        res = subprocess.run(cmd, cwd=self.repo_root, capture_output=True, text=True, timeout=5)
+        self.assertEqual(res.returncode, 0, f"Falha no comando: {res.stderr}")
+        self.assertIn("Agente Local do Jarvis PC Control para Linux", res.stdout)
+        self.assertNotIn("RuntimeWarning", res.stderr)
+
+    def test_02_windows_agent_module_startup(self):
+        """Valida inicialização recomendada do agente Windows via python -m pc_control.agents.windows_agent."""
+        cmd = [sys.executable, "-m", "pc_control.agents.windows_agent", "--help"]
+        res = subprocess.run(cmd, cwd=self.repo_root, capture_output=True, text=True, timeout=5)
+        self.assertEqual(res.returncode, 0, f"Falha no comando: {res.stderr}")
+        self.assertIn("Agente Local do Jarvis PC Control para Windows", res.stdout)
+        self.assertNotIn("RuntimeWarning", res.stderr)
+
+    def test_03_linux_agent_standalone_script_startup(self):
+        """Valida fallback de sys.path quando agente Linux é executado diretamente como script."""
+        script_path = os.path.join(self.repo_root, "pc_control", "agents", "linux_agent.py")
+        cmd = [sys.executable, script_path, "--help"]
+        res = subprocess.run(cmd, cwd=self.repo_root, capture_output=True, text=True, timeout=5)
+        self.assertEqual(res.returncode, 0, f"Falha no script direto: {res.stderr}")
+        self.assertIn("Agente Local do Jarvis PC Control para Linux", res.stdout)
+
+    def test_04_windows_agent_standalone_script_startup(self):
+        """Valida fallback de sys.path quando agente Windows é executado diretamente como script."""
+        script_path = os.path.join(self.repo_root, "pc_control", "agents", "windows_agent.py")
+        cmd = [sys.executable, script_path, "--help"]
+        res = subprocess.run(cmd, cwd=self.repo_root, capture_output=True, text=True, timeout=5)
+        self.assertEqual(res.returncode, 0, f"Falha no script direto: {res.stderr}")
+        self.assertIn("Agente Local do Jarvis PC Control para Windows", res.stdout)
 
 
 if __name__ == "__main__":

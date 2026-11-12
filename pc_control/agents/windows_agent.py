@@ -15,6 +15,11 @@ import time
 import webbrowser
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+if __package__ is None or __package__ == "":
+    _pkg_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    if _pkg_root not in sys.path:
+        sys.path.insert(0, _pkg_root)
+
 from pc_control.agents.base_agent import PcAgentServer
 from pc_control.config import get_agent_token, is_mock_mode
 

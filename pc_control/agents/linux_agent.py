@@ -11,11 +11,15 @@ import argparse
 import logging
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+if __package__ is None or __package__ == "":
+    _pkg_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    if _pkg_root not in sys.path:
+        sys.path.insert(0, _pkg_root)
 
 from pc_control.agents.base_agent import PcAgentServer
 from pc_control.config import get_agent_token, is_mock_mode
@@ -225,6 +229,8 @@ class LinuxPcAgent(PcAgentServer):
                 return False, {"processos_fechados": [], "simulado": True}, "nenhum_navegador_encontrado", "Nenhum navegador aberto para fechar no Ananuke."
             if params.get("simular_nao_confirmado"):
                 return False, {"processos_fechados": [], "simulado": True}, "fechamento_nao_confirmado", "Nenhum navegador foi fechado ou confirmado no Ananuke."
+            if params.get("simular_sem_wmctrl"):
+                return False, {"processos_fechados": [], "simulado": True}, "fechamento_gracioso_indisponivel", "Não foi possível fechar as janelas graciosamente: utilitário wmctrl não disponível no sistema."
             return True, {"processos_fechados": ["firefox (simulado)"], "simulado": True}, None, "Navegador fechado no Ananuke."
 
         env = self._obter_env_sessao()
@@ -272,7 +278,7 @@ class LinuxPcAgent(PcAgentServer):
             return False, {"processos_fechados": []}, "nenhum_navegador_encontrado", "Nenhum navegador aberto para fechar no Ananuke."
 
         # 2. Fechamento gracioso prioritário via wmctrl (envia _NET_CLOSE_WINDOW, permitindo salvar estado e abas)
-        # NÃO invocar pkill em seguida para evitar encerramento indiscriminado de processos com trabalho não salvo!
+        # Jamais invocar pkill ou sinais de processo: encerramento indiscriminado por sinal é estritamente proibido!
         if shutil.which("wmctrl") and janelas_encontradas:
             for win_id, canonical in janelas_encontradas:
                 try:
@@ -297,31 +303,28 @@ class LinuxPcAgent(PcAgentServer):
                 except Exception:
                     pass
 
-        # 3. Fallback: somente se wmctrl NÃO estiver disponível na sessão, envia SIGTERM (-15, nunca -9)
-        elif not shutil.which("wmctrl") and processos_ativos:
-            for proc in processos_ativos:
-                try:
-                    subprocess.run(["pkill", "-15", "-u", uid_str, "-x", proc], capture_output=True, timeout=2)
-                except Exception:
-                    pass
+        # 3. Se wmctrl não estiver disponível, encerramento gracioso não é possível
+        # Jamais invocar pkill ou sinais de processo: retorna erro seguro fail-closed
+        elif not shutil.which("wmctrl"):
+            logger.warning("wmctrl não está disponível para fechamento gracioso de janelas no Ananuke.")
+            return (
+                False,
+                {"processos_fechados": []},
+                "fechamento_gracioso_indisponivel",
+                "Não foi possível fechar as janelas graciosamente: utilitário wmctrl não disponível no sistema.",
+            )
 
-            # Confirmação pós-fechamento: aguarda até 1.5s verificando se processos encerraram
-            t_limite = time.time() + 1.5
-            while time.time() < t_limite:
-                time.sleep(0.3)
-                ainda_ativos = []
-                for proc in processos_ativos:
-                    try:
-                        res_chk = subprocess.run(["pgrep", "-u", uid_str, "-x", proc], capture_output=True, text=True, timeout=2)
-                        if res_chk.returncode == 0 and res_chk.stdout.strip():
-                            ainda_ativos.append(proc)
-                    except Exception:
-                        pass
-                fechados = [p for p in processos_ativos if p not in ainda_ativos]
-                if fechados:
-                    break
+        # 4. Se wmctrl está disponível mas nenhuma janela correspondente foi encontrada
+        elif not janelas_encontradas:
+            logger.warning("wmctrl disponível, mas nenhuma janela gráfica de navegador foi localizada.")
+            return (
+                False,
+                {"processos_fechados": []},
+                "nenhuma_janela_localizada",
+                "Nenhuma janela de navegador aberta foi localizada para fechamento gracioso no Ananuke.",
+            )
 
-        # 4. Validação de confirmação: nunca reporta sucesso se nada foi fechado
+        # 5. Validação de confirmação: nunca reporta sucesso se nada foi fechado
         if not fechados:
             return False, {"processos_fechados": []}, "fechamento_nao_confirmado", "Nenhum navegador foi fechado ou confirmado no Ananuke."
 
