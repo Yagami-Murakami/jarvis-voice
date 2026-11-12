@@ -12,6 +12,7 @@ Valida:
 """
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
@@ -948,6 +949,292 @@ class TestLinuxPcAgent(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("timeout", err)
             mock_proc.kill.assert_called_once()
+
+    def test_29_browser_launch_primary_timeout_with_process_running_immediate_success_no_fallback(self):
+        """Valida que quando o lançador primário (gtk-launch) sofre timeout mas o processo do navegador existe,
+        o agente considera sucesso imediato e não executa nenhum fallback subsequente (prevenindo janelas duplicadas)."""
+        self.agent.mock_mode = False
+        try:
+            self.agent.desktop_env = "gnome"
+            which_map = {
+                "gtk-launch": "/usr/bin/gtk-launch",
+                "xdg-settings": "/usr/bin/xdg-settings",
+                "pgrep": "/usr/bin/pgrep",
+                "firefox-esr": "/usr/bin/firefox-esr",
+            }
+
+            def fake_run(cmd, **kwargs):
+                if cmd[:2] == ["xdg-settings", "get"]:
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="firefox-esr.desktop\n")
+                if cmd[0] == "pgrep":
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="12345\n")
+                return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+
+            mock_proc = MagicMock()
+            mock_proc.communicate.side_effect = subprocess.TimeoutExpired(cmd=["gtk-launch"], timeout=2.0)
+
+            with patch("shutil.which", side_effect=lambda x: which_map.get(x)):
+                with patch("subprocess.run", side_effect=fake_run):
+                    with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+                        ok, res, erro, msg = self.agent.executar_acao("abrir_navegador", {}, "ev-timeout-proc-running")
+                        self.assertTrue(ok)
+                        self.assertIsNone(erro)
+                        self.assertEqual(res.get("comando"), ["gtk-launch", "firefox-esr.desktop"])
+                        self.assertFalse(res.get("simulado"))
+                        self.assertIn("Navegador padrão aberto no Ananuke.", msg)
+                        # Prevenção estrita de aberturas duplicadas: apenas o lançador primário foi chamado
+                        self.assertEqual(mock_popen.call_count, 1)
+                        self.assertEqual(mock_popen.call_args[0][0], ["gtk-launch", "firefox-esr.desktop"])
+        finally:
+            self.agent.mock_mode = True
+
+    def test_30_browser_launch_primary_timeout_uncertain_state_immediate_success_no_fallback(self):
+        """Valida que mesmo quando o processo ainda não é detectado (estado incerto pós-timeout),
+        o agente não dispara fallback para evitar segunda janela em background D-Bus/GIO."""
+        self.agent.mock_mode = False
+        try:
+            self.agent.desktop_env = "gnome"
+            which_map = {
+                "gtk-launch": "/usr/bin/gtk-launch",
+                "xdg-settings": "/usr/bin/xdg-settings",
+                "pgrep": "/usr/bin/pgrep",
+                "firefox-esr": "/usr/bin/firefox-esr",
+            }
+
+            def fake_run(cmd, **kwargs):
+                if cmd[:2] == ["xdg-settings", "get"]:
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="firefox-esr.desktop\n")
+                # pgrep não encontra processo ainda (estado incerto)
+                if cmd[0] == "pgrep":
+                    return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+                return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+
+            mock_proc = MagicMock()
+            mock_proc.communicate.side_effect = subprocess.TimeoutExpired(cmd=["gtk-launch"], timeout=2.0)
+
+            with patch("shutil.which", side_effect=lambda x: which_map.get(x)):
+                with patch("subprocess.run", side_effect=fake_run):
+                    with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+                        ok, res, erro, msg = self.agent.executar_acao("abrir_navegador", {}, "ev-timeout-uncertain")
+                        self.assertTrue(ok)
+                        self.assertIsNone(erro)
+                        self.assertEqual(res.get("comando"), ["gtk-launch", "firefox-esr.desktop"])
+                        # Fallback estritamente abortado
+                        self.assertEqual(mock_popen.call_count, 1)
+        finally:
+            self.agent.mock_mode = True
+
+    def test_31_browser_launch_fallback_allowed_only_when_proven_clean_failure(self):
+        """Valida que o fallback seguro só é permitido quando o lançador primário falhar comprovadamente
+        sem ter iniciado nenhum processo (código != 0 e nenhum navegador ativo)."""
+        self.agent.mock_mode = False
+        try:
+            self.agent.desktop_env = "gnome"
+            which_map = {
+                "gtk-launch": "/usr/bin/gtk-launch",
+                "xdg-settings": "/usr/bin/xdg-settings",
+                "pgrep": "/usr/bin/pgrep",
+                "firefox-esr": "/usr/bin/firefox-esr",
+            }
+
+            def fake_run(cmd, **kwargs):
+                if cmd[:2] == ["xdg-settings", "get"]:
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="firefox-esr.desktop\n")
+                if cmd[0] == "pgrep":
+                    return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+                return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+
+            def fake_popen(cmd, **kwargs):
+                proc = MagicMock()
+                if cmd[0] == "gtk-launch":
+                    proc.returncode = 2
+                    proc.communicate.return_value = ("", "gtk-launch: aplicativo 'firefox-esr.desktop' não encontrado")
+                elif cmd[0] == "firefox-esr":
+                    proc.returncode = 0
+                    proc.wait.return_value = 0
+                return proc
+
+            with patch("shutil.which", side_effect=lambda x: which_map.get(x)):
+                with patch("subprocess.run", side_effect=fake_run):
+                    with patch("subprocess.Popen", side_effect=fake_popen) as mock_popen:
+                        ok, res, erro, msg = self.agent.executar_acao("abrir_navegador", {}, "ev-proven-failure")
+                        self.assertTrue(ok)
+                        self.assertIsNone(erro)
+                        # Fallback permitido e executado
+                        self.assertEqual(mock_popen.call_count, 2)
+                        self.assertEqual(mock_popen.call_args_list[0][0][0], ["gtk-launch", "firefox-esr.desktop"])
+                        self.assertEqual(mock_popen.call_args_list[1][0][0], ["firefox-esr"])
+                        self.assertEqual(res.get("comando"), ["firefox-esr"])
+        finally:
+            self.agent.mock_mode = True
+
+    def test_32_browser_launch_launcher_error_with_browser_running_aborts_fallback(self):
+        """Valida que se o lançador primário retornar erro mas um processo de navegador já estiver ativo,
+        o agente não dispara fallback para evitar segunda janela desnecessária."""
+        self.agent.mock_mode = False
+        try:
+            self.agent.desktop_env = "gnome"
+            which_map = {
+                "gtk-launch": "/usr/bin/gtk-launch",
+                "xdg-settings": "/usr/bin/xdg-settings",
+                "pgrep": "/usr/bin/pgrep",
+                "firefox-esr": "/usr/bin/firefox-esr",
+            }
+
+            def fake_run(cmd, **kwargs):
+                if cmd[:2] == ["xdg-settings", "get"]:
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="firefox-esr.desktop\n")
+                if cmd[0] == "pgrep":
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="9999\n")
+                return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+
+            mock_proc = MagicMock()
+            mock_proc.returncode = 1
+            mock_proc.communicate.return_value = ("", "aviso gio")
+
+            with patch("shutil.which", side_effect=lambda x: which_map.get(x)):
+                with patch("subprocess.run", side_effect=fake_run):
+                    with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+                        ok, res, erro, msg = self.agent.executar_acao("abrir_navegador", {}, "ev-err-with-proc")
+                        self.assertTrue(ok)
+                        self.assertIsNone(erro)
+                        self.assertEqual(res.get("comando"), ["gtk-launch", "firefox-esr.desktop"])
+                        self.assertEqual(mock_popen.call_count, 1)
+        finally:
+            self.agent.mock_mode = True
+
+    def test_33_browser_launch_logging_structured_attempt_and_justification(self):
+        """Valida que o logger registra qual lançador foi testado, o resultado e a justificativa para avançar ou abortar fallback."""
+        self.agent.mock_mode = False
+        old_disable = logging.root.manager.disable
+        try:
+            logging.disable(logging.NOTSET)
+            self.agent.desktop_env = "gnome"
+            which_map = {
+                "gtk-launch": "/usr/bin/gtk-launch",
+                "xdg-settings": "/usr/bin/xdg-settings",
+                "pgrep": "/usr/bin/pgrep",
+                "firefox-esr": "/usr/bin/firefox-esr",
+            }
+
+            # 1. Caso de Timeout: verifica log com justificativa de abortar fallback para prevenir duplicata
+            def fake_run_timeout(cmd, **kwargs):
+                if cmd[:2] == ["xdg-settings", "get"]:
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="firefox-esr.desktop\n")
+                if cmd[0] == "pgrep":
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="54321\n")
+                return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+
+            mock_proc_timeout = MagicMock()
+            mock_proc_timeout.communicate.side_effect = subprocess.TimeoutExpired(cmd=["gtk-launch"], timeout=2.0)
+
+            with patch("shutil.which", side_effect=lambda x: which_map.get(x)):
+                with patch("subprocess.run", side_effect=fake_run_timeout):
+                    with patch("subprocess.Popen", return_value=mock_proc_timeout):
+                        with self.assertLogs("JarvisLinuxAgent", level="INFO") as log_ctx:
+                            self.agent.executar_acao("abrir_navegador", {}, "ev-log-timeout")
+                            logs_text = "\n".join(log_ctx.output)
+                            self.assertIn("Tentando abrir navegador com candidato", logs_text)
+                            self.assertIn("gtk-launch", logs_text)
+                            self.assertIn("timeout", logs_text.lower())
+                            self.assertIn("prevenir abertura duplicada", logs_text)
+                            self.assertIn("fallback abortado", logs_text)
+
+            # 2. Caso de Falha Comprovada: verifica log com justificativa para avançar para fallback seguro
+            def fake_run_failure(cmd, **kwargs):
+                if cmd[:2] == ["xdg-settings", "get"]:
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="firefox-esr.desktop\n")
+                if cmd[0] == "pgrep":
+                    return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+                return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+
+            def fake_popen_failure(cmd, **kwargs):
+                proc = MagicMock()
+                if cmd[0] == "gtk-launch":
+                    proc.returncode = 2
+                    proc.communicate.return_value = ("", "erro desktop")
+                else:
+                    proc.returncode = 0
+                    proc.wait.return_value = 0
+                return proc
+
+            with patch("shutil.which", side_effect=lambda x: which_map.get(x)):
+                with patch("subprocess.run", side_effect=fake_run_failure):
+                    with patch("subprocess.Popen", side_effect=fake_popen_failure):
+                        with self.assertLogs("JarvisLinuxAgent", level="WARNING") as log_ctx:
+                            self.agent.executar_acao("abrir_navegador", {}, "ev-log-fallback")
+                            logs_text = "\n".join(log_ctx.output)
+                            self.assertIn("falhou comprovadamente sem iniciar processos", logs_text)
+                            self.assertIn("Avançando para fallback seguro", logs_text)
+        finally:
+            logging.disable(old_disable)
+            self.agent.mock_mode = True
+
+    def test_34_browser_launch_xfce_timeout_immediate_success_no_fallback(self):
+        """Valida suporte ao Xfce: timeout no exo-open é tratado com sucesso imediato sem fallback duplicado."""
+        self.agent.mock_mode = False
+        try:
+            self.agent.desktop_env = "xfce"
+            which_map = {
+                "exo-open": "/usr/bin/exo-open",
+                "gtk-launch": "/usr/bin/gtk-launch",
+                "firefox-esr": "/usr/bin/firefox-esr",
+                "pgrep": "/usr/bin/pgrep",
+            }
+
+            mock_proc = MagicMock()
+            mock_proc.communicate.side_effect = subprocess.TimeoutExpired(cmd=["exo-open"], timeout=2.0)
+
+            def fake_run(cmd, **kwargs):
+                if cmd[0] == "pgrep":
+                    return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+                return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+
+            with patch("shutil.which", side_effect=lambda x: which_map.get(x)):
+                with patch("subprocess.run", side_effect=fake_run):
+                    with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+                        ok, res, erro, msg = self.agent.executar_acao("abrir_navegador", {}, "ev-xfce-timeout")
+                        self.assertTrue(ok)
+                        self.assertIsNone(erro)
+                        self.assertEqual(res.get("comando"), ["exo-open", "--launch", "WebBrowser", "about:blank"])
+                        # Prevenção estrita: fallback não executado
+                        self.assertEqual(mock_popen.call_count, 1)
+        finally:
+            self.agent.mock_mode = True
+
+    def test_35_browser_launch_primary_timeout_with_wmctrl_window_immediate_success_no_fallback(self):
+        """Valida que quando gtk-launch sofre timeout e uma janela gráfica é detectada via wmctrl,
+        o agente considera sucesso imediato e não dispara fallback duplicado."""
+        self.agent.mock_mode = False
+        try:
+            self.agent.desktop_env = "gnome"
+            which_map = {
+                "gtk-launch": "/usr/bin/gtk-launch",
+                "xdg-settings": "/usr/bin/xdg-settings",
+                "wmctrl": "/usr/bin/wmctrl",
+                "firefox-esr": "/usr/bin/firefox-esr",
+            }
+
+            def fake_run(cmd, **kwargs):
+                if cmd[:2] == ["xdg-settings", "get"]:
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="firefox-esr.desktop\n")
+                if cmd[0] == "wmctrl":
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="0x04000001  0 ananuke Mozilla Firefox\n")
+                return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+
+            mock_proc = MagicMock()
+            mock_proc.communicate.side_effect = subprocess.TimeoutExpired(cmd=["gtk-launch"], timeout=2.0)
+
+            with patch("shutil.which", side_effect=lambda x: which_map.get(x)):
+                with patch("subprocess.run", side_effect=fake_run):
+                    with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+                        ok, res, erro, msg = self.agent.executar_acao("abrir_navegador", {}, "ev-wmctrl-win")
+                        self.assertTrue(ok)
+                        self.assertIsNone(erro)
+                        self.assertEqual(res.get("comando"), ["gtk-launch", "firefox-esr.desktop"])
+                        self.assertEqual(mock_popen.call_count, 1)
+        finally:
+            self.agent.mock_mode = True
 
 
 class TestAgentStartupCommands(unittest.TestCase):

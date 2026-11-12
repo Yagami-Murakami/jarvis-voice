@@ -29,6 +29,7 @@ logger = logging.getLogger("JarvisLinuxAgent")
 
 # Processos comuns de navegadores no Debian para fechamento gracioso (SIGTERM / wmctrl)
 LINUX_BROWSER_PROCESSES = [
+    "firefox-esr",
     "firefox-bin",
     "firefox",
     "chromium",
@@ -40,6 +41,9 @@ LINUX_BROWSER_PROCESSES = [
     "brave-browser",
     "msedge",
     "microsoft-edge",
+    "opera",
+    "vivaldi-bin",
+    "vivaldi",
 ]
 
 
@@ -293,6 +297,70 @@ class LinuxPcAgent(PcAgentServer):
 
         return None
 
+    def _verificar_navegador_em_execucao(
+        self, candidato_binario: Optional[str] = None
+    ) -> Tuple[bool, Optional[str]]:
+        """Verifica se há algum processo ou janela gráfica de navegador ativo no sistema."""
+        env = self._obter_env_sessao()
+
+        # 1. Checagem de janelas abertas via wmctrl se disponível
+        if shutil.which("wmctrl"):
+            try:
+                res_wm = subprocess.run(
+                    ["wmctrl", "-l"],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+                if res_wm.returncode == 0 and res_wm.stdout:
+                    patterns = [
+                        ("Mozilla Firefox", "Firefox"),
+                        ("Firefox", "Firefox"),
+                        ("Google Chrome", "Google Chrome"),
+                        ("Chrome", "Google Chrome"),
+                        ("Chromium", "Chromium"),
+                        ("Brave", "Brave"),
+                        ("Microsoft Edge", "Microsoft Edge"),
+                        ("Edge", "Microsoft Edge"),
+                    ]
+                    if candidato_binario:
+                        patterns.append((candidato_binario.lower(), candidato_binario))
+
+                    stdout_lower = res_wm.stdout.lower()
+                    for pattern, name in patterns:
+                        if pattern.lower() in stdout_lower:
+                            return True, f"janela:{name}"
+            except Exception as e:
+                logger.debug("Falha ao checar wmctrl -l: %s", e)
+
+        # 2. Checagem de processos do usuário atual via pgrep se disponível
+        if shutil.which("pgrep"):
+            procs_to_check: List[str] = list(LINUX_BROWSER_PROCESSES)
+            if candidato_binario and candidato_binario not in procs_to_check:
+                procs_to_check.insert(0, candidato_binario)
+
+            uid_str = str(os.getuid())
+            for proc_name in procs_to_check:
+                try:
+                    cmd_pg = (
+                        ["pgrep", "-u", uid_str, "-x", proc_name]
+                        if uid_str != "0"
+                        else ["pgrep", "-x", proc_name]
+                    )
+                    res_pg = subprocess.run(
+                        cmd_pg,
+                        capture_output=True,
+                        text=True,
+                        timeout=2,
+                    )
+                    if res_pg.returncode == 0 and res_pg.stdout.strip():
+                        return True, f"processo:{proc_name}"
+                except Exception:
+                    pass
+
+        return False, None
+
     def _executar_comando_abertura(
         self,
         cmd: List[str],
@@ -431,16 +499,66 @@ class LinuxPcAgent(PcAgentServer):
             comando_usado = None
             ultimo_erro = None
 
-            for cmd in candidatos:
+            for i, cmd in enumerate(candidatos):
+                logger.info(
+                    "Tentando abrir navegador com candidato [%d/%d]: %s",
+                    i + 1,
+                    len(candidatos),
+                    cmd,
+                )
                 ok, err = self._executar_comando_abertura(cmd, env)
                 if ok:
                     sucesso = True
                     comando_usado = cmd
+                    logger.info("Lançador %s executado com sucesso (código de saída 0).", cmd)
                     break
-                else:
-                    ultimo_erro = err
+
+                is_timeout = bool(err and "timeout" in err.lower())
+                nav_ativo, detalhe_ativo = self._verificar_navegador_em_execucao(bin_cand)
+
+                if is_timeout:
+                    if nav_ativo:
+                        logger.info(
+                            "Lançador %s sofreu timeout, porém navegador foi detectado em execução (%s). "
+                            "Considerando concluído com sucesso para prevenir abertura duplicada (fallback abortado).",
+                            cmd,
+                            detalhe_ativo,
+                        )
+                    else:
+                        logger.warning(
+                            "Lançador %s sofreu timeout após inicialização ser engatilhada (estado incerto). "
+                            "Considerando concluído com sucesso para prevenir abertura duplicada (fallback abortado).",
+                            cmd,
+                        )
+                    sucesso = True
+                    comando_usado = cmd
+                    break
+
+                if nav_ativo:
+                    logger.info(
+                        "Lançador %s retornou erro (%s), porém navegador foi detectado em execução (%s). "
+                        "Considerando concluído com sucesso para prevenir abertura duplicada (fallback abortado).",
+                        cmd,
+                        err,
+                        detalhe_ativo,
+                    )
+                    sucesso = True
+                    comando_usado = cmd
+                    break
+
+                ultimo_erro = err
+                logger.warning(
+                    "Lançador %s falhou comprovadamente sem iniciar processos (resultado: %s). "
+                    "Nenhum navegador ativo detectado. Avançando para fallback seguro.",
+                    cmd,
+                    err,
+                )
 
             if not sucesso:
+                logger.warning(
+                    "Falha ao abrir navegador no Ananuke: todos os candidatos falharam. Último erro: %s",
+                    ultimo_erro,
+                )
                 return (
                     False,
                     {},
