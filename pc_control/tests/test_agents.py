@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -311,6 +312,17 @@ class TestLinuxPcAgent(unittest.TestCase):
                 with patch("shutil.which", return_value=None):
                     self.assertEqual(self.agent._detectar_ambiente_desktop(), "desconhecido")
 
+        # 8. Inicialização com desktop_env='auto' resolve para o ambiente detectado (não para 'auto')
+        with patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "GNOME"}, clear=True):
+            ag_auto = LinuxPcAgent(host="127.0.0.1", port=0, auth_token="test-token-lin-12345", mock_mode=True, desktop_env="auto")
+            self.assertEqual(ag_auto.desktop_env, "gnome")
+            ag_auto.server_close()
+
+        # 9. Inicialização com desktop_env explícito ('xfce' ou 'gnome')
+        ag_xfce = LinuxPcAgent(host="127.0.0.1", port=0, auth_token="test-token-lin-12345", mock_mode=True, desktop_env="xfce")
+        self.assertEqual(ag_xfce.desktop_env, "xfce")
+        ag_xfce.server_close()
+
     def test_11_gnome_terminal_prioritized(self):
         """Valida que no GNOME o terminal gnome-terminal é estritamente priorizado."""
         # 1. Modo simulado
@@ -367,6 +379,21 @@ class TestLinuxPcAgent(unittest.TestCase):
                     self.assertEqual(res_real.get("terminal"), "xfce4-terminal")
                     mock_popen.assert_called_once()
                     self.assertEqual(mock_popen.call_args[0][0], ["xfce4-terminal"])
+
+            # 3. Modo real: fallback para x-terminal-emulator se xfce4-terminal ausente
+            with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x == "x-terminal-emulator" else None):
+                with patch("subprocess.Popen") as mock_popen:
+                    ok_fb, res_fb, erro_fb, msg_fb = self.agent.executar_acao("abrir_terminal", {}, "ev-term-xfce-fb")
+                    self.assertTrue(ok_fb)
+                    self.assertEqual(res_fb.get("terminal"), "x-terminal-emulator")
+                    mock_popen.assert_called_once()
+                    self.assertEqual(mock_popen.call_args[0][0], ["x-terminal-emulator"])
+
+            # 4. Modo real: falha quando nenhum terminal é encontrado
+            with patch("shutil.which", return_value=None):
+                ok_none, res_none, erro_none, msg_none = self.agent.executar_acao("abrir_terminal", {}, "ev-term-xfce-none")
+                self.assertFalse(ok_none)
+                self.assertEqual(erro_none, "terminal_nao_encontrado")
         finally:
             self.agent.mock_mode = True
 
@@ -429,6 +456,28 @@ class TestLinuxPcAgent(unittest.TestCase):
                     self.assertTrue(ok_xf)
                     mock_popen.assert_called_once()
                     self.assertEqual(mock_popen.call_args[0][0], ["xfce4-screensaver-command", "-l"])
+
+            # 3. Fallback loginctl lock-session
+            with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x == "loginctl" else None):
+                with patch("subprocess.Popen") as mock_popen:
+                    ok_login, res_login, erro_login, msg_login = self.agent.executar_acao("bloquear", {}, "ev-lock-xfce-loginctl")
+                    self.assertTrue(ok_login)
+                    mock_popen.assert_called_once()
+                    self.assertEqual(mock_popen.call_args[0][0], ["loginctl", "lock-session"])
+
+            # 4. Fallback xdg-screensaver lock
+            with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x == "xdg-screensaver" else None):
+                with patch("subprocess.Popen") as mock_popen:
+                    ok_xdg, res_xdg, erro_xdg, msg_xdg = self.agent.executar_acao("bloquear", {}, "ev-lock-xfce-xdg")
+                    self.assertTrue(ok_xdg)
+                    mock_popen.assert_called_once()
+                    self.assertEqual(mock_popen.call_args[0][0], ["xdg-screensaver", "lock"])
+
+            # 5. Falha segura se nenhuma ferramenta de bloqueio existir
+            with patch("shutil.which", return_value=None):
+                ok_none, res_none, erro_none, msg_none = self.agent.executar_acao("bloquear", {}, "ev-lock-xfce-none")
+                self.assertFalse(ok_none)
+                self.assertEqual(erro_none, "bloqueador_nao_encontrado")
         finally:
             self.agent.mock_mode = True
 
@@ -466,6 +515,13 @@ class TestLinuxPcAgent(unittest.TestCase):
                     ok_x11, res_x11, erro_x11, msg_x11 = self.agent.executar_acao("mostrar_area_de_trabalho", {}, "ev-desk-x11")
                     self.assertTrue(ok_x11)
                     mock_x11.assert_called_once()
+
+            # 4. Falha segura se todas as ferramentas falharem
+            with patch("shutil.which", return_value=None):
+                with patch.object(self.agent, "_mostrar_desktop_x11", return_value=False):
+                    ok_fail, res_fail, erro_fail, msg_fail = self.agent.executar_acao("mostrar_area_de_trabalho", {}, "ev-desk-fail")
+                    self.assertFalse(ok_fail)
+                    self.assertEqual(erro_fail, "ferramenta_desktop_ausente")
         finally:
             self.agent.mock_mode = True
 
@@ -500,6 +556,44 @@ class TestLinuxPcAgent(unittest.TestCase):
                         self.assertTrue(ok)
                         self.assertEqual(res.get("processos_fechados"), ["Microsoft Edge"])
                         self.assertIn("Microsoft Edge", msg)
+        finally:
+            self.agent.mock_mode = True
+
+    def test_17_browser_launch_desktop_affinity(self):
+        """Valida que abrir_navegador e abrir_youtube respeitam a afinidade de desktop (xdg-open no GNOME, exo-open no Xfce)."""
+        self.agent.mock_mode = False
+        try:
+            # 1. No GNOME, prioriza xdg-open
+            self.agent.desktop_env = "gnome"
+            with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x in ("xdg-open", "exo-open") else None):
+                with patch("subprocess.Popen") as mock_popen:
+                    ok, res, erro, msg = self.agent.executar_acao("abrir_navegador", {}, "ev-gnome-browser")
+                    self.assertTrue(ok)
+                    mock_popen.assert_called_once()
+                    self.assertEqual(mock_popen.call_args[0][0], ["xdg-open", "about:blank"])
+
+            # 2. No GNOME, abrir_youtube via xdg-open
+            with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x in ("xdg-open", "exo-open") else None):
+                with patch("subprocess.Popen") as mock_popen:
+                    ok_yt, res_yt, erro_yt, msg_yt = self.agent.executar_acao("abrir_youtube", {}, "ev-gnome-yt")
+                    self.assertTrue(ok_yt)
+                    mock_popen.assert_called_once()
+                    self.assertEqual(mock_popen.call_args[0][0], ["xdg-open", "https://www.youtube.com"])
+
+            # 3. No Xfce, prioriza exo-open
+            self.agent.desktop_env = "xfce"
+            with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x in ("exo-open", "xdg-open") else None):
+                with patch("subprocess.Popen") as mock_popen:
+                    ok_xf, res_xf, erro_xf, msg_xf = self.agent.executar_acao("abrir_navegador", {}, "ev-xfce-browser")
+                    self.assertTrue(ok_xf)
+                    mock_popen.assert_called_once()
+                    self.assertEqual(mock_popen.call_args[0][0], ["exo-open", "--launch", "WebBrowser", "about:blank"])
+
+            # 4. Falha segura se nenhum lançador existir
+            with patch("shutil.which", return_value=None):
+                ok_none, res_none, erro_none, msg_none = self.agent.executar_acao("abrir_navegador", {}, "ev-no-browser")
+                self.assertFalse(ok_none)
+                self.assertEqual(erro_none, "navegador_nao_encontrado")
         finally:
             self.agent.mock_mode = True
 
@@ -544,6 +638,34 @@ class TestAgentStartupCommands(unittest.TestCase):
         res = subprocess.run(cmd, cwd=tempfile.gettempdir(), capture_output=True, text=True, timeout=5)
         self.assertEqual(res.returncode, 0, f"Falha no script direto: {res.stderr}")
         self.assertIn("Agente Local do Jarvis PC Control para Windows", res.stdout)
+
+    def test_05_linux_agent_module_startup_with_mock_flag(self):
+        """Valida que o agente Linux suporta a flag --mock e opções de bind sem crash por AttributeError."""
+        cmd = [sys.executable, "-m", "pc_control.agents.linux_agent", "--mock", "--port", "0"]
+        p = subprocess.Popen(cmd, cwd=self.repo_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            time.sleep(0.6)
+            p.terminate()
+            stdout, stderr = p.communicate(timeout=3)
+            self.assertIn(p.returncode, (0, -15, 143))
+            self.assertIn("Agente Linux (Ananuke) iniciado", stderr)
+            self.assertNotIn("AttributeError", stderr)
+        except Exception:
+            p.kill()
+            p.communicate()
+            raise
+
+    def test_06_linux_agent_cli_desktop_options(self):
+        """Valida que a flag --desktop aceita auto, gnome e xfce e rejeita valores inválidos."""
+        for valido in ("auto", "gnome", "xfce"):
+            cmd = [sys.executable, "-m", "pc_control.agents.linux_agent", "--desktop", valido, "--help"]
+            res = subprocess.run(cmd, cwd=self.repo_root, capture_output=True, text=True, timeout=5)
+            self.assertEqual(res.returncode, 0)
+
+        cmd_inv = [sys.executable, "-m", "pc_control.agents.linux_agent", "--desktop", "invalido"]
+        res_inv = subprocess.run(cmd_inv, cwd=self.repo_root, capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(res_inv.returncode, 0)
+        self.assertIn("invalid choice", res_inv.stderr)
 
 
 if __name__ == "__main__":

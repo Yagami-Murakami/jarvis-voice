@@ -28,7 +28,19 @@ from pc_control.config import get_agent_token, is_mock_mode
 logger = logging.getLogger("JarvisLinuxAgent")
 
 # Processos comuns de navegadores no Debian para fechamento gracioso (SIGTERM / wmctrl)
-LINUX_BROWSER_PROCESSES = ["firefox-bin", "firefox", "chromium", "chrome", "brave", "msedge"]
+LINUX_BROWSER_PROCESSES = [
+    "firefox-bin",
+    "firefox",
+    "chromium",
+    "chromium-browser",
+    "chrome",
+    "google-chrome",
+    "google-chrome-stable",
+    "brave",
+    "brave-browser",
+    "msedge",
+    "microsoft-edge",
+]
 
 
 class LinuxPcAgent(PcAgentServer):
@@ -48,7 +60,10 @@ class LinuxPcAgent(PcAgentServer):
         token = auth_token or get_agent_token("ananuke")
         self.mock_mode = mock_mode or is_mock_mode()
         self.audio_backend = self._detectar_backend_audio()
-        self.desktop_env = (desktop_env or self._detectar_ambiente_desktop()).lower()
+        if desktop_env and desktop_env.strip().lower() not in ("auto", ""):
+            self.desktop_env = desktop_env.strip().lower()
+        else:
+            self.desktop_env = self._detectar_ambiente_desktop().lower()
         # Nível de volume simulado em testes (0.0 a 1.0)
         self._sim_volume = 0.50
         self._sim_muted = False
@@ -105,6 +120,19 @@ class LinuxPcAgent(PcAgentServer):
                 )
                 if res_xfce.returncode == 0 and res_xfce.stdout.strip():
                     return "xfce"
+        except Exception:
+            pass
+
+        # Heurística complementar por processo ativo caso UID seja root ou isolado
+        try:
+            res_all_gnome = subprocess.run(
+                ["pgrep", "-x", "gnome-shell"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if res_all_gnome.returncode == 0 and res_all_gnome.stdout.strip():
+                return "gnome"
         except Exception:
             pass
 
@@ -228,60 +256,66 @@ class LinuxPcAgent(PcAgentServer):
     def _acao_bloquear(self, params: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], Optional[str], str]:
         if not self.mock_mode:
             env = self._obter_env_sessao()
-            cmd: Optional[List[str]] = None
+            candidatos: List[List[str]] = []
 
             if self.desktop_env == "gnome":
                 # Mecanismos de bloqueio confiáveis para GNOME Shell
-                if shutil.which("dbus-send"):
-                    cmd = [
+                candidatos = [
+                    [
                         "dbus-send",
                         "--session",
                         "--type=method_call",
                         "--dest=org.gnome.ScreenSaver",
                         "/org/gnome/ScreenSaver",
                         "org.gnome.ScreenSaver.Lock",
-                    ]
-                elif shutil.which("loginctl"):
-                    cmd = ["loginctl", "lock-session"]
-                elif shutil.which("gnome-screensaver-command"):
-                    cmd = ["gnome-screensaver-command", "-l"]
-                elif shutil.which("xdg-screensaver"):
-                    cmd = ["xdg-screensaver", "lock"]
+                    ],
+                    ["loginctl", "lock-session"],
+                    ["gnome-screensaver-command", "-l"],
+                    ["xdg-screensaver", "lock"],
+                ]
             elif self.desktop_env == "xfce":
                 # Mecanismos de bloqueio para Xfce
-                if shutil.which("xflock4"):
-                    cmd = ["xflock4"]
-                elif shutil.which("xfce4-screensaver-command"):
-                    cmd = ["xfce4-screensaver-command", "-l"]
-                elif shutil.which("xdg-screensaver"):
-                    cmd = ["xdg-screensaver", "lock"]
-                elif shutil.which("loginctl"):
-                    cmd = ["loginctl", "lock-session"]
+                candidatos = [
+                    ["xflock4"],
+                    ["xfce4-screensaver-command", "-l"],
+                    ["loginctl", "lock-session"],
+                    ["xdg-screensaver", "lock"],
+                ]
             else:
                 # Fallback genérico para outros ambientes
-                if shutil.which("loginctl"):
-                    cmd = ["loginctl", "lock-session"]
-                elif shutil.which("dbus-send"):
-                    cmd = [
+                candidatos = [
+                    [
                         "dbus-send",
                         "--session",
                         "--type=method_call",
                         "--dest=org.gnome.ScreenSaver",
                         "/org/gnome/ScreenSaver",
                         "org.gnome.ScreenSaver.Lock",
-                    ]
-                elif shutil.which("xflock4"):
-                    cmd = ["xflock4"]
-                elif shutil.which("xdg-screensaver"):
-                    cmd = ["xdg-screensaver", "lock"]
+                    ],
+                    ["xflock4"],
+                    ["loginctl", "lock-session"],
+                    ["gnome-screensaver-command", "-l"],
+                    ["xfce4-screensaver-command", "-l"],
+                    ["xdg-screensaver", "lock"],
+                ]
 
-            if not cmd:
+            valid_candidates = [c for c in candidatos if shutil.which(c[0])]
+            if not valid_candidates:
                 return False, {}, "bloqueador_nao_encontrado", "Nenhuma ferramenta de bloqueio de sessão encontrada."
 
-            try:
-                subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception as e:
-                return False, {}, f"erro_bloqueio: {e}", "Falha ao bloquear a sessão no Ananuke."
+            sucesso = False
+            ultimo_erro = None
+            for cmd in valid_candidates:
+                try:
+                    subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    sucesso = True
+                    break
+                except Exception as e:
+                    ultimo_erro = e
+                    logger.warning("Falha ao invocar comando de bloqueio %s: %s", cmd[0], e)
+
+            if not sucesso:
+                return False, {}, f"erro_bloqueio: {ultimo_erro}", "Falha ao bloquear a sessão no Ananuke."
 
         return (
             True,
@@ -702,6 +736,7 @@ def main() -> None:
     parser.add_argument("--allowed-ips", default=None, help="IPs autorizados separados por vírgula (ex: 192.168.0.126,127.0.0.1)")
     parser.add_argument("--cert", default=None, help="Caminho do certificado TLS (.crt)")
     parser.add_argument("--key", default=None, help="Caminho da chave privada TLS (.key)")
+    parser.add_argument("--mock", action="store_true", help="Forçar modo simulado de ações")
     parser.add_argument(
         "--desktop",
         choices=["auto", "gnome", "xfce"],
