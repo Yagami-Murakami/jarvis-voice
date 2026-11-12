@@ -15,32 +15,62 @@ import app as painel
 
 from gateway.ipc_bus import DEFAULT_IPC_SOCKET, IpcEventListener
 
+# Suporte ao módulo Jarvis PC Control V1
+_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
+
+try:
+    from pc_control.catalog import (
+        ALL_COMMANDS,
+        CONFIRMATION_PHRASES,
+        VOSK_GRAMMAR,
+        is_pc_control_action,
+        requires_confirmation,
+        is_valid_confirmation,
+        get_friendly_target_name,
+        get_friendly_action_name,
+    )
+    from pc_control.config import is_pc_control_enabled
+    from pc_control.dispatcher import PcControlDispatcher
+    COMANDOS = ALL_COMMANDS
+    gramatica = VOSK_GRAMMAR
+    pc_dispatcher = PcControlDispatcher()
+    _PC_CONTROL_AVAILABLE = True
+except ImportError:
+    COMANDOS = {
+        "ligar fusion": ("ligar", "fusion"),
+        "ligar o fusion": ("ligar", "fusion"),
+        "desligar fusion": ("desligar", "fusion"),
+        "desligar o fusion": ("desligar", "fusion"),
+        "ligar computador dois": ("ligar", "ananuke"),
+        "ligar ana no que": ("ligar", "ananuke"),
+        "ligar o computador dois": ("ligar", "ananuke"),
+        "desligar computador dois": ("desligar", "ananuke"),
+        "desligar ana no que": ("desligar", "ananuke"),
+        "desligar o computador dois": ("desligar", "ananuke"),
+    }
+    gramatica = [
+        "assistente",
+        "confirmar",
+        "confirmar desligar",
+        "confirmar desligamento",
+        "cancelar",
+        *COMANDOS.keys(),
+        "[unk]"
+    ]
+    def is_pc_control_action(a): return False
+    def requires_confirmation(a): return a == "desligar"
+    def is_valid_confirmation(t, a=None): return t in ("confirmar", "confirmar desligar", "confirmar desligamento")
+    def is_pc_control_enabled(): return False
+    def get_friendly_target_name(t): return t
+    def get_friendly_action_name(a): return a
+    pc_dispatcher = None
+    _PC_CONTROL_AVAILABLE = False
+
 SetLogLevel(-1)
 
 MODELO = "/opt/jarvis-voice/vosk-model-small-pt-0.3"
-
-COMANDOS = {
-    "ligar fusion": ("ligar", "fusion"),
-    "ligar o fusion": ("ligar", "fusion"),
-    "desligar fusion": ("desligar", "fusion"),
-    "desligar o fusion": ("desligar", "fusion"),
-    "ligar computador dois": ("ligar", "ananuke"),
-    "ligar ana no que": ("ligar", "ananuke"),
-    "ligar o computador dois": ("ligar", "ananuke"),
-    "desligar computador dois": ("desligar", "ananuke"),
-    "desligar ana no que": ("desligar", "ananuke"),
-    "desligar o computador dois": ("desligar", "ananuke"),
-}
-
-gramatica = [
-    "assistente",
-    "confirmar",
-    "confirmar desligar",
-    "confirmar desligamento",
-    "cancelar",
-    *COMANDOS.keys(),
-    "[unk]"
-]
 
 if Model is not None and os.path.exists(MODELO):
     modelo = Model(MODELO)
@@ -55,6 +85,7 @@ else:
 estado = "espera"
 limite = 0.0
 pendente = None
+pendente_acao = None
 ultima_ativacao = 0.0
 fonte_ativa = None
 sessao_ativa_id = None
@@ -504,7 +535,7 @@ _recuperar_estado_na_inicializacao()
 
 
 def processar(texto, fonte="me6s", session_id=None, event_id=None):
-    global estado, limite, pendente, ultima_ativacao, fonte_ativa, sessao_ativa_id
+    global estado, limite, pendente, pendente_acao, ultima_ativacao, fonte_ativa, sessao_ativa_id
 
     agora = time.monotonic()
 
@@ -532,6 +563,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
         print("Tempo esgotado; pedido cancelado.", flush=True)
         estado = "espera"
         pendente = None
+        pendente_acao = None
         fonte_ativa = None
         sessao_ativa_id = None
 
@@ -543,6 +575,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
     if texto == "cancelar":
         estado = "espera"
         pendente = None
+        pendente_acao = None
         fonte_ativa = None
         sessao_ativa_id = None
         ultima_ativacao = 0.0
@@ -640,6 +673,126 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
         srv = painel.SERVIDORES[alvo]
 
         print("Computador:", srv["nome"], flush=True)
+
+        if is_pc_control_action(acao):
+            if not is_pc_control_enabled():
+                print(f"[PC-CONTROL-DESATIVADO] Comando '{acao}' para '{alvo}' ignorado pois JARVIS_PC_CONTROL_ENABLED=0.", flush=True)
+                estado = "espera"
+                fonte_ativa = None
+                sessao_ativa_id = None
+                pendente = None
+                pendente_acao = None
+                if event_id:
+                    atualizar_status_acao(
+                        event_id,
+                        "cancelado",
+                        acao=acao,
+                        alvo=alvo,
+                        erro="pc_control_desativado",
+                    )
+                return {
+                    "sucesso": False,
+                    "erro": "pc_control_desativado",
+                    "event_id": event_id,
+                    "acao": acao,
+                    "alvo": alvo,
+                    "active_session_id": None,
+                    "estado": "espera",
+                    "status": "cancelado",
+                    "processado": True,
+                }
+
+            if requires_confirmation(acao):
+                estado = "confirmacao"
+                pendente = alvo
+                pendente_acao = acao
+                limite = time.monotonic() + 20
+                if acao == "fechar_navegador":
+                    msg_aviso = f'Confirme fechar navegador em {srv["nome"]}: diga "confirmar" ou "cancelar".'
+                else:
+                    msg_aviso = f'Confirme reinicialização de {srv["nome"]}: diga "confirmar" ou "cancelar".'
+                print(msg_aviso, flush=True)
+                if event_id:
+                    atualizar_status_acao(
+                        event_id,
+                        "confirmacao_pendente",
+                        acao=acao,
+                        alvo=alvo,
+                        resultado={"estado": "confirmacao"}
+                    )
+                return {
+                    "sucesso": True,
+                    "status": "confirmacao_pendente",
+                    "event_id": event_id,
+                    "acao": f"{acao}_pendente",
+                    "alvo": alvo,
+                    "active_session_id": sessao_ativa_id,
+                    "estado": "confirmacao",
+                    "processado": True,
+                }
+
+            # Ação de PC Control imediata
+            if ja_executado_recentemente(acao, alvo):
+                print(f"Acao '{acao}' para {alvo} descartada por idempotencia.", flush=True)
+                estado = "espera"
+                fonte_ativa = None
+                sessao_ativa_id = None
+                pendente = None
+                pendente_acao = None
+                return {
+                    "sucesso": True,
+                    "event_id": event_id,
+                    "acao": acao,
+                    "alvo": alvo,
+                    "deduplicado": True,
+                    "active_session_id": None,
+                    "estado": "espera",
+                    "status": "concluido",
+                    "processado": True,
+                }
+
+            registrar_acao(acao, alvo)
+            if event_id:
+                registrar_inicio_acao(event_id, acao, alvo, status="em_processamento")
+
+            salvo_sid = session_id or sessao_ativa_id
+            estado = "espera"
+            fonte_ativa = None
+            sessao_ativa_id = None
+            pendente = None
+            pendente_acao = None
+
+            res_disp = pc_dispatcher.processar_comando_ou_confirmacao(
+                acao=acao,
+                alvo=alvo,
+                texto_falado=texto,
+                session_id=salvo_sid,
+                event_id=event_id or f"ev-pc-{int(time.time()*1000)}",
+                fonte=fonte,
+            ) if pc_dispatcher else {"sucesso": False, "status": "falha", "erro": "dispatcher_indisponivel"}
+
+            print(f"PC Control: {res_disp.get('mensagem_amigavel', '')}", flush=True)
+            if event_id:
+                atualizar_status_acao(
+                    event_id,
+                    res_disp.get("status", "concluido"),
+                    acao=acao,
+                    alvo=alvo,
+                    resultado=res_disp.get("resultado"),
+                    erro=res_disp.get("erro"),
+                )
+            return {
+                "sucesso": res_disp.get("sucesso", False),
+                "event_id": event_id,
+                "acao": acao,
+                "alvo": alvo,
+                "active_session_id": None,
+                "estado": "espera",
+                "status": res_disp.get("status", "concluido"),
+                "resultado": res_disp.get("resultado"),
+                "erro": res_disp.get("erro"),
+                "processado": True,
+            }
 
         if acao == "ligar":
             # Deduplicação na camada de ação (idempotência do WoL)
@@ -814,6 +967,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
 
         estado = "confirmacao"
         pendente = alvo
+        pendente_acao = "desligar"
         limite = time.monotonic() + 20
         print(
             f'Confirme desligamento de {srv["nome"]}: diga "confirmar desligamento" ou "cancelar".',
@@ -840,7 +994,12 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
 
     if estado == "confirmacao":
         if texto == "assistente":
-            print("Aguardando confirmacao de desligamento.", flush=True)
+            msg_aguardo = "desligamento"
+            if pendente_acao == "fechar_navegador":
+                msg_aguardo = "fechar navegador"
+            elif pendente_acao == "reiniciar":
+                msg_aguardo = "reinicialização"
+            print(f"Aguardando confirmacao de {msg_aguardo}.", flush=True)
             return {
                 "sucesso": True,
                 "event_id": event_id,
@@ -862,6 +1021,68 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
                 "estado": estado,
                 "status": "falha",
                 "processado": False,
+            }
+
+        # Confirmações específicas do PC Control (fechar navegador e reiniciar)
+        if pendente_acao in ("fechar_navegador", "reiniciar"):
+            if not is_valid_confirmation(texto, pendente_acao):
+                print("Confirmacao insuficiente. Pedido cancelado.", flush=True)
+                alvo_falha = pendente
+                acao_falha = pendente_acao
+                estado = "espera"
+                pendente = None
+                pendente_acao = None
+                fonte_ativa = None
+                sessao_ativa_id = None
+                if event_id:
+                    atualizar_status_acao(event_id, "falha", acao=acao_falha, alvo=alvo_falha, erro="confirmacao_insuficiente")
+                return {
+                    "sucesso": False,
+                    "erro": "confirmacao_insuficiente",
+                    "event_id": event_id,
+                    "active_session_id": None,
+                    "estado": "espera",
+                    "status": "falha",
+                    "processado": True,
+                }
+
+            alvo_confirmado = pendente
+            acao_confirmada = pendente_acao
+            estado = "espera"
+            pendente = None
+            pendente_acao = None
+            fonte_ativa = None
+            sessao_ativa_id = None
+
+            res_disp = pc_dispatcher.client.enviar_comando(
+                alvo=alvo_confirmado,
+                acao=acao_confirmada,
+                event_id=event_id or f"ev-pc-{int(time.time()*1000)}",
+                session_id=session_id,
+                fonte=fonte,
+            ) if pc_dispatcher else {"sucesso": False, "status": "falha", "erro": "dispatcher_indisponivel"}
+
+            print(f"PC Control: {res_disp.get('mensagem_amigavel', '')}", flush=True)
+            if event_id:
+                atualizar_status_acao(
+                    event_id,
+                    res_disp.get("status", "concluido"),
+                    acao=acao_confirmada,
+                    alvo=alvo_confirmado,
+                    resultado=res_disp.get("resultado"),
+                    erro=res_disp.get("erro"),
+                )
+            return {
+                "sucesso": res_disp.get("status") == "concluido",
+                "event_id": event_id,
+                "acao": acao_confirmada,
+                "alvo": alvo_confirmado,
+                "active_session_id": None,
+                "estado": "espera",
+                "status": res_disp.get("status", "concluido"),
+                "resultado": res_disp.get("resultado"),
+                "erro": res_disp.get("erro"),
+                "processado": True,
             }
 
         if texto in ("confirmar", "confirmar desligar", "confirmar desligamento"):
@@ -954,14 +1175,12 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
 
                 # Disparo da ação SSH em thread dedicada para não bloquear o IPC nem o loop principal
                 def _executar_ssh_worker(srv_info, conf, ev_id, alvo_nome):
+                    token_consumido = False
+                    dados_token = None
                     try:
                         cmd = painel.montar_comando_ssh(conf) if hasattr(painel, "montar_comando_ssh") else None
                         alvo_worker_autorizado = alvo_real_permitido(alvo_nome)
                         modo_ssh_env = (os.getenv("JARVIS_SSH_REAL") == "1")
-
-                        # Proteção de Execução Única (One-Shot Token)
-                        token_consumido = False
-                        dados_token = None
                         if modo_ssh_env and alvo_worker_autorizado:
                             req_token = token_one_shot_requerido()
                             if req_token:
@@ -1079,6 +1298,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
             estado = "espera"
             alvo_confirmado = pendente
             pendente = None
+            pendente_acao = None
             fonte_ativa = None
             sessao_ativa_id = None
             ultima_ativacao = 0.0
@@ -1097,7 +1317,7 @@ def processar(texto, fonte="me6s", session_id=None, event_id=None):
 
 # --- Barramento IPC Local por UNIX Domain Socket com Confirmação Confiável de Processamento ---
 def on_ipc_event(evento):
-    global estado, sessao_ativa_id, pendente, limite, ultima_ativacao, fonte_ativa
+    global estado, sessao_ativa_id, pendente, pendente_acao, limite, ultima_ativacao, fonte_ativa
     if not isinstance(evento, dict):
         return {"sucesso": False, "erro": "payload_invalido", "processado": False}
     if evento.get("versao") != 1:
@@ -1147,7 +1367,7 @@ def on_ipc_event(evento):
         return {"sucesso": False, "erro": "wake_deve_ser_assistente", "processado": False}
     if tipo == "cancelar" and texto != "cancelar":
         return {"sucesso": False, "erro": "cancelar_deve_ser_cancelar", "processado": False}
-    if tipo == "confirmar" and texto not in ("confirmar", "confirmar desligar", "confirmar desligamento"):
+    if tipo == "confirmar" and not is_valid_confirmation(texto):
         return {"sucesso": False, "erro": "confirmacao_invalida", "processado": False}
     if tipo == "comando" and texto not in COMANDOS and texto != "dois ligar fusion":
         return {"sucesso": False, "erro": "comando_desconhecido", "processado": False}
@@ -1224,12 +1444,13 @@ def on_ipc_event(evento):
             # Deduplicação de comando reconhecido simultaneamente por ambos os microfones
             if texto in COMANDOS:
                 acao_cand, alvo_cand = COMANDOS[texto]
-                if estado == "confirmacao" and acao_cand == "desligar" and alvo_cand == pendente:
+                acao_pend_esp = pendente_acao or "desligar"
+                if estado == "confirmacao" and acao_cand == acao_pend_esp and alvo_cand == pendente:
                     print(f"IPC: Comando '{texto}' deduplicado (confirmacao ja pendente para '{pendente}').", flush=True)
                     return {
                         "sucesso": True,
                         "event_id": event_id,
-                        "acao": "desligar_pendente",
+                        "acao": f"{acao_cand}_pendente",
                         "alvo": pendente,
                         "deduplicado": True,
                         "active_session_id": sessao_ativa_id,
@@ -1274,13 +1495,14 @@ def on_ipc_event(evento):
     if tipo == "confirmar":
         if estado != "confirmacao" or pendente is None:
             # Deduplicação de confirmação reconhecida simultaneamente por ambos os microfones
+            acao_conf_chk = pendente_acao or "desligar"
             for alvo_chk in ("fusion", "ananuke"):
-                if ja_executado_recentemente("desligar", alvo_chk):
-                    print(f"IPC: Confirmacao de desligamento para '{alvo_chk}' deduplicada (ja executada recentemente).", flush=True)
+                if ja_executado_recentemente(acao_conf_chk, alvo_chk):
+                    print(f"IPC: Confirmacao de {acao_conf_chk} para '{alvo_chk}' deduplicada (ja executada recentemente).", flush=True)
                     return {
                         "sucesso": True,
                         "event_id": event_id,
-                        "acao": "desligar",
+                        "acao": acao_conf_chk,
                         "alvo": alvo_chk,
                         "deduplicado": True,
                         "active_session_id": None,
