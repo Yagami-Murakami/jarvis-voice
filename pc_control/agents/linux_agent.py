@@ -198,30 +198,235 @@ class LinuxPcAgent(PcAgentServer):
 
         return handler(params)
 
+    def _obter_navegador_padrao_desktop(self) -> Optional[str]:
+        """Obtém dinamicamente o arquivo .desktop do navegador padrão configurado no sistema.
+
+        Prioriza xdg-settings (padrão freedesktop/GNOME) e faz fallback para xdg-mime e gio mime.
+        Não fixa 'firefox-esr.desktop' no código para manter suporte dinâmico a Chrome, Chromium, Brave, Edge, etc.
+        """
+        env = self._obter_env_sessao()
+
+        # 1. xdg-settings get default-web-browser
+        if shutil.which("xdg-settings"):
+            try:
+                res = subprocess.run(
+                    ["xdg-settings", "get", "default-web-browser"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    env=env,
+                )
+                if res.returncode == 0:
+                    app = res.stdout.strip().strip("'\"")
+                    if app:
+                        return app if app.endswith(".desktop") else f"{app}.desktop"
+            except Exception as e:
+                logger.debug("Falha ao consultar xdg-settings: %s", e)
+
+        # 2. xdg-mime query default x-scheme-handler/http
+        if shutil.which("xdg-mime"):
+            try:
+                res = subprocess.run(
+                    ["xdg-mime", "query", "default", "x-scheme-handler/http"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    env=env,
+                )
+                if res.returncode == 0:
+                    app = res.stdout.strip().strip("'\"")
+                    if app:
+                        return app if app.endswith(".desktop") else f"{app}.desktop"
+            except Exception as e:
+                logger.debug("Falha ao consultar xdg-mime (x-scheme-handler/http): %s", e)
+
+        # 3. xdg-mime query default text/html
+        if shutil.which("xdg-mime"):
+            try:
+                res = subprocess.run(
+                    ["xdg-mime", "query", "default", "text/html"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    env=env,
+                )
+                if res.returncode == 0:
+                    app = res.stdout.strip().strip("'\"")
+                    if app:
+                        return app if app.endswith(".desktop") else f"{app}.desktop"
+            except Exception as e:
+                logger.debug("Falha ao consultar xdg-mime (text/html): %s", e)
+
+        # 4. gio mime x-scheme-handler/http
+        if shutil.which("gio"):
+            try:
+                res = subprocess.run(
+                    ["gio", "mime", "x-scheme-handler/http"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    env=env,
+                )
+                if res.returncode == 0 and res.stdout:
+                    for line in res.stdout.splitlines():
+                        if ".desktop" in line:
+                            for token in line.split():
+                                token = token.strip(":,()“”\"'")
+                                if token.endswith(".desktop"):
+                                    return token
+            except Exception as e:
+                logger.debug("Falha ao consultar gio mime: %s", e)
+
+        return None
+
+    def _executar_comando_abertura(
+        self, cmd: List[str], env: Dict[str, str], timeout_check: float = 0.4
+    ) -> Tuple[bool, Optional[str]]:
+        """Executa um comando lançador/navegador e valida retorno e erros imediatos."""
+        is_launcher = bool(cmd and cmd[0] in ("gtk-launch", "xdg-open", "exo-open", "gio"))
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE if is_launcher else subprocess.DEVNULL,
+                text=True,
+            )
+        except Exception as e:
+            logger.warning("Falha ao invocar processo %s: %s", cmd, e)
+            return False, str(e)
+
+        try:
+            if is_launcher:
+                comm_res = proc.communicate(timeout=timeout_check)
+                if isinstance(comm_res, tuple) and len(comm_res) == 2:
+                    stdout_text, stderr_text = comm_res
+                else:
+                    stdout_text, stderr_text = "", ""
+
+                rc = proc.returncode
+                if isinstance(rc, int) and rc != 0:
+                    err_msg = str(stderr_text or stdout_text or f"código de saída {rc}").strip()
+                    logger.warning("Lançador %s falhou com código %d: %s", cmd, rc, err_msg)
+                    return False, f"codigo_{rc}: {err_msg}"
+                return True, None
+            else:
+                try:
+                    rc = proc.wait(timeout=timeout_check)
+                    if isinstance(rc, int) and rc != 0:
+                        logger.warning("Processo %s falhou com código %d", cmd, rc)
+                        return False, f"codigo_{rc}"
+                    return True, None
+                except subprocess.TimeoutExpired:
+                    # Processo direto continua em execução saudável após timeout
+                    return True, None
+        except subprocess.TimeoutExpired:
+            logger.warning("Timeout aguardando lançador %s", cmd)
+            return False, f"timeout aguardando lançador {cmd[0]}"
+        except Exception as e:
+            logger.warning("Erro ao executar %s: %s", cmd, e)
+            return False, str(e)
+
     # 1. Abrir navegador
     def _acao_abrir_navegador(self, params: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], Optional[str], str]:
-        url = "about:blank"
+        url = params.get("url", "about:blank")
         if not self.mock_mode:
             env = self._obter_env_sessao()
-            cmd = None
-            if self.desktop_env == "xfce" and shutil.which("exo-open"):
-                cmd = ["exo-open", "--launch", "WebBrowser", url]
-            elif shutil.which("xdg-open"):
-                cmd = ["xdg-open", url]
-            elif shutil.which("gio"):
-                cmd = ["gio", "open", url]
-            elif shutil.which("exo-open"):
-                cmd = ["exo-open", "--launch", "WebBrowser", url]
-            elif shutil.which("x-www-browser"):
-                cmd = ["x-www-browser", url]
+            default_app = self._obter_navegador_padrao_desktop()
 
-            if not cmd:
+            candidatos: List[List[str]] = []
+
+            def _adicionar_candidato(c: List[str]):
+                if c and c not in candidatos:
+                    candidatos.append(c)
+
+            # Argumentos para gtk-launch: abre sem URL se for about:blank para evitar erro GIO/gvfs
+            gtk_args = [default_app] if default_app else []
+            if default_app and url and url != "about:blank":
+                gtk_args.append(url)
+
+            if self.desktop_env == "xfce":
+                # No Xfce, prioriza exo-open
+                if shutil.which("exo-open"):
+                    _adicionar_candidato(["exo-open", "--launch", "WebBrowser", url])
+                if default_app and shutil.which("gtk-launch"):
+                    _adicionar_candidato(["gtk-launch"] + gtk_args)
+                if shutil.which("x-www-browser"):
+                    _adicionar_candidato(["x-www-browser"])
+                if default_app:
+                    bin_cand = default_app[:-8] if default_app.endswith(".desktop") else default_app
+                    if shutil.which(bin_cand):
+                        _adicionar_candidato([bin_cand])
+                if shutil.which("xdg-open"):
+                    _adicionar_candidato(["xdg-open", url])
+                if shutil.which("gio"):
+                    _adicionar_candidato(["gio", "open", url])
+            elif self.desktop_env == "gnome":
+                # 1. No GNOME, prioriza lançador padrão configurado no sistema (xdg-settings + gtk-launch)
+                if default_app and shutil.which("gtk-launch"):
+                    _adicionar_candidato(["gtk-launch"] + gtk_args)
+                # 2. x-www-browser (alternativas Debian sem URL problemática)
+                if shutil.which("x-www-browser"):
+                    _adicionar_candidato(["x-www-browser"])
+                # 3. Binário direto derivado do .desktop se presente no PATH
+                if default_app:
+                    bin_cand = default_app[:-8] if default_app.endswith(".desktop") else default_app
+                    if shutil.which(bin_cand):
+                        _adicionar_candidato([bin_cand])
+                # 4. Fallbacks freedesktop (tratando erro para impedir falso positivo se GIO rejeitar url)
+                if shutil.which("xdg-open"):
+                    _adicionar_candidato(["xdg-open", url])
+                if shutil.which("gio"):
+                    _adicionar_candidato(["gio", "open", url])
+                if shutil.which("exo-open"):
+                    _adicionar_candidato(["exo-open", "--launch", "WebBrowser", url])
+            else:
+                # Ambientes não especificados ou desconhecidos
+                if default_app and shutil.which("gtk-launch"):
+                    _adicionar_candidato(["gtk-launch"] + gtk_args)
+                if shutil.which("exo-open"):
+                    _adicionar_candidato(["exo-open", "--launch", "WebBrowser", url])
+                if shutil.which("x-www-browser"):
+                    _adicionar_candidato(["x-www-browser"])
+                if default_app:
+                    bin_cand = default_app[:-8] if default_app.endswith(".desktop") else default_app
+                    if shutil.which(bin_cand):
+                        _adicionar_candidato([bin_cand])
+                if shutil.which("xdg-open"):
+                    _adicionar_candidato(["xdg-open", url])
+                if shutil.which("gio"):
+                    _adicionar_candidato(["gio", "open", url])
+
+            if not candidatos:
                 return False, {}, "navegador_nao_encontrado", "Nenhum navegador padrão encontrado no sistema."
 
-            try:
-                subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception as e:
-                return False, {}, f"erro_abrir_navegador: {e}", "Falha ao abrir navegador no Ananuke."
+            sucesso = False
+            comando_usado = None
+            ultimo_erro = None
+
+            for cmd in candidatos:
+                ok, err = self._executar_comando_abertura(cmd, env)
+                if ok:
+                    sucesso = True
+                    comando_usado = cmd
+                    break
+                else:
+                    ultimo_erro = err
+
+            if not sucesso:
+                return (
+                    False,
+                    {},
+                    f"erro_abrir_navegador: {ultimo_erro}",
+                    "Falha ao abrir navegador no Ananuke.",
+                )
+
+            return (
+                True,
+                {"url": url, "comando": comando_usado, "simulado": False},
+                None,
+                "Navegador padrão aberto no Ananuke.",
+            )
 
         return True, {"url": url, "simulado": self.mock_mode}, None, "Navegador padrão aberto no Ananuke."
 

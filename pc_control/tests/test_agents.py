@@ -597,6 +597,196 @@ class TestLinuxPcAgent(unittest.TestCase):
         finally:
             self.agent.mock_mode = True
 
+    def test_18_browser_launch_gnome_gtk_launch_default(self):
+        """Valida que no GNOME o lançador padrão configurado (xdg-settings + gtk-launch) tem prioridade máxima."""
+        self.agent.mock_mode = False
+        try:
+            self.agent.desktop_env = "gnome"
+            which_map = {
+                "gtk-launch": "/usr/bin/gtk-launch",
+                "xdg-settings": "/usr/bin/xdg-settings",
+                "xdg-open": "/usr/bin/xdg-open",
+                "x-www-browser": "/usr/bin/x-www-browser",
+            }
+
+            def fake_run(cmd, **kwargs):
+                if cmd[:2] == ["xdg-settings", "get"]:
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="firefox-esr.desktop\n")
+                return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+
+            mock_proc = MagicMock()
+            mock_proc.returncode = 0
+            mock_proc.communicate.return_value = ("", "")
+
+            with patch("shutil.which", side_effect=lambda x: which_map.get(x)):
+                with patch("subprocess.run", side_effect=fake_run):
+                    with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+                        ok, res, erro, msg = self.agent.executar_acao("abrir_navegador", {}, "ev-gtk-default")
+                        self.assertTrue(ok)
+                        self.assertIsNone(erro)
+                        self.assertIn("Navegador padrão aberto no Ananuke.", msg)
+                        mock_popen.assert_called_once()
+                        # Dispara gtk-launch sem about:blank para evitar erro no GIO
+                        self.assertEqual(mock_popen.call_args[0][0], ["gtk-launch", "firefox-esr.desktop"])
+        finally:
+            self.agent.mock_mode = True
+
+    def test_19_browser_launch_gnome_dynamic_non_firefox(self):
+        """Garante que a abertura do navegador é dinâmica e funciona para Google Chrome sem fixar Firefox ESR."""
+        self.agent.mock_mode = False
+        try:
+            self.agent.desktop_env = "gnome"
+            which_map = {
+                "gtk-launch": "/usr/bin/gtk-launch",
+                "xdg-settings": "/usr/bin/xdg-settings",
+            }
+
+            def fake_run(cmd, **kwargs):
+                if cmd[:2] == ["xdg-settings", "get"]:
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="google-chrome.desktop\n")
+                return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+
+            mock_proc = MagicMock()
+            mock_proc.returncode = 0
+            mock_proc.communicate.return_value = ("", "")
+
+            with patch("shutil.which", side_effect=lambda x: which_map.get(x)):
+                with patch("subprocess.run", side_effect=fake_run):
+                    with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+                        ok, res, erro, msg = self.agent.executar_acao("abrir_navegador", {}, "ev-gtk-chrome")
+                        self.assertTrue(ok)
+                        mock_popen.assert_called_once()
+                        self.assertEqual(mock_popen.call_args[0][0], ["gtk-launch", "google-chrome.desktop"])
+        finally:
+            self.agent.mock_mode = True
+
+    def test_20_browser_launch_gnome_gtk_launch_failure_fallback_x_www_browser(self):
+        """Valida que quando gtk-launch falha com código != 0, o agente faz fallback para x-www-browser sem falso positivo."""
+        self.agent.mock_mode = False
+        try:
+            self.agent.desktop_env = "gnome"
+            which_map = {
+                "gtk-launch": "/usr/bin/gtk-launch",
+                "xdg-settings": "/usr/bin/xdg-settings",
+                "x-www-browser": "/usr/bin/x-www-browser",
+            }
+
+            def fake_run(cmd, **kwargs):
+                if cmd[:2] == ["xdg-settings", "get"]:
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="firefox-esr.desktop\n")
+                return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+
+            def fake_popen(cmd, **kwargs):
+                proc = MagicMock()
+                if cmd[0] == "gtk-launch":
+                    proc.returncode = 2
+                    proc.communicate.return_value = ("", "gtk-launch: nenhum aplicativo")
+                elif cmd[0] == "x-www-browser":
+                    proc.returncode = 0
+                    proc.wait.return_value = 0
+                return proc
+
+            with patch("shutil.which", side_effect=lambda x: which_map.get(x)):
+                with patch("subprocess.run", side_effect=fake_run):
+                    with patch("subprocess.Popen", side_effect=fake_popen) as mock_popen:
+                        ok, res, erro, msg = self.agent.executar_acao("abrir_navegador", {}, "ev-fallback-xwww")
+                        self.assertTrue(ok)
+                        self.assertIsNone(erro)
+                        self.assertEqual(res.get("comando"), ["x-www-browser"])
+                        self.assertEqual(mock_popen.call_count, 2)
+                        # Primeira tentativa: gtk-launch (falhou código 2)
+                        self.assertEqual(mock_popen.call_args_list[0][0][0], ["gtk-launch", "firefox-esr.desktop"])
+                        # Segunda tentativa: x-www-browser (sucesso)
+                        self.assertEqual(mock_popen.call_args_list[1][0][0], ["x-www-browser"])
+        finally:
+            self.agent.mock_mode = True
+
+    def test_21_browser_launch_gio_about_blank_failure_no_false_positive(self):
+        """Valida que o erro 4 do GIO (about:blank não suportado) é tratado e impede falso positivo se todos falharem."""
+        self.agent.mock_mode = False
+        try:
+            self.agent.desktop_env = "gnome"
+            which_map = {
+                "xdg-open": "/usr/bin/xdg-open",
+                "gio": "/usr/bin/gio",
+            }
+
+            def fake_popen(cmd, **kwargs):
+                proc = MagicMock()
+                proc.returncode = 4
+                proc.communicate.return_value = ("", "gio: about:blank: Não há suporte à localização especificada")
+                return proc
+
+            with patch("shutil.which", side_effect=lambda x: which_map.get(x)):
+                with patch("subprocess.Popen", side_effect=fake_popen):
+                    ok, res, erro, msg = self.agent.executar_acao("abrir_navegador", {}, "ev-gio-code4")
+                    self.assertFalse(ok)
+                    self.assertIn("codigo_4", erro)
+                    self.assertIn("Não há suporte à localização especificada", erro)
+                    self.assertEqual(msg, "Falha ao abrir navegador no Ananuke.")
+        finally:
+            self.agent.mock_mode = True
+
+    def test_22_obter_navegador_padrao_desktop_resolution_chain(self):
+        """Valida a cadeia de resolução: xdg-settings -> xdg-mime http -> gio mime -> None."""
+        # 1. xdg-settings disponível
+        with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x == "xdg-settings" else None):
+            with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "brave-browser.desktop\n")):
+                app = self.agent._obter_navegador_padrao_desktop()
+                self.assertEqual(app, "brave-browser.desktop")
+
+        # 2. xdg-settings ausente ou falho, xdg-mime com sucesso
+        def fake_run_mime(cmd, **kwargs):
+            if cmd[0] == "xdg-settings":
+                return subprocess.CompletedProcess(cmd, 1, "")
+            if cmd[:2] == ["xdg-mime", "query"]:
+                return subprocess.CompletedProcess(cmd, 0, "chromium.desktop\n")
+            return subprocess.CompletedProcess(cmd, 1, "")
+
+        with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x in ("xdg-settings", "xdg-mime") else None):
+            with patch("subprocess.run", side_effect=fake_run_mime):
+                app = self.agent._obter_navegador_padrao_desktop()
+                self.assertEqual(app, "chromium.desktop")
+
+        # 3. Todos falham -> retorna None
+        with patch("shutil.which", return_value=None):
+            app = self.agent._obter_navegador_padrao_desktop()
+            self.assertIsNone(app)
+
+    def test_23_browser_launch_with_explicit_url(self):
+        """Valida que quando uma URL explícita é fornecida, gtk-launch a inclui como argumento."""
+        self.agent.mock_mode = False
+        try:
+            self.agent.desktop_env = "gnome"
+            which_map = {
+                "gtk-launch": "/usr/bin/gtk-launch",
+                "xdg-settings": "/usr/bin/xdg-settings",
+            }
+
+            def fake_run(cmd, **kwargs):
+                if cmd[:2] == ["xdg-settings", "get"]:
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="firefox-esr.desktop\n")
+                return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+
+            mock_proc = MagicMock()
+            mock_proc.returncode = 0
+            mock_proc.communicate.return_value = ("", "")
+
+            with patch("shutil.which", side_effect=lambda x: which_map.get(x)):
+                with patch("subprocess.run", side_effect=fake_run):
+                    with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+                        ok, res, erro, msg = self.agent.executar_acao(
+                            "abrir_navegador", {"url": "https://duckduckgo.com"}, "ev-url-arg"
+                        )
+                        self.assertTrue(ok)
+                        mock_popen.assert_called_once()
+                        self.assertEqual(
+                            mock_popen.call_args[0][0],
+                            ["gtk-launch", "firefox-esr.desktop", "https://duckduckgo.com"],
+                        )
+        finally:
+            self.agent.mock_mode = True
+
 
 class TestAgentStartupCommands(unittest.TestCase):
     """Valida a inicialização correta dos agentes via python -m e scripts diretos."""
