@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import secrets
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -140,9 +141,8 @@ class PcControlClient:
         # Contexto SSL para conexões HTTPS com verificação de certificados
         ssl_ctx = None
         if endpoint.lower().startswith("https://"):
-            import ssl
             if self.ca_cert:
-                if not os.path.exists(self.ca_cert):
+                if not os.path.exists(self.ca_cert) or not os.path.isfile(self.ca_cert):
                     return {
                         "event_id": event_id,
                         "session_id": session_id,
@@ -156,7 +156,22 @@ class PcControlClient:
                         "mensagem_amigavel": f"Falha de segurança TLS: Certificado CA não encontrado para {nome_alvo}.",
                         "timestamp": time.time(),
                     }
-                ssl_ctx = ssl.create_default_context(cafile=self.ca_cert)
+                try:
+                    ssl_ctx = ssl.create_default_context(cafile=self.ca_cert)
+                except Exception as e:
+                    return {
+                        "event_id": event_id,
+                        "session_id": session_id,
+                        "origem": fonte,
+                        "computador_alvo": alvo_normalizado,
+                        "acao": acao,
+                        "estado": "falha",
+                        "status": "falha",
+                        "resultado": {},
+                        "erro": f"ca_cert_invalido: {e}",
+                        "mensagem_amigavel": f"Falha de segurança TLS: Certificado CA inválido para {nome_alvo}.",
+                        "timestamp": time.time(),
+                    }
             elif os.getenv("JARVIS_PC_TLS_INSECURE_SKIP_VERIFY") == "1":
                 logger.warning(
                     "ALERTA DE SEGURANÇA: JARVIS_PC_TLS_INSECURE_SKIP_VERIFY=1 ativo. "
@@ -214,13 +229,24 @@ class PcControlClient:
             }
 
         except (urllib.error.URLError, TimeoutError, OSError) as net_err:
-            eh_timeout = isinstance(net_err, TimeoutError) or "timed out" in str(net_err).lower()
-            erro_tag = "timeout_comunicacao_agente" if eh_timeout else "computador_offline_ou_inacessivel"
-            msg_texto = (
-                f"Tempo esgotado ao contatar {nome_alvo}."
-                if eh_timeout
-                else f"Computador {nome_alvo} está desligado ou com agente inacessível."
+            is_ssl = (
+                isinstance(net_err, ssl.SSLError)
+                or isinstance(getattr(net_err, "reason", None), ssl.SSLError)
+                or "certificate verify failed" in str(net_err).lower()
+                or "ssl" in str(net_err).lower()
             )
+            eh_timeout = isinstance(net_err, TimeoutError) or "timed out" in str(net_err).lower()
+
+            if is_ssl:
+                erro_tag = "falha_tls_verificacao"
+                msg_texto = f"Falha de segurança TLS: certificado inválido ou não confiável para {nome_alvo}."
+            elif eh_timeout:
+                erro_tag = "timeout_comunicacao_agente"
+                msg_texto = f"Tempo esgotado ao contatar {nome_alvo}."
+            else:
+                erro_tag = "computador_offline_ou_inacessivel"
+                msg_texto = f"Computador {nome_alvo} está desligado ou com agente inacessível."
+
             logger.info("Falha de rede ao conectar ao agente %s: %s (%s)", alvo_normalizado, net_err, erro_tag)
             return {
                 "event_id": event_id,

@@ -186,8 +186,15 @@ Environment="JARVIS_PC_HTTP_TIMEOUT=2.5"
 # Environment="JARVIS_PC_FUSION_URL=https://192.168.0.128:8092"
 # Environment="JARVIS_PC_ANANUKE_URL=https://192.168.0.131:8092"
 # Environment="JARVIS_PC_CA_CERT=/etc/ssl/certs/jarvis-ca.pem"
-# NOTA: Em produção, o uso de JARVIS_PC_TLS_INSECURE_SKIP_VERIFY é proibido;
-# todos os certificados devem ser estritamente validados contra a autoridade certificadora (CA).
+#
+# NOTA OPERACIONAL DE TLS:
+# 1. Em produção, o uso de JARVIS_PC_TLS_INSECURE_SKIP_VERIFY é estritamente proibido.
+# 2. Ao conectar por IP (192.168.0.128 / 192.168.0.131), os certificados dos agentes devem
+#    obrigatoriamente conter a extensão Subject Alternative Name (SAN) com o IP correspondente:
+#    openssl req -x509 -newkey rsa:2048 -keyout ananuke.key -out ananuke.crt -days 365 \
+#      -nodes -subj "/CN=192.168.0.131" -addext "subjectAltName=IP:192.168.0.131"
+# 3. Caso o CA raiz ou certificado do servidor seja inválido, o cliente falha com 'falha_tls_verificacao'
+#    e impede qualquer transmissão não criptografada.
 ```
 
 ---

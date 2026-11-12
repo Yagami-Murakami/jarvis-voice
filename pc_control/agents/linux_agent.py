@@ -246,10 +246,13 @@ class LinuxPcAgent(PcAgentServer):
             ("Firefox", "Firefox"),
             ("Chrome", "Google Chrome"),
         ]
-        if shutil.which("wmctrl"):
+        wmctrl_disponivel = bool(shutil.which("wmctrl"))
+        wmctrl_list_ok = False
+        if wmctrl_disponivel:
             try:
                 res_list = subprocess.run(["wmctrl", "-l"], env=env, capture_output=True, text=True, timeout=2)
                 if res_list.returncode == 0:
+                    wmctrl_list_ok = True
                     for linha in res_list.stdout.splitlines():
                         tokens = linha.split(None, 3)
                         if len(tokens) >= 4:
@@ -259,8 +262,10 @@ class LinuxPcAgent(PcAgentServer):
                                 if pattern.lower() in title.lower():
                                     janelas_encontradas.append((win_id, canonical))
                                     break
+                else:
+                    logger.warning("wmctrl retornou código %d ao listar janelas: %s", res_list.returncode, res_list.stderr.strip())
             except Exception as e:
-                logger.debug("Falha ao listar janelas com wmctrl: %s", e)
+                logger.warning("Falha ao executar wmctrl: %s", e)
 
         # Se wmctrl não achou janelas, checar processos gráficos do usuário
         processos_ativos: List[str] = []
@@ -279,7 +284,7 @@ class LinuxPcAgent(PcAgentServer):
 
         # 2. Fechamento gracioso prioritário via wmctrl (envia _NET_CLOSE_WINDOW, permitindo salvar estado e abas)
         # Jamais invocar pkill ou sinais de processo: encerramento indiscriminado por sinal é estritamente proibido!
-        if shutil.which("wmctrl") and janelas_encontradas:
+        if wmctrl_disponivel and wmctrl_list_ok and janelas_encontradas:
             for win_id, canonical in janelas_encontradas:
                 try:
                     subprocess.run(["wmctrl", "-i", "-c", win_id], env=env, capture_output=True, timeout=2)
@@ -303,18 +308,23 @@ class LinuxPcAgent(PcAgentServer):
                 except Exception:
                     pass
 
-        # 3. Se wmctrl não estiver disponível, encerramento gracioso não é possível
+        # 3. Se wmctrl não estiver disponível ou falhar na sessão gráfica, encerramento gracioso não é possível
         # Jamais invocar pkill ou sinais de processo: retorna erro seguro fail-closed
-        elif not shutil.which("wmctrl"):
-            logger.warning("wmctrl não está disponível para fechamento gracioso de janelas no Ananuke.")
+        elif not wmctrl_disponivel or not wmctrl_list_ok:
+            motivo_detalhe = (
+                "utilitário wmctrl não disponível no sistema."
+                if not wmctrl_disponivel
+                else "falha ao comunicar com o servidor gráfico via wmctrl."
+            )
+            logger.warning("Fechamento gracioso indisponível no Ananuke: %s", motivo_detalhe)
             return (
                 False,
                 {"processos_fechados": []},
                 "fechamento_gracioso_indisponivel",
-                "Não foi possível fechar as janelas graciosamente: utilitário wmctrl não disponível no sistema.",
+                f"Não foi possível fechar as janelas graciosamente: {motivo_detalhe}",
             )
 
-        # 4. Se wmctrl está disponível mas nenhuma janela correspondente foi encontrada
+        # 4. Se wmctrl está disponível e funcionou, mas nenhuma janela gráfica de navegador foi localizada
         elif not janelas_encontradas:
             logger.warning("wmctrl disponível, mas nenhuma janela gráfica de navegador foi localizada.")
             return (

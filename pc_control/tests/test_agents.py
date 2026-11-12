@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -243,6 +244,26 @@ class TestLinuxPcAgent(unittest.TestCase):
         finally:
             self.agent.mock_mode = True
 
+    def test_09_fechar_navegador_falha_segura_quando_wmctrl_falha_na_sessao(self):
+        """Valida que quando wmctrl existe mas falha ao comunicar com X11 (código != 0), fechar_navegador falha com erro seguro."""
+        self.agent.mock_mode = False
+        try:
+            with patch("shutil.which", side_effect=lambda x: "/usr/bin/wmctrl" if x == "wmctrl" else None):
+                def fake_run(cmd, *args, **kwargs):
+                    if cmd[0] == "wmctrl":
+                        return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="Cannot open display: :0")
+                    if cmd[0] == "pgrep":
+                        return subprocess.CompletedProcess(cmd, returncode=0, stdout="12345\n", stderr="")
+                    return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="")
+
+                with patch("subprocess.run", side_effect=fake_run):
+                    ok, res, erro, msg = self.agent.executar_acao("fechar_navegador", {}, "ev-wmctrl-display-err")
+                    self.assertFalse(ok)
+                    self.assertEqual(erro, "fechamento_gracioso_indisponivel")
+                    self.assertIn("servidor gráfico", msg)
+        finally:
+            self.agent.mock_mode = True
+
 
 class TestAgentStartupCommands(unittest.TestCase):
     """Valida a inicialização correta dos agentes via python -m e scripts diretos."""
@@ -269,18 +290,19 @@ class TestAgentStartupCommands(unittest.TestCase):
         self.assertNotIn("RuntimeWarning", res.stderr)
 
     def test_03_linux_agent_standalone_script_startup(self):
-        """Valida fallback de sys.path quando agente Linux é executado diretamente como script."""
+        """Valida fallback de sys.path quando agente Linux é executado diretamente como script de qualquer diretório."""
         script_path = os.path.join(self.repo_root, "pc_control", "agents", "linux_agent.py")
         cmd = [sys.executable, script_path, "--help"]
-        res = subprocess.run(cmd, cwd=self.repo_root, capture_output=True, text=True, timeout=5)
+        # Executa a partir de um diretório externo (/tmp) para certificar que o fallback de sys.path opera
+        res = subprocess.run(cmd, cwd=tempfile.gettempdir(), capture_output=True, text=True, timeout=5)
         self.assertEqual(res.returncode, 0, f"Falha no script direto: {res.stderr}")
         self.assertIn("Agente Local do Jarvis PC Control para Linux", res.stdout)
 
     def test_04_windows_agent_standalone_script_startup(self):
-        """Valida fallback de sys.path quando agente Windows é executado diretamente como script."""
+        """Valida fallback de sys.path quando agente Windows é executado diretamente como script de qualquer diretório."""
         script_path = os.path.join(self.repo_root, "pc_control", "agents", "windows_agent.py")
         cmd = [sys.executable, script_path, "--help"]
-        res = subprocess.run(cmd, cwd=self.repo_root, capture_output=True, text=True, timeout=5)
+        res = subprocess.run(cmd, cwd=tempfile.gettempdir(), capture_output=True, text=True, timeout=5)
         self.assertEqual(res.returncode, 0, f"Falha no script direto: {res.stderr}")
         self.assertIn("Agente Local do Jarvis PC Control para Windows", res.stdout)
 

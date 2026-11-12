@@ -35,7 +35,7 @@ import tempfile
 import threading
 import urllib.request
 import urllib.error
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 class TestPcControlSecurity(unittest.TestCase):
@@ -457,13 +457,117 @@ class TestPcControlSecurity(unittest.TestCase):
         self.assertIn("ca_cert_nao_encontrado", resp["erro"])
 
     def test_22_client_default_https_creates_verified_context(self):
-        """Valida que por padrão conexões HTTPS utilizam contexto verificado (CERT_REQUIRED)."""
-        client = PcControlClient(token="segredo-forte-de-teste-12345")
+        """Valida que por padrão conexões HTTPS utilizam contexto verificado (CERT_REQUIRED) e checam hostname."""
+        client = PcControlClient(
+            token="segredo-forte-de-teste-12345",
+            url_overrides={"fusion": "https://127.0.0.1:8092"},
+        )
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("JARVIS_PC_TLS_INSECURE_SKIP_VERIFY", None)
-            ctx = ssl.create_default_context()
-            self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
-            self.assertTrue(ctx.check_hostname)
+            with patch("urllib.request.urlopen") as mock_urlopen:
+                mock_resp = MagicMock()
+                mock_resp.status = 200
+                mock_resp.read.return_value = json.dumps({"status": "concluido", "resultado": {}}).encode("utf-8")
+                mock_resp.__enter__.return_value = mock_resp
+                mock_urlopen.return_value = mock_resp
+
+                resp = client.enviar_comando("fusion", "status_computador", "ev-https-default")
+                self.assertEqual(resp["status"], "concluido")
+
+                self.assertTrue(mock_urlopen.called)
+                passed_ctx = mock_urlopen.call_args[1].get("context")
+                self.assertIsNotNone(passed_ctx)
+                self.assertEqual(passed_ctx.verify_mode, ssl.CERT_REQUIRED)
+                self.assertTrue(passed_ctx.check_hostname)
+
+    def test_23_client_insecure_skip_verify_creates_unverified_context(self):
+        """Valida que com JARVIS_PC_TLS_INSECURE_SKIP_VERIFY=1 o contexto unverified é utilizado com alerta."""
+        client = PcControlClient(
+            token="segredo-forte-de-teste-12345",
+            url_overrides={"fusion": "https://127.0.0.1:8092"},
+        )
+        with patch.dict(os.environ, {"JARVIS_PC_TLS_INSECURE_SKIP_VERIFY": "1"}):
+            with patch("urllib.request.urlopen") as mock_urlopen:
+                mock_resp = MagicMock()
+                mock_resp.status = 200
+                mock_resp.read.return_value = json.dumps({"status": "concluido", "resultado": {}}).encode("utf-8")
+                mock_resp.__enter__.return_value = mock_resp
+                mock_urlopen.return_value = mock_resp
+
+                resp = client.enviar_comando("fusion", "status_computador", "ev-https-unverified")
+                self.assertEqual(resp["status"], "concluido")
+
+                passed_ctx = mock_urlopen.call_args[1].get("context")
+                self.assertIsNotNone(passed_ctx)
+                self.assertEqual(passed_ctx.verify_mode, ssl.CERT_NONE)
+                self.assertFalse(passed_ctx.check_hostname)
+
+    def test_24_client_reports_tls_verification_failure_specifically(self):
+        """Valida que falha de verificação SSL retorna falha_tls_verificacao em vez de computador offline."""
+        client = PcControlClient(
+            token="segredo-forte-de-teste-12345",
+            url_overrides={"fusion": "https://127.0.0.1:8092"},
+        )
+        ssl_err = urllib.error.URLError(ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"))
+        with patch("urllib.request.urlopen", side_effect=ssl_err):
+            resp = client.enviar_comando("fusion", "status_computador", "ev-https-ssl-fail")
+            self.assertEqual(resp["status"], "falha")
+            self.assertEqual(resp["erro"], "falha_tls_verificacao")
+            self.assertIn("TLS", resp["mensagem_amigavel"])
+
+    def test_25_live_tls_server_and_client_with_ca_and_san(self):
+        """Valida comunicação ponta a ponta live HTTPS com certificado TLS e CA válidos via IP SAN."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cert_path = os.path.join(tmpdir, "cert.pem")
+            key_path = os.path.join(tmpdir, "key.pem")
+            cmd = [
+                "openssl",
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-keyout",
+                key_path,
+                "-out",
+                cert_path,
+                "-days",
+                "1",
+                "-nodes",
+                "-subj",
+                "/CN=127.0.0.1",
+                "-addext",
+                "subjectAltName=IP:127.0.0.1",
+            ]
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            class EchoAgent(PcAgentServer):
+                def executar_acao(self, action, params, event_id, session_id=None):
+                    return True, {"acao_executada": action}, None, f"Ação {action} ok"
+
+            server = EchoAgent(
+                host="127.0.0.1",
+                port=0,
+                target_id="fusion",
+                auth_token="segredo-forte-de-teste-12345",
+                certfile=cert_path,
+                keyfile=key_path,
+            )
+            port = server.server_address[1]
+            t = threading.Thread(target=server.serve_forever)
+            t.daemon = True
+            t.start()
+            try:
+                client = PcControlClient(
+                    token="segredo-forte-de-teste-12345",
+                    ca_cert=cert_path,
+                    url_overrides={"fusion": f"https://127.0.0.1:{port}"},
+                )
+                resp = client.enviar_comando("fusion", "status_computador", "ev-live-https")
+                self.assertEqual(resp["status"], "concluido")
+                self.assertEqual(resp["resultado"], {"acao_executada": "status_computador"})
+            finally:
+                server.shutdown()
+                server.server_close()
 
 
 if __name__ == "__main__":

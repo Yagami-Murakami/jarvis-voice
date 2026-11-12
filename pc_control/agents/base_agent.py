@@ -267,13 +267,13 @@ class PcAgentServer(ThreadingHTTPServer):
                 logger.error(msg)
                 raise ValueError(msg)
 
-            if not os.path.exists(self.certfile):
+            if not os.path.exists(self.certfile) or not os.path.isfile(self.certfile):
                 self.server_close()
                 msg = f"Certificado TLS não encontrado no agente [{self.target_id}]: {self.certfile}"
                 logger.error(msg)
                 raise FileNotFoundError(msg)
 
-            if not os.path.exists(self.keyfile):
+            if not os.path.exists(self.keyfile) or not os.path.isfile(self.keyfile):
                 self.server_close()
                 msg = f"Chave privada TLS não encontrada no agente [{self.target_id}]: {self.keyfile}"
                 logger.error(msg)
