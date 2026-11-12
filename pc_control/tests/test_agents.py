@@ -787,6 +787,168 @@ class TestLinuxPcAgent(unittest.TestCase):
         finally:
             self.agent.mock_mode = True
 
+    def test_24_browser_launch_none_and_empty_url_safe(self):
+        """Valida que params={'url': None} ou strings vazias não geram TypeError e abrem about:blank seguramente."""
+        self.agent.mock_mode = False
+        try:
+            self.agent.desktop_env = "gnome"
+            which_map = {
+                "gtk-launch": "/usr/bin/gtk-launch",
+                "xdg-settings": "/usr/bin/xdg-settings",
+            }
+
+            def fake_run(cmd, **kwargs):
+                if cmd[:2] == ["xdg-settings", "get"]:
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="firefox-esr.desktop\n")
+                return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+
+            mock_proc = MagicMock()
+            mock_proc.returncode = 0
+            mock_proc.communicate.return_value = ("", "")
+
+            with patch("shutil.which", side_effect=lambda x: which_map.get(x)):
+                with patch("subprocess.run", side_effect=fake_run):
+                    with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+                        # 1. url=None
+                        ok, res, erro, msg = self.agent.executar_acao(
+                            "abrir_navegador", {"url": None}, "ev-url-none"
+                        )
+                        self.assertTrue(ok)
+                        self.assertEqual(res.get("url"), "about:blank")
+                        self.assertEqual(mock_popen.call_args[0][0], ["gtk-launch", "firefox-esr.desktop"])
+
+                        # 2. url="   " (apenas espaços)
+                        mock_popen.reset_mock()
+                        ok2, res2, erro2, msg2 = self.agent.executar_acao(
+                            "abrir_navegador", {"url": "   "}, "ev-url-spaces"
+                        )
+                        self.assertTrue(ok2)
+                        self.assertEqual(res2.get("url"), "about:blank")
+                        self.assertEqual(mock_popen.call_args[0][0], ["gtk-launch", "firefox-esr.desktop"])
+        finally:
+            self.agent.mock_mode = True
+
+    def test_25_browser_launch_preserves_url_on_fallback(self):
+        """Valida que quando gtk-launch falha, a URL explícita é preservada no binário ou x-www-browser de fallback."""
+        self.agent.mock_mode = False
+        try:
+            self.agent.desktop_env = "gnome"
+            which_map = {
+                "gtk-launch": "/usr/bin/gtk-launch",
+                "xdg-settings": "/usr/bin/xdg-settings",
+                "firefox-esr": "/usr/bin/firefox-esr",
+            }
+
+            def fake_run(cmd, **kwargs):
+                if cmd[:2] == ["xdg-settings", "get"]:
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="firefox-esr.desktop\n")
+                return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+
+            def fake_popen(cmd, **kwargs):
+                proc = MagicMock()
+                if cmd[0] == "gtk-launch":
+                    proc.returncode = 2
+                    proc.communicate.return_value = ("", "gtk-launch: erro")
+                elif cmd[0] == "firefox-esr":
+                    proc.returncode = 0
+                    proc.wait.return_value = 0
+                return proc
+
+            with patch("shutil.which", side_effect=lambda x: which_map.get(x)):
+                with patch("subprocess.run", side_effect=fake_run):
+                    with patch("subprocess.Popen", side_effect=fake_popen) as mock_popen:
+                        ok, res, erro, msg = self.agent.executar_acao(
+                            "abrir_navegador", {"url": "https://github.com"}, "ev-fallback-url"
+                        )
+                        self.assertTrue(ok)
+                        self.assertIsNone(erro)
+                        self.assertEqual(mock_popen.call_count, 2)
+                        # Primeira tentativa: gtk-launch com URL
+                        self.assertEqual(
+                            mock_popen.call_args_list[0][0][0],
+                            ["gtk-launch", "firefox-esr.desktop", "https://github.com"],
+                        )
+                        # Segunda tentativa: binário direto com URL preservada
+                        self.assertEqual(
+                            mock_popen.call_args_list[1][0][0],
+                            ["firefox-esr", "https://github.com"],
+                        )
+        finally:
+            self.agent.mock_mode = True
+
+    def test_26_browser_launch_gnome_fallback_prefers_bin_cand_over_x_www_browser(self):
+        """Garante que no GNOME, se gtk-launch falhar, o binário do navegador padrão configurado é priorizado sobre x-www-browser."""
+        self.agent.mock_mode = False
+        try:
+            self.agent.desktop_env = "gnome"
+            which_map = {
+                "gtk-launch": "/usr/bin/gtk-launch",
+                "xdg-settings": "/usr/bin/xdg-settings",
+                "firefox-esr": "/usr/bin/firefox-esr",
+                "x-www-browser": "/usr/bin/x-www-browser",
+            }
+
+            def fake_run(cmd, **kwargs):
+                if cmd[:2] == ["xdg-settings", "get"]:
+                    return subprocess.CompletedProcess(cmd, returncode=0, stdout="firefox-esr.desktop\n")
+                return subprocess.CompletedProcess(cmd, returncode=1, stdout="")
+
+            def fake_popen(cmd, **kwargs):
+                proc = MagicMock()
+                if cmd[0] == "gtk-launch":
+                    proc.returncode = 2
+                    proc.communicate.return_value = ("", "falha gtk")
+                elif cmd[0] == "firefox-esr":
+                    proc.returncode = 0
+                    proc.wait.return_value = 0
+                return proc
+
+            with patch("shutil.which", side_effect=lambda x: which_map.get(x)):
+                with patch("subprocess.run", side_effect=fake_run):
+                    with patch("subprocess.Popen", side_effect=fake_popen) as mock_popen:
+                        ok, res, erro, msg = self.agent.executar_acao("abrir_navegador", {}, "ev-cand-order")
+                        self.assertTrue(ok)
+                        self.assertEqual(mock_popen.call_count, 2)
+                        # gtk-launch falhou, próximo chamado DEVE ser firefox-esr (bin_cand) e não x-www-browser
+                        self.assertEqual(mock_popen.call_args_list[1][0][0], ["firefox-esr"])
+        finally:
+            self.agent.mock_mode = True
+
+    def test_27_obter_navegador_padrao_desktop_path_and_multiline_sanitization(self):
+        """Valida que saídas com caminhos completos (/usr/share/...) ou avisos GTK multilinha são sanitizados corretamente."""
+        # 1. Caminho absoluto no xdg-settings
+        with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x == "xdg-settings" else None):
+            with patch(
+                "subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    [], 0, "/usr/share/applications/firefox-esr.desktop\n"
+                ),
+            ):
+                app = self.agent._obter_navegador_padrao_desktop()
+                self.assertEqual(app, "firefox-esr.desktop")
+
+        # 2. Saída com avisos Gtk antes do nome do desktop
+        with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x == "xdg-settings" else None):
+            with patch(
+                "subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    [], 0, "Gtk-WARNING **: cannot open display\ngoogle-chrome.desktop\n"
+                ),
+            ):
+                app = self.agent._obter_navegador_padrao_desktop()
+                self.assertEqual(app, "google-chrome.desktop")
+
+    def test_28_browser_launch_launcher_timeout_kills_process(self):
+        """Garante que quando um comando lançador atinge timeout, o processo é encerrado para não deixar processos pendentes."""
+        mock_proc = MagicMock()
+        mock_proc.communicate.side_effect = subprocess.TimeoutExpired(cmd=["gtk-launch"], timeout=2.0)
+
+        with patch("subprocess.Popen", return_value=mock_proc):
+            ok, err = self.agent._executar_comando_abertura(["gtk-launch", "app.desktop"], {}, timeout_launcher=0.1)
+            self.assertFalse(ok)
+            self.assertIn("timeout", err)
+            mock_proc.kill.assert_called_once()
+
 
 class TestAgentStartupCommands(unittest.TestCase):
     """Valida a inicialização correta dos agentes via python -m e scripts diretos."""

@@ -206,6 +206,23 @@ class LinuxPcAgent(PcAgentServer):
         """
         env = self._obter_env_sessao()
 
+        def _extrair_desktop_de_texto(texto: str) -> Optional[str]:
+            if not texto:
+                return None
+            for line in texto.splitlines():
+                line = line.strip().strip("'\"")
+                if ".desktop" in line:
+                    for token in line.split():
+                        token = token.strip(":,()“”\"'")
+                        if token.endswith(".desktop"):
+                            return os.path.basename(token)
+            linhas_validas = [l.strip().strip("'\"") for l in texto.splitlines() if l.strip()]
+            if linhas_validas:
+                cand = os.path.basename(linhas_validas[-1])
+                if cand:
+                    return cand if cand.endswith(".desktop") else f"{cand}.desktop"
+            return None
+
         # 1. xdg-settings get default-web-browser
         if shutil.which("xdg-settings"):
             try:
@@ -217,9 +234,9 @@ class LinuxPcAgent(PcAgentServer):
                     env=env,
                 )
                 if res.returncode == 0:
-                    app = res.stdout.strip().strip("'\"")
+                    app = _extrair_desktop_de_texto(res.stdout)
                     if app:
-                        return app if app.endswith(".desktop") else f"{app}.desktop"
+                        return app
             except Exception as e:
                 logger.debug("Falha ao consultar xdg-settings: %s", e)
 
@@ -234,9 +251,9 @@ class LinuxPcAgent(PcAgentServer):
                     env=env,
                 )
                 if res.returncode == 0:
-                    app = res.stdout.strip().strip("'\"")
+                    app = _extrair_desktop_de_texto(res.stdout)
                     if app:
-                        return app if app.endswith(".desktop") else f"{app}.desktop"
+                        return app
             except Exception as e:
                 logger.debug("Falha ao consultar xdg-mime (x-scheme-handler/http): %s", e)
 
@@ -251,9 +268,9 @@ class LinuxPcAgent(PcAgentServer):
                     env=env,
                 )
                 if res.returncode == 0:
-                    app = res.stdout.strip().strip("'\"")
+                    app = _extrair_desktop_de_texto(res.stdout)
                     if app:
-                        return app if app.endswith(".desktop") else f"{app}.desktop"
+                        return app
             except Exception as e:
                 logger.debug("Falha ao consultar xdg-mime (text/html): %s", e)
 
@@ -268,19 +285,20 @@ class LinuxPcAgent(PcAgentServer):
                     env=env,
                 )
                 if res.returncode == 0 and res.stdout:
-                    for line in res.stdout.splitlines():
-                        if ".desktop" in line:
-                            for token in line.split():
-                                token = token.strip(":,()“”\"'")
-                                if token.endswith(".desktop"):
-                                    return token
+                    app = _extrair_desktop_de_texto(res.stdout)
+                    if app:
+                        return app
             except Exception as e:
                 logger.debug("Falha ao consultar gio mime: %s", e)
 
         return None
 
     def _executar_comando_abertura(
-        self, cmd: List[str], env: Dict[str, str], timeout_check: float = 0.4
+        self,
+        cmd: List[str],
+        env: Dict[str, str],
+        timeout_launcher: float = 2.0,
+        timeout_direct: float = 0.4,
     ) -> Tuple[bool, Optional[str]]:
         """Executa um comando lançador/navegador e valida retorno e erros imediatos."""
         is_launcher = bool(cmd and cmd[0] in ("gtk-launch", "xdg-open", "exo-open", "gio"))
@@ -298,7 +316,7 @@ class LinuxPcAgent(PcAgentServer):
 
         try:
             if is_launcher:
-                comm_res = proc.communicate(timeout=timeout_check)
+                comm_res = proc.communicate(timeout=timeout_launcher)
                 if isinstance(comm_res, tuple) and len(comm_res) == 2:
                     stdout_text, stderr_text = comm_res
                 else:
@@ -312,7 +330,7 @@ class LinuxPcAgent(PcAgentServer):
                 return True, None
             else:
                 try:
-                    rc = proc.wait(timeout=timeout_check)
+                    rc = proc.wait(timeout=timeout_direct)
                     if isinstance(rc, int) and rc != 0:
                         logger.warning("Processo %s falhou com código %d", cmd, rc)
                         return False, f"codigo_{rc}"
@@ -322,6 +340,11 @@ class LinuxPcAgent(PcAgentServer):
                     return True, None
         except subprocess.TimeoutExpired:
             logger.warning("Timeout aguardando lançador %s", cmd)
+            try:
+                proc.kill()
+                proc.communicate(timeout=0.2)
+            except Exception:
+                pass
             return False, f"timeout aguardando lançador {cmd[0]}"
         except Exception as e:
             logger.warning("Erro ao executar %s: %s", cmd, e)
@@ -329,7 +352,9 @@ class LinuxPcAgent(PcAgentServer):
 
     # 1. Abrir navegador
     def _acao_abrir_navegador(self, params: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], Optional[str], str]:
-        url = params.get("url", "about:blank")
+        raw_url = params.get("url") if isinstance(params, dict) else None
+        url = raw_url.strip() if isinstance(raw_url, str) and raw_url.strip() else "about:blank"
+
         if not self.mock_mode:
             env = self._obter_env_sessao()
             default_app = self._obter_navegador_padrao_desktop()
@@ -345,18 +370,24 @@ class LinuxPcAgent(PcAgentServer):
             if default_app and url and url != "about:blank":
                 gtk_args.append(url)
 
+            # Argumentos para processos diretos e alternativas: omite about:blank
+            browser_args = [url] if url and url != "about:blank" else []
+
+            clean_default = os.path.basename(default_app) if default_app else None
+            bin_cand = (
+                clean_default[:-8] if clean_default and clean_default.endswith(".desktop") else clean_default
+            )
+
             if self.desktop_env == "xfce":
                 # No Xfce, prioriza exo-open
                 if shutil.which("exo-open"):
                     _adicionar_candidato(["exo-open", "--launch", "WebBrowser", url])
                 if default_app and shutil.which("gtk-launch"):
                     _adicionar_candidato(["gtk-launch"] + gtk_args)
+                if bin_cand and shutil.which(bin_cand):
+                    _adicionar_candidato([bin_cand] + browser_args)
                 if shutil.which("x-www-browser"):
-                    _adicionar_candidato(["x-www-browser"])
-                if default_app:
-                    bin_cand = default_app[:-8] if default_app.endswith(".desktop") else default_app
-                    if shutil.which(bin_cand):
-                        _adicionar_candidato([bin_cand])
+                    _adicionar_candidato(["x-www-browser"] + browser_args)
                 if shutil.which("xdg-open"):
                     _adicionar_candidato(["xdg-open", url])
                 if shutil.which("gio"):
@@ -365,14 +396,12 @@ class LinuxPcAgent(PcAgentServer):
                 # 1. No GNOME, prioriza lançador padrão configurado no sistema (xdg-settings + gtk-launch)
                 if default_app and shutil.which("gtk-launch"):
                     _adicionar_candidato(["gtk-launch"] + gtk_args)
-                # 2. x-www-browser (alternativas Debian sem URL problemática)
+                # 2. Binário direto derivado do .desktop se presente no PATH
+                if bin_cand and shutil.which(bin_cand):
+                    _adicionar_candidato([bin_cand] + browser_args)
+                # 3. x-www-browser (alternativas Debian)
                 if shutil.which("x-www-browser"):
-                    _adicionar_candidato(["x-www-browser"])
-                # 3. Binário direto derivado do .desktop se presente no PATH
-                if default_app:
-                    bin_cand = default_app[:-8] if default_app.endswith(".desktop") else default_app
-                    if shutil.which(bin_cand):
-                        _adicionar_candidato([bin_cand])
+                    _adicionar_candidato(["x-www-browser"] + browser_args)
                 # 4. Fallbacks freedesktop (tratando erro para impedir falso positivo se GIO rejeitar url)
                 if shutil.which("xdg-open"):
                     _adicionar_candidato(["xdg-open", url])
@@ -386,12 +415,10 @@ class LinuxPcAgent(PcAgentServer):
                     _adicionar_candidato(["gtk-launch"] + gtk_args)
                 if shutil.which("exo-open"):
                     _adicionar_candidato(["exo-open", "--launch", "WebBrowser", url])
+                if bin_cand and shutil.which(bin_cand):
+                    _adicionar_candidato([bin_cand] + browser_args)
                 if shutil.which("x-www-browser"):
-                    _adicionar_candidato(["x-www-browser"])
-                if default_app:
-                    bin_cand = default_app[:-8] if default_app.endswith(".desktop") else default_app
-                    if shutil.which(bin_cand):
-                        _adicionar_candidato([bin_cand])
+                    _adicionar_candidato(["x-www-browser"] + browser_args)
                 if shutil.which("xdg-open"):
                     _adicionar_candidato(["xdg-open", url])
                 if shutil.which("gio"):
