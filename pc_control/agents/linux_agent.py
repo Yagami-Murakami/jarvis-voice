@@ -15,7 +15,7 @@ import signal
 import subprocess
 import sys
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from pc_control.agents.base_agent import PcAgentServer
 from pc_control.config import get_agent_token, is_mock_mode
@@ -35,14 +35,25 @@ class LinuxPcAgent(PcAgentServer):
         port: int = 8092,
         auth_token: Optional[str] = None,
         mock_mode: bool = False,
+        allowed_ips: Optional[Set[str]] = None,
+        certfile: Optional[str] = None,
+        keyfile: Optional[str] = None,
     ) -> None:
-        token = auth_token or get_agent_token()
+        token = auth_token or get_agent_token("ananuke")
         self.mock_mode = mock_mode or is_mock_mode()
         self.audio_backend = self._detectar_backend_audio()
         # Nível de volume simulado em testes (0.0 a 1.0)
         self._sim_volume = 0.50
         self._sim_muted = False
-        super().__init__(host, port, target_id="ananuke", auth_token=token)
+        super().__init__(
+            host,
+            port,
+            target_id="ananuke",
+            auth_token=token,
+            allowed_ips=allowed_ips,
+            certfile=certfile,
+            keyfile=keyfile,
+        )
 
     def _detectar_backend_audio(self) -> str:
         """Detecta o backend de áudio instalado no Debian 13."""
@@ -209,30 +220,68 @@ class LinuxPcAgent(PcAgentServer):
 
     # 9. Fechar navegador (após confirmação)
     def _acao_fechar_navegador(self, params: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], Optional[str], str]:
-        fechados = []
-        if not self.mock_mode:
-            # 1. Tenta fechar graciosamente por janela via wmctrl
-            if shutil.which("wmctrl"):
-                env = self._obter_env_sessao()
-                for prog in ("Mozilla Firefox", "Chromium", "Google Chrome", "Brave"):
-                    try:
-                        subprocess.run(["wmctrl", "-c", prog], env=env, capture_output=True, timeout=2)
-                    except Exception:
-                        pass
+        if self.mock_mode:
+            if params.get("simular_nenhum"):
+                return False, {"processos_fechados": [], "simulado": True}, "nenhum_navegador_encontrado", "Nenhum navegador aberto para fechar no Ananuke."
+            return True, {"processos_fechados": ["firefox (simulado)"], "simulado": True}, None, "Navegador fechado no Ananuke."
 
-            # 2. Envia SIGTERM (término normal gracioso, NÃO SIGKILL 9) aos processos do usuário
-            for nome_proc in LINUX_BROWSER_PROCESSES:
+        env = self._obter_env_sessao()
+        fechados: List[str] = []
+
+        # 1. Detectar janelas de navegadores via wmctrl ou processos ativos do usuário
+        janelas_encontradas: List[str] = []
+        if shutil.which("wmctrl"):
+            try:
+                res_list = subprocess.run(["wmctrl", "-l"], env=env, capture_output=True, text=True, timeout=2)
+                if res_list.returncode == 0:
+                    for linha in res_list.stdout.splitlines():
+                        for b_name in ("Mozilla Firefox", "Firefox", "Chromium", "Google Chrome", "Chrome", "Brave"):
+                            if b_name.lower() in linha.lower():
+                                janelas_encontradas.append(b_name)
+            except Exception as e:
+                logger.debug("Falha ao listar janelas com wmctrl: %s", e)
+
+        # Se wmctrl não achou janelas, checar processos gráficos do usuário
+        processos_ativos: List[str] = []
+        uid_str = str(os.getuid())
+        for nome_proc in LINUX_BROWSER_PROCESSES:
+            try:
+                res_pg = subprocess.run(["pgrep", "-u", uid_str, "-x", nome_proc], capture_output=True, text=True, timeout=2)
+                if res_pg.returncode == 0 and res_pg.stdout.strip():
+                    processos_ativos.append(nome_proc)
+            except Exception:
+                pass
+
+        # Se nenhum navegador está em execução nem tem janela aberta, falha sem executar ação
+        if not janelas_encontradas and not processos_ativos:
+            return False, {"processos_fechados": []}, "nenhum_navegador_encontrado", "Nenhum navegador aberto para fechar no Ananuke."
+
+        # 2. Fechamento gracioso prioritário via wmctrl (envia _NET_CLOSE_WINDOW, permitindo salvar estado e abas)
+        # NÃO invocar pkill em seguida para evitar encerramento indiscriminado de processos com trabalho não salvo!
+        if shutil.which("wmctrl") and janelas_encontradas:
+            for titulo in set(janelas_encontradas):
                 try:
-                    # pkill -15 envia SIGTERM para processos pertencentes ao usuário corrente
-                    res = subprocess.run(["pkill", "-15", "-u", str(os.getuid()), nome_proc], capture_output=True)
-                    if res.returncode == 0:
-                        fechados.append(nome_proc)
+                    res_close = subprocess.run(["wmctrl", "-c", titulo], env=env, capture_output=True, timeout=3)
+                    if res_close.returncode == 0:
+                        fechados.append(titulo)
+                except Exception as e:
+                    logger.debug("Falha ao solicitar fechamento gracioso via wmctrl (%s): %s", titulo, e)
+
+        # 3. Fallback: somente se wmctrl NÃO estiver disponível na sessão, envia SIGTERM (-15, nunca -9)
+        elif not shutil.which("wmctrl") and processos_ativos:
+            for proc in processos_ativos:
+                try:
+                    res_term = subprocess.run(["pkill", "-15", "-u", uid_str, "-x", proc], capture_output=True, timeout=3)
+                    if res_term.returncode == 0:
+                        fechados.append(proc)
                 except Exception:
                     pass
-        else:
-            fechados = ["firefox (simulado)"]
 
-        return True, {"processos_fechados": fechados, "simulado": self.mock_mode}, None, "Navegador fechado no Ananuke."
+        # 4. Validação de confirmação: nunca reporta sucesso se nada foi fechado
+        if not fechados:
+            return False, {"processos_fechados": []}, "fechamento_nao_confirmado", "Nenhum navegador foi fechado ou confirmado no Ananuke."
+
+        return True, {"processos_fechados": fechados, "simulado": False}, None, f"Navegador fechado no Ananuke ({', '.join(fechados)})."
 
     # 10. Reiniciar computador (após confirmação explícita)
     def _acao_reiniciar(self, params: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], Optional[str], str]:
@@ -437,9 +486,12 @@ class LinuxPcAgent(PcAgentServer):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Agente Local do Jarvis PC Control para Linux (Ananuke)")
-    parser.add_argument("--host", default="0.0.0.0", help="Endereço de bind (padrão: 0.0.0.0)")
+    parser.add_argument("--host", default=os.getenv("JARVIS_PC_AGENT_HOST", "0.0.0.0"), help="Endereço de bind (padrão: 0.0.0.0 ou 127.0.0.1 em túnel)")
     parser.add_argument("--port", type=int, default=8092, help="Porta HTTP (padrão: 8092)")
     parser.add_argument("--token", default=None, help="Token compartilhado de autenticação")
+    parser.add_argument("--allowed-ips", default=None, help="IPs autorizados separados por vírgula (ex: 192.168.0.126,127.0.0.1)")
+    parser.add_argument("--cert", default=None, help="Caminho do certificado TLS (.crt)")
+    parser.add_argument("--key", default=None, help="Caminho da chave privada TLS (.key)")
     parser.add_argument("--mock", action="store_true", help="Forçar modo simulado de ações")
     args = parser.parse_args()
 
@@ -447,8 +499,17 @@ def main() -> None:
         level=logging.INFO,
         format="[%(asctime)s] [%(levelname)s] [LinuxAgent] %(message)s",
     )
-    server = LinuxPcAgent(host=args.host, port=args.port, auth_token=args.token, mock_mode=args.mock)
-    logger.info("Agente Linux (Ananuke) iniciado em %s:%d (Backend: %s, Mock: %s)", args.host, args.port, server.audio_backend, server.mock_mode)
+    allowed_ips = {ip.strip() for ip in args.allowed_ips.split(",") if ip.strip()} if args.allowed_ips else None
+    server = LinuxPcAgent(
+        host=args.host,
+        port=args.port,
+        auth_token=args.token,
+        mock_mode=args.mock,
+        allowed_ips=allowed_ips,
+        certfile=args.cert,
+        keyfile=args.key,
+    )
+    logger.info("Agente Linux (Ananuke) iniciado em %s:%d (Backend: %s, Mock: %s, TLS: %s)", args.host, args.port, server.audio_backend, server.mock_mode, bool(server.certfile))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

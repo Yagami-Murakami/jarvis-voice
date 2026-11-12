@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 import webbrowser
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from pc_control.agents.base_agent import PcAgentServer
 from pc_control.config import get_agent_token, is_mock_mode
@@ -35,13 +35,24 @@ class WindowsPcAgent(PcAgentServer):
         port: int = 8092,
         auth_token: Optional[str] = None,
         mock_mode: bool = False,
+        allowed_ips: Optional[Set[str]] = None,
+        certfile: Optional[str] = None,
+        keyfile: Optional[str] = None,
     ) -> None:
-        token = auth_token or get_agent_token()
+        token = auth_token or get_agent_token("fusion")
         self.mock_mode = mock_mode or is_mock_mode() or (not IS_WINDOWS)
         # Nível de volume simulado quando fora do Windows ou em teste (0.0 a 1.0)
         self._sim_volume = 0.50
         self._sim_muted = False
-        super().__init__(host, port, target_id="fusion", auth_token=token)
+        super().__init__(
+            host,
+            port,
+            target_id="fusion",
+            auth_token=token,
+            allowed_ips=allowed_ips,
+            certfile=certfile,
+            keyfile=keyfile,
+        )
 
     def executar_acao(
         self,
@@ -193,20 +204,45 @@ class WindowsPcAgent(PcAgentServer):
 
     # 9. Fechar navegador (executado após confirmação)
     def _acao_fechar_navegador(self, params: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], Optional[str], str]:
-        fechados = []
-        if not self.mock_mode and IS_WINDOWS:
-            for exe in WINDOWS_BROWSER_EXES:
-                try:
-                    # taskkill SEM /F envia mensagem WM_CLOSE graciosa para salvar abas
-                    res = subprocess.run(["taskkill.exe", "/IM", exe], capture_output=True, text=True, timeout=5)
-                    if res.returncode == 0:
-                        fechados.append(exe)
-                except Exception:
-                    pass
-        else:
-            fechados = ["msedge.exe (simulado)"]
+        if self.mock_mode or not IS_WINDOWS:
+            if params.get("simular_nenhum"):
+                return False, {"navegadores_fechados": [], "simulado": True}, "nenhum_navegador_encontrado", "Nenhum navegador aberto para fechar no Fusion."
+            return True, {"navegadores_fechados": ["msedge.exe (simulado)"], "simulado": True}, None, "Navegador fechado no Fusion."
 
-        return True, {"navegadores_fechados": fechados, "simulado": self.mock_mode}, None, "Navegador fechado no Fusion."
+        fechados: List[str] = []
+
+        # 1. Verificar se algum processo de navegador da allowlist está em execução
+        processos_ativos: List[str] = []
+        try:
+            cmd_check = ["tasklist.exe", "/FO", "CSV", "/NH"]
+            res_tl = subprocess.run(cmd_check, capture_output=True, text=True, timeout=3)
+            if res_tl.returncode == 0:
+                saida_tl = res_tl.stdout.lower()
+                for exe in WINDOWS_BROWSER_EXES:
+                    if f'"{exe.lower()}"' in saida_tl or exe.lower() in saida_tl:
+                        processos_ativos.append(exe)
+        except Exception as e:
+            logger.debug("Falha ao verificar tasklist: %s", e)
+
+        if not processos_ativos:
+            return False, {"navegadores_fechados": []}, "nenhum_navegador_encontrado", "Nenhum navegador aberto para fechar no Fusion."
+
+        # 2. Fechamento gracioso: envia WM_CLOSE via taskkill SEM /F (nunca força término nem descarta trabalho não salvo)
+        for exe in processos_ativos:
+            try:
+                res = subprocess.run(["taskkill.exe", "/IM", exe], capture_output=True, text=True, timeout=5)
+                if res.returncode == 0:
+                    fechados.append(exe)
+                else:
+                    logger.debug("taskkill /IM %s retornou codigo %d: %s", exe, res.returncode, res.stdout or res.stderr)
+            except Exception as e:
+                logger.debug("Erro ao fechar %s: %s", exe, e)
+
+        # 3. Confirmação do resultado: nunca reporta sucesso se nada foi fechado
+        if not fechados:
+            return False, {"navegadores_fechados": []}, "fechamento_nao_confirmado", "Nenhum navegador foi fechado ou confirmado no Fusion."
+
+        return True, {"navegadores_fechados": fechados, "simulado": False}, None, f"Navegador fechado no Fusion ({', '.join(fechados)})."
 
     # 10. Reiniciar computador (executado após confirmação explícita)
     def _acao_reiniciar(self, params: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], Optional[str], str]:
@@ -383,9 +419,12 @@ class WindowsPcAgent(PcAgentServer):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Agente Local do Jarvis PC Control para Windows (Fusion)")
-    parser.add_argument("--host", default="0.0.0.0", help="Endereço de bind (padrão: 0.0.0.0)")
+    parser.add_argument("--host", default=os.getenv("JARVIS_PC_AGENT_HOST", "0.0.0.0"), help="Endereço de bind (padrão: 0.0.0.0 ou 127.0.0.1 em túnel)")
     parser.add_argument("--port", type=int, default=8092, help="Porta HTTP (padrão: 8092)")
     parser.add_argument("--token", default=None, help="Token compartilhado de autenticação")
+    parser.add_argument("--allowed-ips", default=None, help="IPs autorizados separados por vírgula (ex: 192.168.0.126,127.0.0.1)")
+    parser.add_argument("--cert", default=None, help="Caminho do certificado TLS (.crt)")
+    parser.add_argument("--key", default=None, help="Caminho da chave privada TLS (.key)")
     parser.add_argument("--mock", action="store_true", help="Forçar modo simulado de ações")
     args = parser.parse_args()
 
@@ -393,8 +432,17 @@ def main() -> None:
         level=logging.INFO,
         format="[%(asctime)s] [%(levelname)s] [WindowsAgent] %(message)s",
     )
-    server = WindowsPcAgent(host=args.host, port=args.port, auth_token=args.token, mock_mode=args.mock)
-    logger.info("Agente Windows (Fusion) iniciado em %s:%d (Modo Simulado: %s)", args.host, args.port, server.mock_mode)
+    allowed_ips = {ip.strip() for ip in args.allowed_ips.split(",") if ip.strip()} if args.allowed_ips else None
+    server = WindowsPcAgent(
+        host=args.host,
+        port=args.port,
+        auth_token=args.token,
+        mock_mode=args.mock,
+        allowed_ips=allowed_ips,
+        certfile=args.cert,
+        keyfile=args.key,
+    )
+    logger.info("Agente Windows (Fusion) iniciado em %s:%d (Modo Simulado: %s, TLS: %s)", args.host, args.port, server.mock_mode, bool(server.certfile))
     try:
         server.serve_forever()
     except KeyboardInterrupt:
