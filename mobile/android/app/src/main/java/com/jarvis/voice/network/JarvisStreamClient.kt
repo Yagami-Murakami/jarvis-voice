@@ -57,26 +57,35 @@ class JarvisStreamClient(
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
 
             while (isRunning.get() && !Thread.currentThread().isInterrupted) {
+                var rawSocket: Socket? = null
                 var socket: Socket? = null
                 var out: DataOutputStream? = null
 
                 try {
+                    // Proteção estrita: a porta de áudio padrão 8088 do Jarvis exige TLS 1.2+
+                    if (port == 8088 && !useTls) {
+                        throw IllegalStateException("A porta $port do Jarvis Audio Gateway exige conexão TLS 1.2+ com Certificate Pinning. Ative o TLS nas configurações.")
+                    }
+
                     Log.i(TAG, "Conectando ao Jarvis Gateway em $host:$port (TLS=$useTls, Device=$deviceId)...")
-                    val rawSocket = Socket()
-                    rawSocket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
-                    rawSocket.soTimeout = SOCKET_TIMEOUT_MS
-                    rawSocket.tcpNoDelay = true
-                    rawSocket.keepAlive = true
+                    val raw = Socket()
+                    rawSocket = raw
+                    raw.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+                    raw.soTimeout = SOCKET_TIMEOUT_MS
+                    raw.tcpNoDelay = true
+                    raw.keepAlive = true
 
                     socket = if (useTls) {
-                        wrapTlsSocket(rawSocket, host, port, certFingerprint)
+                        // Negocia TLS 1.2+ e valida fingerprint SHA-256 ANTES de qualquer transmissão
+                        wrapTlsSocket(raw, host, port, certFingerprint)
                     } else {
-                        rawSocket
+                        raw
                     }
 
                     out = DataOutputStream(socket.getOutputStream())
 
                     // 1. Handshake Versão 2 (com identificação explícita de dispositivo)
+                    // Transmitido SOMENTE após o túnel TLS estar 100% estabelecido e verificado
                     enviarHandshakeV2(out, deviceId, token)
                     out.flush()
 
@@ -121,6 +130,9 @@ class JarvisStreamClient(
                     } catch (ignored: Exception) {}
                     try {
                         socket?.close()
+                    } catch (ignored: Exception) {}
+                    try {
+                        rawSocket?.close()
                     } catch (ignored: Exception) {}
                     onDisconnected()
                 }
@@ -238,7 +250,13 @@ class JarvisStreamClient(
             throw CertificateException("Dispositivo não suporta TLS 1.2 ou superior. Protocolos suportados: ${supported.joinToString()}")
         }
         sslSocket.enabledProtocols = enabled.toTypedArray()
-        sslSocket.startHandshake()
+        try {
+            sslSocket.startHandshake()
+        } catch (e: Exception) {
+            try { sslSocket.close() } catch (ignored: Exception) {}
+            try { rawSocket.close() } catch (ignored: Exception) {}
+            throw e
+        }
         return sslSocket
     }
 
@@ -259,16 +277,20 @@ class JarvisStreamClient(
             if (cleanFp.isNullOrEmpty()) {
                 return Pair(false, "Validação estrita ativa: informe o Fingerprint SHA-256 do certificado.")
             }
+            var raw: Socket? = null
+            var ssl: SSLSocket? = null
             return try {
-                val raw = Socket()
+                raw = Socket()
                 raw.connect(InetSocketAddress(host, port), timeoutMs)
                 raw.soTimeout = timeoutMs
                 val client = JarvisStreamClient({}, {}, {})
-                val ssl = client.wrapTlsSocket(raw, host, port, cleanFp)
-                ssl.close()
-                Pair(true, "Handshake TLS validado com sucesso com Certificate Pinning estrito.")
+                ssl = client.wrapTlsSocket(raw, host, port, cleanFp)
+                Pair(true, "Handshake TLS 1.2+ concluído e Certificate Pinning SHA-256 verificado com sucesso.")
             } catch (e: Exception) {
                 Pair(false, e.localizedMessage ?: e.javaClass.simpleName)
+            } finally {
+                try { ssl?.close() } catch (ignored: Exception) {}
+                try { raw?.close() } catch (ignored: Exception) {}
             }
         }
     }

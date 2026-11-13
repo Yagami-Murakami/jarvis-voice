@@ -37,8 +37,14 @@ class PreferencesManager(context: Context) {
         set(value) = prefs.edit().putBoolean(KEY_USE_TLS, value).apply()
 
     var certFingerprint: String
-        get() = prefs.getString(KEY_CERT_FINGERPRINT, DEFAULT_CERT_FINGERPRINT) ?: DEFAULT_CERT_FINGERPRINT
-        set(value) = prefs.edit().putString(KEY_CERT_FINGERPRINT, value.trim()).apply()
+        get() {
+            val v = prefs.getString(KEY_CERT_FINGERPRINT, DEFAULT_CERT_FINGERPRINT)
+            return if (v.isNullOrBlank()) DEFAULT_CERT_FINGERPRINT else v.trim()
+        }
+        set(value) {
+            val sanitized = if (value.isBlank()) DEFAULT_CERT_FINGERPRINT else value.trim()
+            prefs.edit().putString(KEY_CERT_FINGERPRINT, sanitized).apply()
+        }
 
     var continuousListen: Boolean
         get() = prefs.getBoolean(KEY_CONTINUOUS_LISTEN, false)
