@@ -85,10 +85,12 @@ class SettingsActivity : AppCompatActivity() {
         val host = binding.etServerHost.text.toString().trim()
         val audioPort = binding.etAudioPort.text.toString().toIntOrNull() ?: 8088
         val displayPort = binding.etDisplayPort.text.toString().toIntOrNull() ?: 8080
+        val useTls = binding.switchTls.isChecked
+        val fp = binding.etCertFingerprint.text.toString().trim()
 
         binding.tvTestFeedback.visibility = View.VISIBLE
         binding.tvTestFeedback.setTextColor(Color.parseColor("#f59e0b"))
-        binding.tvTestFeedback.text = "Testando conexão com $host..."
+        binding.tvTestFeedback.text = "Testando conexão com $host (TLS=$useTls)..."
         binding.btnTestConnection.isEnabled = false
 
         lifecycleScope.launch(Dispatchers.IO) {
@@ -97,14 +99,20 @@ class SettingsActivity : AppCompatActivity() {
             var audioMsg = ""
             var displayMsg = ""
 
-            // 1. Testa Socket TCP da porta de Áudio
-            try {
-                Socket().use { s ->
-                    s.connect(InetSocketAddress(host, audioPort), 3000)
-                    audioOk = true
+            // 1. Testa Socket TCP / Handshake TLS da porta de Áudio
+            if (useTls) {
+                val (tlsOk, msg) = com.jarvis.voice.network.JarvisStreamClient.testTlsHandshake(host, audioPort, fp, 4000)
+                audioOk = tlsOk
+                audioMsg = msg
+            } else {
+                try {
+                    Socket().use { s ->
+                        s.connect(InetSocketAddress(host, audioPort), 3000)
+                        audioOk = true
+                    }
+                } catch (e: Exception) {
+                    audioMsg = e.localizedMessage ?: "Inacessível"
                 }
-            } catch (e: Exception) {
-                audioMsg = e.localizedMessage ?: "Inacessível"
             }
 
             // 2. Testa HTTP Display
@@ -121,18 +129,19 @@ class SettingsActivity : AppCompatActivity() {
 
             withContext(Dispatchers.Main) {
                 binding.btnTestConnection.isEnabled = true
+                val tlsLabel = if (useTls) "TLS 1.2+" else "TCP puro"
                 if (audioOk && displayOk) {
                     binding.tvTestFeedback.setTextColor(Color.parseColor("#10b981"))
-                    binding.tvTestFeedback.text = "SUCESSO: Áudio (TCP $audioPort) e Display (HTTP $displayPort) acessíveis!"
+                    binding.tvTestFeedback.text = "SUCESSO: Áudio ($tlsLabel :$audioPort) e Display (HTTP :$displayPort) validados!"
                 } else if (audioOk) {
                     binding.tvTestFeedback.setTextColor(Color.parseColor("#f59e0b"))
-                    binding.tvTestFeedback.text = "Áudio OK ($audioPort). Display HTTP indisponível: $displayMsg"
+                    binding.tvTestFeedback.text = "Áudio $tlsLabel OK (:$audioPort). Display HTTP indisponível: $displayMsg"
                 } else if (displayOk) {
                     binding.tvTestFeedback.setTextColor(Color.parseColor("#f59e0b"))
-                    binding.tvTestFeedback.text = "Display OK ($displayPort). Áudio TCP indisponível: $audioMsg"
+                    binding.tvTestFeedback.text = "Display OK (:$displayPort). Áudio indisponível: $audioMsg"
                 } else {
                     binding.tvTestFeedback.setTextColor(Color.parseColor("#ef4444"))
-                    binding.tvTestFeedback.text = "FALHA: Servidor não respondeu nas portas $audioPort e $displayPort."
+                    binding.tvTestFeedback.text = "FALHA: Servidor não respondeu nas portas $audioPort e $displayPort ($audioMsg)."
                 }
             }
         }

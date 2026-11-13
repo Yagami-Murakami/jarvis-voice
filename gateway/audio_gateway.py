@@ -603,6 +603,46 @@ def _registrar_log_ack_gateway(
         )
 
 
+def parse_allowed_tokens(raw: Any) -> Dict[str, str]:
+    """Analisa configuração de tokens individuais permitindo múltiplos formatos JSON ou dict:
+    - {"<token>": "<device_id>"} (formato padrão do Jarvis)
+    - {"<device_id>": "<token>"} (formato invertido intuitivo)
+    """
+    if not raw:
+        return {}
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except Exception as e:
+            logger.warning("Falha ao analisar JSON de tokens: %s", e)
+            return {}
+    elif isinstance(raw, dict):
+        data = raw
+    else:
+        return {}
+
+    result: Dict[str, str] = {}
+    if isinstance(data, dict):
+        for k, v in data.items():
+            if not isinstance(k, str) or not isinstance(v, str):
+                continue
+            k, v = k.strip(), v.strip()
+            if not k or not v:
+                continue
+            # Heurística segura: tokens no Jarvis possuem 32+ caracteres
+            if len(k) >= 32 and len(v) < 32:
+                result[k] = v
+            elif len(v) >= 32 and len(k) < 32:
+                result[v] = k
+            else:
+                # Se ambos têm >= 32 ou < 32, adota k como token conforme convenção
+                result[k] = v
+    return result
+
+
 class LgMicServer(threading.Thread):
     """Servidor TCP de recepção de áudio bruto PCM do smartphone LG-X230DSV e dispositivos móveis Jarvis."""
 
@@ -633,15 +673,12 @@ class LgMicServer(threading.Thread):
         self.ssl_context = None
 
         # Tokens permitidos por dispositivo (token -> device_id)
-        self.allowed_tokens: Dict[str, str] = dict(allowed_tokens or {})
+        self.allowed_tokens: Dict[str, str] = {}
+        if allowed_tokens:
+            self.allowed_tokens.update(parse_allowed_tokens(allowed_tokens))
         env_tokens = os.getenv("JARVIS_AUDIO_TOKENS")
         if env_tokens:
-            try:
-                parsed = json.loads(env_tokens)
-                if isinstance(parsed, dict):
-                    self.allowed_tokens.update(parsed)
-            except Exception as e:
-                logger.warning("Falha ao analisar JARVIS_AUDIO_TOKENS: %s", e)
+            self.allowed_tokens.update(parse_allowed_tokens(env_tokens))
 
         if self.tls_cert and self.tls_key and Path(self.tls_cert).is_file() and Path(self.tls_key).is_file():
             import ssl
@@ -707,8 +744,18 @@ class LgMicServer(threading.Thread):
                 if self._running:
                     logger.warning("Exceção no loop accept: %s", e)
 
+    def _verificar_token(self, token_str: str) -> Optional[str]:
+        """Valida token em tempo constante e retorna o device_id associado se válido."""
+        token_bytes = token_str.encode("utf-8")
+        for allowed_tok, dev in self.allowed_tokens.items():
+            if hmac.compare_digest(token_bytes, allowed_tok.encode("utf-8")):
+                return dev or "lg_mic"
+        if self.auth_token and hmac.compare_digest(token_bytes, self.auth_token.encode("utf-8")):
+            return "lg_mic"
+        return None
+
     def _atender_cliente(self, sock: socket.socket, ip: str, port: int) -> None:
-        sock.settimeout(12.0)
+        sock.settimeout(15.0)
         if self.ssl_context:
             try:
                 sock = self.ssl_context.wrap_socket(sock, server_side=True)
@@ -747,18 +794,15 @@ class LgMicServer(threading.Thread):
                 # Permite formato "device_id:token" ou token puro
                 if ":" in token_str:
                     dev_part, tok_part = token_str.split(":", 1)
-                    if tok_part in self.allowed_tokens:
-                        device_id = self.allowed_tokens[tok_part] or dev_part
+                    matched_dev = self._verificar_token(tok_part)
+                    if matched_dev:
+                        device_id = dev_part if matched_dev == "lg_mic" else matched_dev
                         autenticado = True
-                    elif self.auth_token and hmac.compare_digest(tok_part.encode("utf-8"), self.auth_token.encode("utf-8")):
-                        device_id = dev_part
+                else:
+                    matched_dev = self._verificar_token(token_str)
+                    if matched_dev:
+                        device_id = matched_dev
                         autenticado = True
-                elif token_str in self.allowed_tokens:
-                    device_id = self.allowed_tokens[token_str]
-                    autenticado = True
-                elif self.auth_token and hmac.compare_digest(token_bytes, self.auth_token.encode("utf-8")):
-                    device_id = "lg_mic"
-                    autenticado = True
 
                 if not autenticado:
                     logger.warning("Autenticação rejeitada para cliente %s: token incorreto", ip)
@@ -786,16 +830,13 @@ class LgMicServer(threading.Thread):
                 token_bytes = self._ler_exato(sock, token_len)
                 token_str = token_bytes.decode("utf-8", errors="replace")
 
+                matched_dev = self._verificar_token(token_str)
                 autenticado = False
-                if token_str in self.allowed_tokens:
-                    autenticado = True
-                    # Se o token estiver associado a um device_id específico, valida
-                    esperado = self.allowed_tokens[token_str]
-                    if esperado and esperado != device_id:
-                        logger.warning("Dispositivo %s tentou usar token reservado para %s", device_id, esperado)
-                        autenticado = False
-                elif self.auth_token and hmac.compare_digest(token_bytes, self.auth_token.encode("utf-8")):
-                    autenticado = True
+                if matched_dev:
+                    if matched_dev != "lg_mic" and matched_dev != device_id:
+                        logger.warning("Dispositivo %s tentou usar token reservado para %s", device_id, matched_dev)
+                    else:
+                        autenticado = True
 
                 if not autenticado:
                     logger.warning("Autenticação rejeitada para cliente %s (%s): token incorreto", ip, device_id)
@@ -834,6 +875,13 @@ class LgMicServer(threading.Thread):
                     client_vosk_rec = KaldiRecognizer(self.vosk_model, 16000, json.dumps(GRAMATICA, ensure_ascii=False))
                 except Exception as e:
                     logger.warning("Falha ao instanciar VoskRecognizer para %s: %s", device_id, e)
+
+            # Configura socket para conexão streaming prolongada com keepalive
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            except Exception:
+                pass
+            sock.settimeout(None)  # Não desconecta clientes móveis ociosos em modo PTT
 
             client_info = {
                 "device_id": device_id,
@@ -888,6 +936,7 @@ class LgMicServer(threading.Thread):
                 self.last_packet_time = now
 
                 echo_guard = (flags & 0x01) != 0
+                is_heartbeat = (flags & 0x02) != 0
                 client_info["echo_guard"] = echo_guard
                 self.echo_guard_active = echo_guard
 
@@ -896,9 +945,9 @@ class LgMicServer(threading.Thread):
                 client_info["current_rms"] = rms
                 self.current_rms = rms
 
-                # Processa áudio no Vosk dedicado do cliente se Echo Guard NÃO estiver ativo
+                # Processa áudio no Vosk dedicado do cliente se Echo Guard e Heartbeat NÃO estiverem ativos
                 rec_to_use = client_vosk_rec or self.vosk_rec
-                if not echo_guard and rec_to_use is not None:
+                if not echo_guard and not is_heartbeat and rec_to_use is not None:
                     if rec_to_use.AcceptWaveform(payload):
                         res = json.loads(rec_to_use.Result())
                         texto = res.get("text", "").strip()
@@ -908,10 +957,9 @@ class LgMicServer(threading.Thread):
         except (socket.timeout, socket.error, EOFError) as e:
             logger.info("Cliente %s (%s) desconectado: %s", ip, device_id, e)
         finally:
-            rec_to_use = client_vosk_rec or self.vosk_rec
-            if rec_to_use is not None:
+            if client_vosk_rec is not None:
                 try:
-                    res = json.loads(rec_to_use.FinalResult())
+                    res = json.loads(client_vosk_rec.FinalResult())
                     texto = res.get("text", "").strip()
                     if texto:
                         self._processar_texto_reconhecido(texto, source=device_id)
@@ -1493,11 +1541,13 @@ def main() -> None:
     parser.add_argument("--tls-key", default=os.environ.get("JARVIS_TLS_KEY", ""), help="Caminho da chave privada TLS")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Caminho do modelo Vosk")
     parser.add_argument("--ipc-socket", default=os.environ.get("JARVIS_IPC_SOCKET", DEFAULT_IPC_SOCKET), help="Caminho do socket UNIX IPC")
+    parser.add_argument("--tokens-json", default=os.environ.get("JARVIS_AUDIO_TOKENS", ""), help="JSON com mapeamento de tokens individuais por dispositivo")
 
     args = parser.parse_args()
     token = os.environ.get("JARVIS_AUDIO_TOKEN", "")
     if len(token) < 32 or len(token) > 256 or token == "jarvis-dual-mic-2026":
         parser.error("Configure JARVIS_AUDIO_TOKEN (32 a 256 caracteres aleatórios) em arquivo privado.")
+    tokens_dict = parse_allowed_tokens(args.tokens_json)
     app = AudioGatewayApp(
         tcp_port=args.tcp_port,
         http_port=args.http_port,
@@ -1507,6 +1557,7 @@ def main() -> None:
         tls_cert=args.tls_cert if args.tls_cert else None,
         tls_key=args.tls_key if args.tls_key else None,
         ipc_socket=args.ipc_socket,
+        allowed_tokens=tokens_dict,
     )
     app.start()
 

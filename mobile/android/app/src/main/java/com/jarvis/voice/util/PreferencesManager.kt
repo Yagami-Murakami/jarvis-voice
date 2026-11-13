@@ -33,11 +33,11 @@ class PreferencesManager(context: Context) {
         set(value) = prefs.edit().putString(KEY_DEVICE_TOKEN, value.trim()).apply()
 
     var useTls: Boolean
-        get() = prefs.getBoolean(KEY_USE_TLS, false)
+        get() = prefs.getBoolean(KEY_USE_TLS, true)
         set(value) = prefs.edit().putBoolean(KEY_USE_TLS, value).apply()
 
     var certFingerprint: String
-        get() = prefs.getString(KEY_CERT_FINGERPRINT, "") ?: ""
+        get() = prefs.getString(KEY_CERT_FINGERPRINT, DEFAULT_CERT_FINGERPRINT) ?: DEFAULT_CERT_FINGERPRINT
         set(value) = prefs.edit().putString(KEY_CERT_FINGERPRINT, value.trim()).apply()
 
     var continuousListen: Boolean
@@ -60,5 +60,6 @@ class PreferencesManager(context: Context) {
         const val DEFAULT_AUDIO_PORT = 8088
         const val DEFAULT_DISPLAY_PORT = 8080
         const val DEFAULT_DEVICE_ID = "celular_mobile"
+        const val DEFAULT_CERT_FINGERPRINT = "16D3EAD61DDB0C569275F3F68991798EC936D337378DCBEA73667519B632EE5C"
     }
 }
