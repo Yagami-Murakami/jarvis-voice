@@ -197,8 +197,11 @@ class JarvisStreamClient(
         port: Int,
         pinnedFingerprint: String?
     ): SSLSocket {
-        val sslContext = SSLContext.getInstance("TLSv1.2")
         val cleanFp = pinnedFingerprint?.trim()?.replace(":", "")?.replace(" ", "")?.lowercase(Locale.US)
+
+        if (cleanFp.isNullOrEmpty()) {
+            throw CertificateException("Validação estrita de TLS ativa: Certificate Pinning obrigatório. Nenhum fingerprint SHA-256 configurado.")
+        }
 
         val trustManager = object : X509TrustManager {
             override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
@@ -212,22 +215,29 @@ class JarvisStreamClient(
                 val digest = md.digest(serverCert.encoded)
                 val certFp = digest.joinToString("") { "%02x".format(it) }
 
-                if (!cleanFp.isNullOrEmpty()) {
-                    if (!certFp.equals(cleanFp, ignoreCase = true)) {
-                        throw CertificateException("Fingerprint do certificado divergente: esperado=$cleanFp recebido=$certFp")
-                    }
-                } else {
-                    Log.w(TAG, "Conexão TLS em LAN sem pinning estrito. Fingerprint do certificado: $certFp")
+                if (!certFp.equals(cleanFp, ignoreCase = true)) {
+                    throw CertificateException("Fingerprint do certificado divergente: esperado=$cleanFp recebido=$certFp")
                 }
             }
 
             override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
         }
-        sslContext.init(null, arrayOf<TrustManager>(trustManager), null)
+
+        val sslContext = SSLContext.getInstance("TLS")
+        sslContext.init(null, arrayOf<TrustManager>(trustManager), java.security.SecureRandom())
 
         val factory = sslContext.socketFactory
         val sslSocket = factory.createSocket(rawSocket, host, port, true) as SSLSocket
-        sslSocket.enabledProtocols = arrayOf("TLSv1.2", "TLSv1.3")
+
+        // Negociação TLS compatível com Android 6.0 (API 23) até Android 14+ (API 34)
+        // Utiliza apenas protocolos modernos suportados pela stack do dispositivo
+        val supported = sslSocket.supportedProtocols.toList()
+        val desired = listOf("TLSv1.3", "TLSv1.2")
+        val enabled = desired.filter { it in supported }
+        if (enabled.isEmpty()) {
+            throw CertificateException("Dispositivo não suporta TLS 1.2 ou superior. Protocolos suportados: ${supported.joinToString()}")
+        }
+        sslSocket.enabledProtocols = enabled.toTypedArray()
         sslSocket.startHandshake()
         return sslSocket
     }
@@ -245,14 +255,18 @@ class JarvisStreamClient(
         private const val HEARTBEAT_INTERVAL_MS = 4000L
 
         fun testTlsHandshake(host: String, port: Int, pinnedFingerprint: String?, timeoutMs: Int = 4000): Pair<Boolean, String> {
+            val cleanFp = pinnedFingerprint?.trim()?.replace(":", "")?.replace(" ", "")?.lowercase(Locale.US)
+            if (cleanFp.isNullOrEmpty()) {
+                return Pair(false, "Validação estrita ativa: informe o Fingerprint SHA-256 do certificado.")
+            }
             return try {
                 val raw = Socket()
                 raw.connect(InetSocketAddress(host, port), timeoutMs)
                 raw.soTimeout = timeoutMs
                 val client = JarvisStreamClient({}, {}, {})
-                val ssl = client.wrapTlsSocket(raw, host, port, pinnedFingerprint)
+                val ssl = client.wrapTlsSocket(raw, host, port, cleanFp)
                 ssl.close()
-                Pair(true, "Handshake TLS 1.2+ concluído com sucesso")
+                Pair(true, "Handshake TLS validado com sucesso com Certificate Pinning estrito.")
             } catch (e: Exception) {
                 Pair(false, e.localizedMessage ?: e.javaClass.simpleName)
             }

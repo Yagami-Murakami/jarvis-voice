@@ -2,6 +2,7 @@ package com.jarvis.voice.ui
 
 import android.graphics.Color
 import android.os.Bundle
+import android.text.method.PasswordTransformationMethod
 import android.view.View
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -26,6 +27,9 @@ class SettingsActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         prefs = PreferencesManager(this)
+
+        // Mascarar campo de token individual para evitar exposição visual de credencial
+        binding.etDeviceToken.transformationMethod = PasswordTransformationMethod.getInstance()
 
         carregarPreferencias()
         configurarListeners()
@@ -66,6 +70,16 @@ class SettingsActivity : AppCompatActivity() {
 
         if (host.isEmpty()) {
             Toast.makeText(this, "Informe o endereço IP do servidor.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (useTls && fp.isEmpty()) {
+            Toast.makeText(this, "Validação estrita de TLS ativa: informe o Fingerprint SHA-256 do certificado.", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        if (token.isNotEmpty() && token.length < 32) {
+            Toast.makeText(this, "O token de segurança deve possuir pelo menos 32 caracteres.", Toast.LENGTH_SHORT).show()
             return
         }
 

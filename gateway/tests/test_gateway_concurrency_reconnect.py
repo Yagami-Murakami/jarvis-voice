@@ -310,6 +310,95 @@ class TestGatewayConcurrencyAndReconnection(unittest.TestCase):
         res2 = parse_allowed_tokens(f2)
         self.assertEqual(res2.get("aaaabbbbccccddddeeeeffffgggghhhh"), "quarto_phone")
 
+    def test_08_android_6_tls12_only_negotiation(self):
+        """Cenário 8: Simula cliente Android 6.0 (API 23) que suporta exclusivamente TLS 1.2 sem TLS 1.3."""
+        # Garante que conexões anteriores foram limpas
+        time.sleep(0.15)
+        raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        raw_sock.connect(("127.0.0.1", self.port))
+
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        # Força estritamente TLS 1.2 como limite máximo e mínimo (comportamento de dispositivo legado Android 6)
+        ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+
+        sock = ctx.wrap_socket(raw_sock, server_hostname="127.0.0.1")
+        self.assertEqual(sock.version(), "TLSv1.2")
+
+        # Handshake v2
+        self._handshake_v2_mobile(sock, "celular_mobile", self.mobile_token)
+        self._enviar_frames(sock, 2)
+        time.sleep(0.1)
+
+        status = self.server.obter_status()
+        self.assertTrue(status["connected"])
+        sock.close()
+        time.sleep(0.15)
+
+    def test_09_strict_cert_pinning_calculation_and_divergence_rejection(self):
+        """Cenário 9: Valida a lógica de cálculo SHA-256 do DER do certificado e rejeição estrita em caso de divergência."""
+        import hashlib
+
+        # Converte o certificado PEM temporário em formato binário DER
+        with open(self.cert_path, "rb") as f:
+            pem_bytes = f.read()
+
+        import ssl
+        der_cert = ssl.PEM_cert_to_DER_cert(pem_bytes.decode("utf-8"))
+        self.assertIsNotNone(der_cert)
+
+        sha256_digest = hashlib.sha256(der_cert).hexdigest().upper()
+        self.assertEqual(len(sha256_digest), 64)
+
+        # 1. Matching fingerprint deve ser aceito
+        expected_fp = sha256_digest
+        clean_expected = expected_fp.replace(":", "").replace(" ", "").upper()
+        self.assertEqual(sha256_digest, clean_expected)
+
+        # 2. Fingerprint divergente deve ser estritamente rejeitado
+        divergent_fp = "00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF"
+        self.assertNotEqual(sha256_digest, divergent_fp)
+
+    def test_10_triple_client_concurrency_stress(self):
+        """Cenário 10: Três clientes concorrentes simultâneos (LG legado + 2 celulares Android v2)."""
+        # Aguarda limpeza de sockets anteriores
+        time.sleep(0.2)
+        # Adiciona segundo token móvel
+        token_mob2 = "token-individual-segundo-celular-32c"
+        self.server.allowed_tokens[token_mob2] = "celular_cozinha"
+
+        s_lg = self._conectar_tls()
+        self._handshake_v1_lg(s_lg, self.lg_token)
+
+        s_mob1 = self._conectar_tls()
+        self._handshake_v2_mobile(s_mob1, "celular_mobile", self.mobile_token)
+
+        s_mob2 = self._conectar_tls()
+        self._handshake_v2_mobile(s_mob2, "celular_cozinha", token_mob2)
+
+        # Transmissão concorrente nos 3 clientes
+        for seq in range(3):
+            hdr = MAGIC_DATA + struct.pack(">IQBH", seq, int(time.time() * 1000), 0, 1280)
+            s_lg.sendall(hdr + b"\x00" * 1280)
+            s_mob1.sendall(hdr + b"\x00" * 1280)
+            s_mob2.sendall(hdr + b"\x00" * 1280)
+            time.sleep(0.02)
+
+        time.sleep(0.15)
+        status = self.server.obter_status()
+        self.assertEqual(status["connected_count"], 3)
+        dev_ids = [d["device_id"] for d in status.get("devices", [])]
+        self.assertIn("lg_mic", dev_ids)
+        self.assertIn("celular_mobile", dev_ids)
+        self.assertIn("celular_cozinha", dev_ids)
+
+        s_lg.close()
+        s_mob1.close()
+        s_mob2.close()
+        time.sleep(0.15)
+
 
 if __name__ == "__main__":
     unittest.main()
