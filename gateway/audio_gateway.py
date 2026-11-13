@@ -45,6 +45,20 @@ MAGIC_DATA = b"DATA"
 DEFAULT_TOKEN = ""  # Sem segredo embutido; configure JARVIS_AUDIO_TOKEN localmente
 DEFAULT_MODEL = "/opt/jarvis-voice/vosk-model-small-pt-0.3"
 
+
+# Localizar o modulo PC Control na producao ou no laboratorio
+for _raiz_pc in (
+    Path(__file__).resolve().parent.parent,
+    Path(__file__).resolve().parent.parent.parent,
+):
+    if (
+        (_raiz_pc / "pc_control" / "catalog.py").is_file()
+        and (_raiz_pc / "pc_control" / "authorization.py").is_file()
+    ):
+        if str(_raiz_pc) not in sys.path:
+            sys.path.insert(0, str(_raiz_pc))
+        break
+
 try:
     from pc_control.catalog import (
         ALL_COMMANDS,
@@ -94,6 +108,45 @@ except ImportError:
             return act == "desligar"
         def is_pc_control_action(act: str) -> bool:
             return False
+
+
+
+
+# INICIO FILTRO PC CONTROL - LABORATORIO
+_jarvis_acoes_ananuke = {
+    "status_computador",
+    "abrir_navegador",
+    "abrir_youtube",
+    "abrir_terminal",
+    "aumentar_volume",
+    "diminuir_volume",
+    "silenciar_audio",
+    "bloquear",
+    "mostrar_area_de_trabalho",
+}
+_jarvis_frases_originais = set(COMANDOS)
+COMANDOS = {
+    frase: (acao, alvo)
+    for frase, (acao, alvo) in COMANDOS.items()
+    if acao in ("ligar", "desligar")
+    or (alvo == "ananuke" and acao in _jarvis_acoes_ananuke)
+}
+GRAMATICA = [
+    frase for frase in GRAMATICA
+    if frase not in _jarvis_frases_originais or frase in COMANDOS
+]
+# FIM FILTRO PC CONTROL - LABORATORIO
+
+
+# FILTRO VOSK COMPATIVEL - LABORATORIO
+_palavras_ausentes_vosk = {
+    "ananuke", "mutar", "reinicializacao"
+}
+GRAMATICA = [
+    frase for frase in GRAMATICA
+    if not _palavras_ausentes_vosk.intersection(frase.split())
+]
+# FIM FILTRO VOSK
 
 
 
