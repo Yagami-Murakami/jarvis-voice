@@ -19,7 +19,7 @@ GATEWAY_DIR="/opt/jarvis-voice/gateway"
 ENV_FILE="/etc/jarvis/audio-gateway.env"
 SECRETS_DIR="/etc/jarvis/secrets"
 SERVICE_NAME="jarvis-audio-gateway.service"
-SRC_GATEWAY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/gateway/audio_gateway.py"
+SRC_GATEWAY="${JARVIS_SRC_GATEWAY:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/gateway/audio_gateway.py}"
 
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 BACKUP_MANIFEST="${GATEWAY_DIR}/.last_backup_manifest"
@@ -43,6 +43,12 @@ fi
 
 if [ ! -f "$SRC_GATEWAY" ]; then
     echo "[ERRO] Código-fonte do gateway não encontrado em: $SRC_GATEWAY" >&2
+    exit 1
+fi
+
+if [ -f "${GATEWAY_DIR}/audio_gateway.py" ] && [ "$(readlink -f "$SRC_GATEWAY")" = "$(readlink -f "${GATEWAY_DIR}/audio_gateway.py")" ]; then
+    echo "[ERRO] SRC_GATEWAY ($SRC_GATEWAY) aponta para o mesmo arquivo do destino de produção." >&2
+    echo "       Defina JARVIS_SRC_GATEWAY com o caminho do novo código a ser implantado." >&2
     exit 1
 fi
 
